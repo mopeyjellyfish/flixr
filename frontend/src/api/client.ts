@@ -1,4 +1,4 @@
-import { ApiError, type CatalogItem, type CatalogPage, type FilmDetail, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type CatalogItem, type CatalogPage, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -39,7 +39,6 @@ export const api = {
   home: (offset = 0) => request<CatalogPage>(`/catalog/home?offset=${offset}&limit=48`),
   search: (query: string, offset = 0) => request<CatalogPage>(`/catalog/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=48`),
   item: (id: string) => request<CatalogItem>(`/catalog/items/${id}`),
-  film: (id: string) => request<FilmDetail>(`/catalog/films/${id}`),
   series: (id: string) => request<SeriesDetail>(`/catalog/series/${id}`),
   viewer: (media: 'all' | 'film' | 'series') => request<ViewerModel>(`/catalog/view?media=${media}`),
   saveViewerPreference: (media: 'all' | 'film' | 'series', preference: ViewerPreference) => request<ViewerPreference>(`/catalog/preferences/${media}`, { method: 'PUT', body: JSON.stringify(preference) }),

@@ -28,7 +28,6 @@ export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSecti
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
-export type FilmDetail = CatalogItem & { kind: 'film' };
 export type OwnerRoots = { films: string; tv: string };
 export type TMDBSettings = { configured: boolean };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };

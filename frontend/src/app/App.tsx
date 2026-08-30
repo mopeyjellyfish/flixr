@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import type { SetupStatus } from '../core/api';
 import { Setup, OwnerLogin } from '../features/setup/Setup';
@@ -23,21 +23,21 @@ function routeFor(path = window.location.pathname): Route {
 export function App() {
   const [status, setStatus] = useState<SetupStatus>();
   const [route, setRoute] = useState<Route>(routeFor());
-  const [path, setPath] = useState(window.location.pathname);
+  const [path, setPath] = useState(() => `${window.location.pathname}${window.location.search}`);
   const [restoreFocusID, setRestoreFocusID] = useState<string>();
   const [lastBrowsePath, setLastBrowsePath] = useState(() => routeFor() === 'browse' && !window.location.pathname.startsWith('/detail/') ? `${window.location.pathname}${window.location.search}` : '/home');
-  const navigate = (nextPath: string, replace = false) => {
+  const navigate = useCallback((nextPath: string, replace = false) => {
     window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
     setPath(nextPath);
     const nextRoute = routeFor(nextPath);
     if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
     setRoute(nextRoute);
-  };
-  const load = () => api.setupStatus().then((value) => {
+  }, []);
+  const load = useCallback(() => api.setupStatus().then((value) => {
     setStatus(value);
     const requested = routeFor();
     if (requested === 'loading' || (!value.claimed && requested !== 'setup') || (value.claimed && requested === 'setup')) navigate(value.claimed ? '/profiles' : '/setup', true);
-  }).catch(() => setRoute('failure'));
+  }).catch(() => setRoute('failure')), [navigate]);
   useEffect(() => {
     void load();
     const popstate = () => {
@@ -50,7 +50,7 @@ export function App() {
     };
     window.addEventListener('popstate', popstate);
     return () => window.removeEventListener('popstate', popstate);
-  }, []);
+  }, [load]);
   if (route === 'loading') return <main><p role="status">Loading local Flixr…</p></main>;
   if (route === 'failure') return <main className="auth-panel"><h1>Flixr is unavailable.</h1><p role="alert">The local server did not respond.</p><button onClick={() => void load()}>Try again</button></main>;
   if (route === 'setup' && status) return <main className="setup-page"><Setup readiness={status.readiness} onCompleted={() => navigate('/home')} /></main>;
@@ -62,7 +62,7 @@ export function App() {
   }
   if (route === 'browse') {
     const browsePath = path.startsWith('/detail/') ? lastBrowsePath : path;
-    return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={browsePath.startsWith('/search') ? 'search' : browsePath.startsWith('/movies') ? 'movies' : browsePath.startsWith('/tv') ? 'tv' : 'home'} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} restoreFocusID={restoreFocusID} onFocusRestored={() => setRestoreFocusID(undefined)} onNavigate={navigate} /></Suspense>;
+    return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={browsePath.startsWith('/search') ? 'search' : browsePath.startsWith('/movies') ? 'movies' : browsePath.startsWith('/tv') ? 'tv' : 'home'} query={new URLSearchParams(browsePath.split('?')[1] ?? '').get('q') ?? ''} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} restoreFocusID={restoreFocusID} onFocusRestored={() => setRestoreFocusID(undefined)} onNavigate={navigate} /></Suspense>;
   }
   return <ProfileChooser owner={() => navigate('/login')} onSelected={() => navigate('/home')} />;
 }
