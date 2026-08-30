@@ -11,6 +11,7 @@ export type CatalogItem = {
   local_only: boolean;
   container?: string;
   video_codec?: string;
+  video_profile?: string;
   audio_codec?: string;
   duration_ms?: number;
   year?: number;
@@ -25,6 +26,9 @@ export type FilmDetail = CatalogItem & { kind: 'film' };
 export type OwnerRoots = { films: string; tv: string };
 export type TMDBSettings = { configured: boolean };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };
+export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
+export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
+export type PlaybackStatus = { settings: PlaybackSettings; generations: PlaybackGeneration[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; failed: number; unmatched: number; message?: string; finished_at?: number };
 export type ApiErrorCode =
   | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'pin_rate_limited'
@@ -33,7 +37,22 @@ export type ApiErrorCode =
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed';
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed'
+  | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
+  | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found'
+  | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed';
+export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
+export type PlaybackPlan = {
+  plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string };
+  session_id: string;
+  media_url: string;
+  heartbeat_url: string;
+  seek_url: string;
+  stop_url: string;
+  resume_ms: number;
+  stream_offset_ms: number;
+  expires_at: number;
+};
 export class ApiError extends Error {
   constructor(public readonly code: ApiErrorCode, public readonly status: number) {
     super(messageFor(code));
@@ -54,5 +73,14 @@ export function messageFor(code: string): string {
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
     scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
+    playback_unsupported: 'This title is not compatible with this browser.',
+    ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
+    playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
+    playback_preparing: 'This local stream is already preparing. Try again in a moment.',
+    playback_failed: 'Flixr could not prepare this title for playback.',
+    invalid_playback_settings: 'Playback limits are invalid. Check the directory and byte limits.',
+    playback_active: 'Stop active compatibility streams before changing playback limits.',
+    playback_settings_failed: 'Flixr could not save playback settings.',
+    playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }

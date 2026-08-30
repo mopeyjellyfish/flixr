@@ -11,10 +11,12 @@ type BrowseProps = {
   mode?: Mode;
   detailID?: string;
   onNavigate?: (path: string) => void;
+  restoreFocusID?: string;
+  onFocusRestored?: () => void;
 };
 type OpenDetail = (item: CatalogItem, opener: HTMLButtonElement) => void;
 
-export function Browse({ onExit, mode: initialMode = 'home', detailID, onNavigate }: BrowseProps) {
+export function Browse({ onExit, mode: initialMode = 'home', detailID, restoreFocusID, onFocusRestored, onNavigate }: BrowseProps) {
   const [mode, setMode] = useState<Mode>(initialMode);
   const [query, setQuery] = useState(new URLSearchParams(window.location.search).get('q') ?? '');
   const [items, setItems] = useState<CatalogItem[]>([]);
@@ -67,6 +69,17 @@ export function Browse({ onExit, mode: initialMode = 'home', detailID, onNavigat
   useEffect(() => {
     if (detail) window.setTimeout(() => dialog.current?.showModal(), 0);
   }, [detail]);
+
+  useEffect(() => {
+    if (state !== 'ready' || !restoreFocusID) return;
+    const timer = window.setTimeout(() => {
+      const catalogTarget = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-catalog-id]')).find((button) => button.dataset.catalogId === restoreFocusID);
+      const target = catalogTarget ?? document.querySelector<HTMLButtonElement>('main button');
+      target?.focus();
+      onFocusRestored?.();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [onFocusRestored, restoreFocusID, state]);
 
   const loadDetail = (item: CatalogItem) => {
     setDetail(item);
@@ -128,7 +141,7 @@ export function Browse({ onExit, mode: initialMode = 'home', detailID, onNavigat
       <CatalogState state={state} mode={mode} query={query} onRetry={() => setRetry((value) => value + 1)} />
       {state === 'ready' && (mode === 'home' ? <HomeRails items={items} onOpen={open} /> : <Rail label="Search results" items={items} onOpen={open} />)}
       {state === 'ready' && <CatalogFooter items={items} total={total} next={next} onLoadMore={() => void loadMore()} />}
-      {detail && <DetailDialog detail={detail} dialog={dialog} onClose={close} onRestoreFocus={() => window.setTimeout(() => opener.current?.focus(), 0)} />}
+      {detail && <DetailDialog detail={detail} dialog={dialog} onClose={close} onPlay={(id) => onNavigate?.(`/play/${encodeURIComponent(id)}`)} onRestoreFocus={() => window.setTimeout(() => opener.current?.focus(), 0)} />}
     </main>
   );
 }
@@ -141,10 +154,10 @@ function Hero({ focal, mode, query, onOpen, onQueryChange }: { focal?: CatalogIt
       {focal.year && <p>{focal.year}</p>}
       <p>{focal.synopsis || (focal.local_only ? 'Local metadata is available offline.' : 'Metadata is ready on this local server.')}</p>
       <p>{focal.local_only ? 'Local-only metadata' : 'Enriched metadata'}</p>
-      <button className="primary" onClick={(event) => onOpen(focal, event.currentTarget)}>View details for {focal.title}</button>
+      <button data-catalog-id={focal.id} className="primary" onClick={(event) => onOpen(focal, event.currentTarget)}>View details for {focal.title}</button>
     </> : <h1>{mode === 'home' ? 'Your local cinema.' : 'Find something local.'}</h1>}
     {mode === 'search' && <label>Search titles<input autoFocus value={query} onChange={(event) => onQueryChange(event.target.value)} /></label>}
-    <p className="quiet-status">Local catalog · playback comes next</p>
+    <p className="quiet-status">Local catalog · playback ready</p>
   </section>;
 }
 
@@ -159,7 +172,7 @@ function CatalogFooter({ items, total, next, onLoadMore }: { items: CatalogItem[
   return <div><span>{total === undefined ? `${items.length} loaded` : `${items.length} of ${total} titles`}</span>{next !== null && next !== undefined ? <button className="load-more" onClick={onLoadMore}>Load more titles</button> : <p role="status">End of catalog</p>}</div>;
 }
 
-function DetailDialog({ detail, dialog, onClose, onRestoreFocus }: { detail: Detail; dialog: React.RefObject<HTMLDialogElement | null>; onClose: () => void; onRestoreFocus: () => void }) {
+function DetailDialog({ detail, dialog, onClose, onPlay, onRestoreFocus }: { detail: Detail; dialog: React.RefObject<HTMLDialogElement | null>; onClose: () => void; onPlay: (id: string) => void; onRestoreFocus: () => void }) {
   return <dialog ref={dialog} aria-labelledby="detail-title" onClose={onRestoreFocus}><article className="detail">
     <button autoFocus onClick={onClose}>Close details</button>
     <p className="eyebrow">{kindLabel(detail)}</p>
@@ -167,9 +180,9 @@ function DetailDialog({ detail, dialog, onClose, onRestoreFocus }: { detail: Det
     {detail.year && <p>{detail.year}</p>}
     <p>{detail.synopsis || (detail.local_only ? 'Local metadata is available offline. This title may need owner matching review.' : 'Metadata is ready on this local server.')}</p>
     <p>{detail.local_only ? 'Local-only metadata' : 'Enriched metadata'}</p>
-    {detail.kind === 'film' && <MediaMetadata item={detail} />}
-    {detail.kind === 'series' && 'seasons' in detail && <SeriesEpisodes detail={detail} />}
-    <button className="primary" disabled>Playback arrives in the next local update</button>
+    {(detail.kind === 'film' || detail.kind === 'episode') && <MediaMetadata item={detail} />}
+    {detail.kind === 'series' && 'seasons' in detail && <SeriesEpisodes detail={detail} onPlay={onPlay} />}
+    {(detail.kind === 'film' || detail.kind === 'episode') && <button className="primary" onClick={() => onPlay(detail.id)}>Play {detail.title}</button>}
   </article></dialog>;
 }
 
@@ -177,8 +190,8 @@ function MediaMetadata({ item }: { item: CatalogItem }) {
   return <p>Media: {[item.container, item.video_codec, item.audio_codec].filter(Boolean).join(' · ') || 'Local media metadata unavailable'}</p>;
 }
 
-function SeriesEpisodes({ detail }: { detail: SeriesDetail }) {
-  return <section aria-label="Episodes">{[...detail.seasons].sort((a, b) => a.number - b.number).map((season) => <section key={season.id}><h3>Season {season.number}</h3>{[...season.episodes].sort((a, b) => a.episode - b.episode).map((episode) => <button key={episode.id} type="button">S{episode.season} E{episode.episode} {episode.title}{episode.local_only ? ' · Local metadata' : ''}</button>)}</section>)}</section>;
+function SeriesEpisodes({ detail, onPlay }: { detail: SeriesDetail; onPlay: (id: string) => void }) {
+  return <section aria-label="Episodes">{[...detail.seasons].sort((a, b) => a.number - b.number).map((season) => <section key={season.id}><h3>Season {season.number}</h3>{[...season.episodes].sort((a, b) => a.episode - b.episode).map((episode) => <button key={episode.id} type="button" onClick={() => onPlay(episode.id)}>Play S{episode.season} E{episode.episode} {episode.title}{episode.local_only ? ' · Local metadata' : ''}</button>)}</section>)}</section>;
 }
 
 function kindLabel(item: CatalogItem) {
@@ -192,7 +205,7 @@ function Rail({ label, items, onOpen }: { label: string; items: CatalogItem[]; o
   const cards = visible.length ? visible.map((virtual) => ({ index: virtual.index, start: virtual.start })) : items.slice(0, 8).map((_, index) => ({ index, start: index * 236 }));
   return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><span>{items.length} title{items.length === 1 ? '' : 's'}</span></div><div className="rail" ref={parentRef} data-rail><div className="rail-inner" style={{ width: `${virtualizer.getTotalSize()}px` }}>{cards.map((virtual) => {
     const item = items[virtual.index];
-    return <button data-testid={`card-${item.id}`} data-card className="card" key={item.id} style={{ transform: `translateX(${virtual.start}px)`, backgroundImage: item.poster ? `linear-gradient(#05070c22, #05070ccc), url(${item.poster})` : undefined }} onKeyDown={moveRailFocus} onClick={(event) => onOpen(item, event.currentTarget)}><span>{kindLabel(item)}</span><strong>{item.title}</strong>{item.year && <small>{item.year}</small>}{item.local_only && <small>Local metadata</small>}</button>;
+    return <button data-testid={`card-${item.id}`} data-catalog-id={item.id} data-card className="card" key={item.id} style={{ transform: `translateX(${virtual.start}px)`, backgroundImage: item.poster ? `linear-gradient(#05070c22, #05070ccc), url(${item.poster})` : undefined }} onKeyDown={moveRailFocus} onClick={(event) => onOpen(item, event.currentTarget)}><span>{kindLabel(item)}</span><strong>{item.title}</strong>{item.year && <small>{item.year}</small>}{item.local_only && <small>Local metadata</small>}</button>;
   })}</div></div></section>;
 }
 
