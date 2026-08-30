@@ -6,18 +6,18 @@
 - Product states: setup, owner operations, profile selection, home, search, film detail, series detail, local-only metadata, partial scan, and request failure.
 - Media and artwork: generated synthetic fixtures and original geometric SVG artwork only.
 
-Local Chromium mocked and production-executable evidence passed. Firefox and WebKit projects are defined in CI, but their runs are pending. No Firefox or WebKit pass is claimed until CI uploads an artifact.
+Local Chromium mocked and production-executable evidence passed. The Chromium, Firefox, and WebKit mocked matrix also passed in GitHub Actions run [`33285726565`](https://github.com/mopeyjellyfish/flixr/actions/runs/33285726565), which uploaded the browser evidence artifacts.
 
 ## Evidence matrix
 
 | Route or flow | Viewport | State and interaction | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| `/setup` → `/owner` | 1920×1080, 1440×900, 1024×768, 390×844 | Claim the first owner, including missing-tool readiness | Local Chromium mocked pass; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
-| `/profiles` | All four named viewports | Select an open profile; reject an invalid PIN; show rate limiting | Local Chromium mocked pass; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
-| `/home` | All four named viewports | Populated film and series rails; focal title and visible details action; film and ordered episode details; close and restore focus | Local Chromium `populated-home.png` output; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
-| `/search` | All four named viewports | Empty query, no results, and one result after debounce | Local Chromium mocked pass; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
-| `/owner` | All four named viewports | Missing ffprobe, persisted roots, configured TMDB state, and partial scan | Local Chromium mocked pass; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
-| `/home` | All four named viewports | Local-only metadata and request failure | Local Chromium mocked pass; Firefox/WebKit CI projects pending | Local Chromium Pass; CI pending |
+| `/setup` → `/owner` | 1920×1080, 1440×900, 1024×768, 390×844 | Claim the first owner, including missing-tool readiness | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
+| `/profiles` | All four named viewports | Select an open profile; reject an invalid PIN; show rate limiting | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
+| `/home` | All four named viewports | Populated film and series rails; focal title and visible details action; film and ordered episode details; close and restore focus | Local Chromium `populated-home.png` output and CI Chromium/Firefox/WebKit artifacts | Pass |
+| `/search` | All four named viewports | Empty query, no results, and one result after debounce | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
+| `/owner` | All four named viewports | Missing ffprobe, persisted roots, configured TMDB state, and partial scan | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
+| `/home` | All four named viewports | Local-only metadata and request failure | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
 | Production executable | 1920×1080, 1440×900, 1024×768, 390×844 Chromium | Claim, save roots, scan three generated media files, create/select a profile, capture focal home, reload a series deep link, use browser Back, and search | `frontend/e2e/production.spec.ts`; `production-home-*.png`; `production-search-desktop.png` | Pass |
 | Production executable | 1440×900 and 390×844 Chrome | Existing durable catalog with one generated film and a two-episode generated series | Manual browser capture and accessibility snapshot | Pass |
 
@@ -47,4 +47,4 @@ The Playwright screenshots are generated under ignored `frontend/test-results/` 
 
 ## Result
 
-The Delivery Unit 1 mismatch ledger has no open blocker in the passed local Chromium mocked and production evidence. Firefox and WebKit CI evidence remains pending; the automated suites are defined to run against the production-style embedded executable for acceptance behavior.
+The Delivery Unit 1 mismatch ledger has no open blocker. The local Chromium mocked suite, CI Chromium/Firefox/WebKit mocked matrix, and embedded production-executable acceptance passed. CI preserves the mocked and production browser artifacts.
