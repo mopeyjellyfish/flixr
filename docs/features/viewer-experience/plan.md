@@ -192,7 +192,7 @@ Atomic commit: Editorial Stream viewer experience. Delivery unit 1.
 
 A new household member can identify the current destination, choose a row or grid, sort, add a title, inspect it, and understand whether it can play without reading instructions.
 
-## [ ] 004 — Package and prove `make demo`, then refresh the local preview
+## [x] 004 — Package and prove `make demo`, then refresh the local preview
 
 ### Outcome and requirement trace
 
@@ -201,6 +201,7 @@ A new household member can identify the current destination, choose a row or gri
 The demo uses a named data volume, publishes port 8787, explicitly sets `FLIXR_LISTEN_ADDR=0.0.0.0:8787` and `FLIXR_DEMO=1`, exposes startup logs (including the first-run token), and supports `make demo-down`. Demo activation is explicit; normal binaries and existing data directories are not seeded.
 
 After container proof, refresh the existing port 18789 preview with the verified binary and explicit demo activation. Preserve its current database before any reset or reseed. Because deployment and destructive reset are not authorized by plan approval, pause for explicit confirmation immediately before replacing preview data unless the human separately authorizes that action.
+Execution decision: Slice 004 code and proof are complete. The inherited human constraint requires separate deployment authority, so the port 18789 preview refresh remains explicitly deferred and is not part of this commit.
 
 ### Seam and files
 

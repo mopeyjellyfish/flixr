@@ -43,6 +43,19 @@ Flixr prints a one-time setup token. Open the displayed local address and use th
 
 By default, Flixr stores data in `./flixr-data` and listens on `127.0.0.1:8787`.
 
+## Docker demo
+
+The demo needs Docker Desktop or Docker Engine with the Compose plugin. The optional smoke command also needs `curl` and `jq`. The image builds the React assets, embeds them in a static pure-Go SQLite binary, and runs that binary as a non-root user on Alpine. The runtime image contains only CA certificates and FFmpeg (which provides `ffprobe`) plus their runtime libraries; Node, npm, Go, and compiler packages stay in build stages.
+
+```bash
+make demo
+docker compose logs flixr # copy the printed "Flixr setup token"
+```
+
+Open http://localhost:8787, use that one-time token to create the owner, then create and select a profile. The explicit `FLIXR_DEMO=true` Compose setting seeds a presentation fixture with 20 film titles and 20 series titles. They are metadata-only demo records, have no media files, and cannot play. Normal startup never seeds them.
+
+`make demo-down` stops the demo and keeps its `flixr-demo-data` volume. `make demo-reset` removes only that demo volume, so the next `make demo` starts with a new setup token. `make demo-smoke` starts the demo and verifies setup readiness, the seeded viewer API, non-playability, and persistence across a restart. The smoke requires a fresh volume; run `make demo-reset` first if you previously claimed the demo.
+
 ## Bootstrap configuration
 
 Set bootstrap values with environment variables before you start Flixr:
@@ -53,6 +66,7 @@ Set bootstrap values with environment variables before you start Flixr:
 | `FLIXR_LISTEN_ADDR` | Override the HTTP listen address. |
 | `FLIXR_TLS_CERT` | Set the TLS certificate path. Use with `FLIXR_TLS_KEY`. |
 | `FLIXR_TLS_KEY` | Set the TLS private-key path. Use with `FLIXR_TLS_CERT`. |
+| `FLIXR_DEMO` | Set to `true` only to explicitly seed the metadata-only demo catalog. |
 
 The owner configures library roots and the optional TMDB token in the web interface. Flixr never returns the stored TMDB token to a client.
 
@@ -95,4 +109,4 @@ The production browser suite runs against the built `flixr` executable. See `.gi
 
 Flixr is available under the MIT License. See `LICENSE`.
 
-FFmpeg and ffprobe are external runtime dependencies. They are not bundled with Flixr.
+Native builds require FFmpeg and ffprobe as external runtime dependencies. The Docker demo installs the Alpine FFmpeg package in its runtime image.

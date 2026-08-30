@@ -1,0 +1,14 @@
+.git
+.github
+.worktrees
+bin
+backend/flixr
+backend/testdata
+backend/web/assets
+flixr-data
+*.db*
+frontend/node_modules
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+frontend/blob-report
