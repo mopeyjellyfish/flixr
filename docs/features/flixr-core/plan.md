@@ -9,9 +9,9 @@ This plan delivers every accepted release-one vertical slice from `docs/features
 ## Review evidence
 
 - **Applicability:** Go-targeted. The plan creates a Go 1.25 module, HTTP server, SQLite persistence, filesystem scanner, FFmpeg process manager, WebSocket screen control, and lifecycle/concurrency behavior.
-- **Fixed document:** `docs/features/flixr-core/plan.md`, accepted revision approved before implementation.
-- **Status:** the final mandatory fixed-document Go specification review is **Approved** with no blocking issues or open questions.
-- **Invalidation:** a change to the proposed solution, delivery boundaries, authority, or acceptance criteria requires a replacement review. Wording-only changes do not.
+- **Fixed document:** `docs/features/flixr-core/plan.md`, accepted replacement with the `backend/` and `frontend/` repository split.
+- **Status:** replacement fixed-document review **Approved with Questions** with no blocking issues. The user approved this complete replacement plan and authorized Delivery Unit 1. The non-blocking Playwright target question is resolved below: acceptance browser suites run against the production-style `flixr` executable serving copied, embedded frontend assets.
+- **Invalidation:** the accepted repository/module structure changed after implementation evidence showed `go test ./...` traversing `web/node_modules`; this invalidated the prior review and whole-plan approval. Wording-only changes after replacement review do not invalidate it.
 
 ## Execution mode
 
@@ -22,24 +22,25 @@ Approval never authorizes merge, release, deployment, destructive cleanup, hoste
 ## Repository and implementation conventions
 
 - Keep the accepted branch and worktree for planning and Delivery Unit 1: branch `feat/product-pitch`, worktree `/Users/david/code/personal/flixr/.worktrees/feat-product-pitch`.
-- Use one root Go module, one `web/` npm application, and one embedded production web build. Do not create a monorepo package graph for hypothetical native clients.
-- Compose concrete `Catalog`, `Household`, `Playback`, `Screens`, and `Web` values in `cmd/flixr/main.go`. Consumer-owned interfaces are permitted only for the accepted real alternatives: metadata lookup and process execution in tests.
-- Use one-level top-level Go packages: `catalog/`, `household/`, `playback/`, `screens/`, and `webserver/`. The `webserver` package is the pitch's Web module; the separate `web/` directory is the React application. Keep focused `config/` and `sqlite/` mechanism packages at the same level. Do not add `internal/` path depth or architecture-layer directories. The `sqlite` package owns connection policy, transaction helpers, and the single ordered embedded migration set under `sqlite/migrations/`; all domain DDL enters that directory, while domain query SQL and decisions remain in their owning package. The `config` package reads only bootstrap environment values; owner settings persist through the household/owner surface.
-- Keep browser-independent TypeScript contracts and state machines under `web/src/core/` only where release-one behavior exercises them. Keep DOM, HLS, Cast, AirPlay, and focus implementations behind web-client modules. Do not create React Native Web or native packages.
-- Use npm with a committed lockfile. Use React 19, TypeScript, Vite, Tailwind CSS v4, Vitest, React Testing Library, and Playwright. Use `@tanstack/react-virtual` for bounded rails if focused profiling confirms it satisfies directional focus restoration; otherwise use the smallest equivalent virtualizer.
+- Keep one Go module under `backend/` with module path `github.com/mopeyjellyfish/flixr/backend`, and one React application under `frontend/`. Root product documentation remains outside both. Vite proxies `/api` to Go during development. Release packaging builds `frontend/`, copies its output into `backend/web/assets/` without deleting the committed non-dotfile `placeholder.txt`, then runs `(cd backend && go build -o flixr .)`. The placeholder makes every backend Go gate compile independently on a clean checkout without a prior frontend build. Generated embedded assets are ignored except for the placeholder. Do not create a workspace/package graph for hypothetical native clients.
+- Compose concrete `Catalog`, `Household`, `Playback`, `Screens`, and `Web` values in `backend/main.go`; it contains lifecycle and wiring, not business behavior. Consumer-owned interfaces are permitted only for accepted real alternatives: metadata lookup and process execution in tests.
+- Inside `backend/`, use one-level domain packages: `catalog/`, `household/`, `playback/`, `screens/`, and `web/`. Keep focused `config/` and `sqlite/` mechanism packages at the same level. Do not add `internal/`, `service/`, `repository/`, `controller/`, `domain/`, `utils/`, or `helpers/` directories. The `sqlite` package owns connection policy, transaction helpers, and the single ordered embedded migration set under `backend/sqlite/migrations/`; domain DDL enters that directory while domain query SQL and decisions remain in the owning package. The `config` package reads only bootstrap environment values; owner settings persist through the household/owner surface.
+- Keep browser-independent TypeScript contracts and state machines under `frontend/src/core/` only where release-one behavior exercises them. Keep DOM, HLS, Cast, AirPlay, and focus implementations behind frontend modules. Do not create React Native Web or native packages.
+- Use npm with a committed lockfile under `frontend/`. Use React 19, TypeScript, Vite, Tailwind CSS v4, Vitest, React Testing Library, and Playwright. Use `@tanstack/react-virtual` only if focused profiling confirms it satisfies directional focus restoration; otherwise use the smallest equivalent virtualizer.
 - Use Go's standard library first, `modernc.org/sqlite` for SQLite, `github.com/gofrs/flock` for cross-platform advisory data/segment locks, `github.com/coder/websocket` for context-aware WebSockets, `golang.org/x/crypto/argon2` for memory-hard owner/PIN hashing, `golang.org/x/sync/errgroup` for bounded cancellable scan work, and `github.com/stretchr/testify` assertions without suites. Use a dedicated server-derived WebSocket context rather than the upgraded request context; keep same-origin rejection or an explicit trusted-origin allowlist, and treat I/O context cancellation as connection-fatal. Record why each non-standard dependency is required.
 - Playback's concrete generation manager mints each short-lived loopback input URL from a loopback base address and signing key supplied by `main`. Web validates the opaque generation token through Playback before opening the catalog ID through Catalog. Playback never imports Web, and Web remains the HTTP/file-delivery owner.
 - Playback jobs, generations, leases, and screen presence/control sessions are memory-only runtime state. Only catalog, owner/settings, profiles, and viewing progress persist in SQLite. Restart invalidates runtime sessions; locked startup reclamation removes orphaned generation directories without reconstructing jobs from database rows.
-- Required command definitions are `go test ./...`, `go test -race ./...`, and `go vet ./...`; `npm --prefix web run lint`, `npm --prefix web run typecheck`, `npm --prefix web run test -- --run`, and `npm --prefix web run build`; and `npm --prefix web run test:e2e -- --project=chromium`, `--project=firefox`, or `--project=webkit` for the named browser matrix. The required media job runs `FLIXR_REQUIRE_FFMPEG=1 go test -tags=integration ./...` after installing FFmpeg/ffprobe and treats a required skip as failure.
+- Required command definitions are `(cd backend && go test ./...)`, `(cd backend && go test -race ./...)`, and `(cd backend && go vet ./...)`; `npm --prefix frontend run lint`, `npm --prefix frontend run typecheck`, `npm --prefix frontend run test -- --run`, and `npm --prefix frontend run build`; and `npm --prefix frontend run test:e2e -- --project=chromium`, `--project=firefox`, or `--project=webkit` for the named browser matrix. The required media job runs `(cd backend && FLIXR_REQUIRE_FFMPEG=1 go test -tags=integration ./...)` after installing FFmpeg/ffprobe and treats a required skip as failure.
+- Playwright acceptance suites build the frontend, copy its output while preserving `backend/web/assets/placeholder.txt`, build `flixr`, and run against that executable serving the embedded assets. Vite with `/api` proxy is a development-only loop and may support component exploration, but it is not acceptance evidence. Browser CI may perform these build steps itself and remains independent of the backend unit/race/vet job.
 - Use `DESIGN.md` as accepted seed authority. It contains no TheTVDB artwork. Implementation screenshots and fixtures use only original, generated, public-domain, or properly licensed content.
 
 ## Delivery topology
 
 | Delivery unit | Topology | Stack position | Branch | Pull request base | Dependencies | Checks | Ownership | Integration point | CI fan-out | Cascade cost |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 — Local catalog and household browse | ordered stack | 1/3 | `feat/product-pitch` | `main` | accepted pitch and design guidance | Go unit/race/vet; web lint/type/unit/build; setup/catalog/profile browser suite; axe; visual ledger | current Worktrunk worktree; direct parent is sole writer; review follows the slice-level atomic commits in order | reviewed DU1 tip becomes DU2 base | 3 jobs | Changes to JSON contracts, schema, or web shell cascade to units 2 and 3; forecast moderate |
+| 1 — Local catalog and household browse | ordered stack | 1/3 | `feat/product-pitch` | `main` | accepted pitch and design guidance | Go unit/race/vet; frontend lint/type/unit/build; setup/catalog/profile browser suite; axe; visual ledger | current Worktrunk worktree; direct parent is sole writer; review follows the slice-level atomic commits in order | reviewed DU1 tip becomes DU2 base | 3 independent jobs | Changes to JSON contracts, schema, or frontend shell cascade to units 2 and 3; forecast moderate |
 | 2 — Modern local playback | ordered stack | 2/3 | `feat/playback` | `feat/product-pitch` | Delivery Unit 1 | all DU1 checks; playback unit/race; required FFmpeg media job; player browser suite; playback visual ledger | new Worktrunk child worktree after DU1 publication; one sole writer | reviewed DU2 tip becomes DU3 base | 4 jobs | Playback URL or session changes cascade to screens/casting; forecast moderate |
-| 3 — Screens, casting, and release gate | ordered stack | 3/3 | `feat/screens` | `feat/playback` | Delivery Unit 2 | complete Go/web/browser suite; FFmpeg required job; two-client screen suite; Cast/AirPlay adapter tests; physical-device evidence; performance and final visual gates | new Worktrunk child worktree after DU2 publication; one sole writer | stack head is release-one review point | 5 jobs plus manual device gate | Final unit has no dependent branch; lower-stack fixes can cascade through both upper branches; forecast low late churn after frozen contracts |
+| 3 — Screens, casting, and release gate | ordered stack | 3/3 | `feat/screens` | `feat/playback` | Delivery Unit 2 | complete Go/frontend/browser suite; FFmpeg required job; two-client screen suite; Cast/AirPlay adapter tests; physical-device evidence; performance and final visual gates | new Worktrunk child worktree after DU2 publication; one sole writer | stack head is release-one review point | 5 jobs plus manual device gate | Final unit has no dependent branch; lower-stack fixes can cascade through both upper branches; forecast low late churn after frozen contracts |
 
 The pitch, this plan, and `DESIGN.md` share Delivery Unit 1's implementation publication. They do not receive a documentation-only pull request. Every pull request uses `open-pr`; this sequential chain uses `gh stack`. The first pull request is useful by itself as a secure local catalog and household browser. The second adds complete local playback. The third adds remote screens and platform casting.
 
@@ -77,7 +78,7 @@ Pause before further publication if coordination requires an extra writer lane, 
 - **Security evidence** reruns for changes to authentication, cookies, origin checks, signed URLs, path handling, locks, provider inputs, or WebSocket authority.
 - **Final required gates** always run once against each delivery unit's frozen tree before publication. Do not run a composite gate beside its own constituent jobs.
 
-## [ ] 001 — Secure local first run and owner claim
+## [x] 001 — Secure local first run and owner claim
 
 ### Outcome and requirement trace
 
@@ -95,13 +96,14 @@ Public seams:
 
 Likely files:
 
-- `go.mod`, `go.sum`, `cmd/flixr/main.go`, `config/bootstrap.go`;
-- `sqlite/db.go`, `sqlite/migrations/*.sql`, lock implementation and tests;
-- `household/owner.go`, `household/auth.go`, `household/store.go`;
-- `webserver/server.go`, `webserver/errors.go`, `webserver/auth.go`, setup/settings handlers;
-- `web/package.json`, lockfile, Vite/Tailwind/TypeScript/test configuration;
-- `web/src/core/api.ts`, `web/src/api/client.ts`, setup and owner-readiness routes/components;
+- root `.gitignore`; `backend/go.mod` with module path `github.com/mopeyjellyfish/flixr/backend`; `backend/go.sum`; `backend/main.go`; `backend/config/bootstrap.go`;
+- `backend/sqlite/db.go`, `backend/sqlite/migrations/*.sql`, lock implementation and tests;
+- `backend/household/owner.go`, `backend/household/auth.go`, `backend/household/store.go`;
+- `backend/web/server.go`, `backend/web/errors.go`, `backend/web/auth.go`, setup/settings handlers, `backend/web/assets/placeholder.txt`, and embedded-asset support;
+- `frontend/package.json`, lockfile, Vite/Tailwind/TypeScript/test configuration;
+- `frontend/src/core/api.ts`, `frontend/src/api/client.ts`, setup and owner-readiness routes/components;
 - build/embed scripts and `.github/workflows/ci.yml` foundation.
+- explicit preserved-scaffold migration: root `go.mod`/`go.sum` and `cmd/flixr/main.go` move to `backend/` with imports rewritten to the new module path; root `config/`, `sqlite/`, `catalog/`, and `household/` move under `backend/`; `webserver/` moves to `backend/web/` and changes package name to `web`; React `web/` moves to `frontend/`; `.gitignore` changes from `web/node_modules/` and `web/dist/` to the new frontend and generated embed paths.
 
 ### Dependencies
 
@@ -119,11 +121,11 @@ The React red proof mounts the setup route against recorded API responses and fa
 
 ### Green proof and checks
 
-- Focused Go tests pass under `go test -race` for claim, authentication, locking, connection policy, readiness recheck, and graceful process shutdown.
-- Web unit tests pass for setup state and semantic form behavior.
+- Focused Go tests pass under `(cd backend && go test -race ./...)` for claim, authentication, locking, connection policy, readiness recheck, and graceful process shutdown.
+- Frontend unit tests pass for setup state and semantic form behavior.
 - A Playwright path claims a clean server, confirms token reuse fails, signs in through the cookie session, and operates the owner readiness screen without pointer-only controls.
 - Same-origin protection, cookie attributes, memory-hard password hashing parameters, rate limits, stable error mapping, server timeouts, and redacted logs receive focused checks.
-- `go vet ./...`, web lint, TypeScript, unit tests, and production build pass.
+- `(cd backend && go vet ./...)`, frontend lint, TypeScript, unit tests, production frontend build, asset copy/embed check, and backend build pass.
 
 Changes to bootstrap values, owner authority, session cookies, error shape, locks, or database opening invalidate this slice and every later HTTP/browser proof.
 
@@ -135,7 +137,7 @@ Atomic commits may separate repository/toolchain bootstrap from the complete fir
 
 A clean binary and web build prove the one-time owner claim, exclusive startup, actionable degraded readiness, authenticated owner surface, and bounded clean shutdown without an undocumented credential or external database.
 
-## [ ] 002 — Deterministic film and TV catalog with offline browse
+## [x] 002 — Deterministic film and TV catalog with offline browse
 
 ### Outcome and requirement trace
 
@@ -153,11 +155,11 @@ Public seams:
 
 Likely files:
 
-- `catalog/models.go`, `roots.go`, `scanner.go`, `probe.go`, `matching.go`, `tmdb.go`, `queries.go`, `store.go`, and domain errors;
-- catalog DDL in the single ordered `sqlite/migrations/*.sql` set and captured `ffprobe` JSON;
-- `webserver/catalog_handlers.go`, `scan_handlers.go`, route contract tests;
-- `testdata/media/`, `testdata/ffprobe/`, `scripts/generate-media-fixtures.sh`, and fixture licensing notes;
-- `web/src/core/catalog.ts`, catalog API functions, owner scan/readiness views, and basic browse data loaders.
+- `backend/catalog/models.go`, `roots.go`, `scanner.go`, `probe.go`, `matching.go`, `tmdb.go`, `queries.go`, `store.go`, and domain errors;
+- catalog DDL in the single ordered `backend/sqlite/migrations/*.sql` set and captured `ffprobe` JSON;
+- `backend/web/catalog_handlers.go`, `scan_handlers.go`, route contract tests;
+- module-root `backend/testdata/media/` and `backend/testdata/ffprobe/` for the bounded generated fixtures genuinely shared by Catalog, Playback, and Web integration tests; `backend/scripts/generate-media-fixtures.sh`; and fixture licensing notes. Package-specific fixtures stay in the owning package's `testdata/` directory.
+- `frontend/src/core/catalog.ts`, catalog API functions, owner scan/readiness views, and basic browse data loaders.
 
 ### Dependencies
 
@@ -192,7 +194,7 @@ One atomic behavior commit includes scanner source, domain SQL, fixtures, focuse
 
 Repeated scans are deterministic, path-safe, partially failure-tolerant, and observable through the owner UI; films and episodic TV remain available through local metadata and cached provider data without internet access.
 
-## [ ] 003 — Household profiles and responsive cinematic browse
+## [x] 003 — Household profiles and responsive cinematic browse
 
 ### Outcome and requirement trace
 
@@ -205,16 +207,16 @@ Trace: AC-005, AC-006, AC-007, the browse/search portion of AC-018, and accepted
 Public seams:
 
 - profile-management, profile-selection, PIN verification, home/search/detail routes;
-- browser-independent catalog/profile view state under `web/src/core/`;
+- browser-independent catalog/profile view state under `frontend/src/core/`;
 - deep `focusManager` module used through intents rather than page-level DOM traversal.
 
 Likely files:
 
-- `household/profiles.go`, `progress.go`, `store.go`, profile/PIN tests;
-- `webserver/profile_handlers.go` and catalog/profile response assembly;
-- `web/src/app/`, route definitions, layout/navigation, `web/src/core/session.ts`;
-- `web/src/features/profiles/`, `browse/`, `search/`, `details/`;
-- `web/src/modules/focusManager/`, shared semantic controls, token CSS, self-hosted font assets with licenses;
+- `backend/household/profiles.go`, `progress.go`, `store.go`, profile/PIN tests;
+- `backend/web/profile_handlers.go` and catalog/profile response assembly;
+- `frontend/src/app/`, route definitions, layout/navigation, `frontend/src/core/session.ts`;
+- `frontend/src/features/profiles/`, `browse/`, `search/`, `details/`;
+- `frontend/src/modules/focusManager/`, shared semantic controls, token CSS, self-hosted font assets with licenses;
 - Playwright fixtures, accessibility checks, screenshots, and mismatch ledger.
 
 ### Dependencies
@@ -245,7 +247,7 @@ Representative states: first-run handoff, profile choice, PIN invalid/rate-limit
 - Playwright exercises keyboard and directional paths, captures all named viewports, runs axe with no serious or critical focal-flow findings, checks console/runtime errors and overflow, and confirms no clipped focal action or hover-only behavior.
 - Visual validation compares hierarchy, typography, colors, spacing, focus, content density, and states. Every mismatch is resolved or recorded as explicit unmet proof; review-only TheTVDB assets are absent.
 - A 10,000-record query fixture records browse/search p95 at or below 200 ms on the named reference machine, excluding artwork transfer; the Delivery Unit 1 checkpoint pauses if this budget is missed. The home route also proves it does not create DOM nodes for the full catalog.
-- Complete Delivery Unit 1 Go/web/browser gates pass against the frozen tree.
+- Complete Delivery Unit 1 Go/frontend/browser gates pass against the frozen tree.
 
 Changes to shared navigation, tokens, profile session state, catalog cards, route composition, or viewport behavior invalidate the corresponding unit/browser/visual evidence.
 
@@ -275,10 +277,10 @@ Public seams:
 
 Likely files:
 
-- `playback/plan.go`, `capabilities.go`, `errors.go`, planner table tests;
-- `webserver/playback_handlers.go`, range delivery, signed/session authority, contract tests;
-- `household/progress.go` updates;
-- `web/src/core/playback.ts`, `web/src/modules/mediaPlayer/`, player route/controls, lazy import boundary;
+- `backend/playback/plan.go`, `capabilities.go`, `errors.go`, planner table tests;
+- `backend/web/playback_handlers.go`, range delivery, signed/session authority, contract tests;
+- `backend/household/progress.go` updates;
+- `frontend/src/core/playback.ts`, `frontend/src/modules/mediaPlayer/`, player route/controls, lazy import boundary;
 - direct-play browser and HTTP range fixtures.
 
 ### Dependencies
@@ -332,10 +334,10 @@ Public seams:
 
 Likely files:
 
-- `playback/jobs.go`, `generation.go`, `leases.go`, `segments.go`, `process.go`, `commands.go`, `testing/synctest` timing tests, and process fakes;
-- consumer-defined process-execution interface in playback tests only;
-- `webserver/hls_handlers.go`, loopback input authorization/range handling, heartbeat/stop routes;
-- `web/src/modules/mediaPlayer/hls.ts`, lease heartbeat/state integration, owner playback status;
+- `backend/playback/jobs.go`, `generation.go`, `leases.go`, `segments.go`, `process.go`, `commands.go`, `testing/synctest` timing tests, and process fakes;
+- consumer-defined process-execution interface in backend Playback tests only;
+- `backend/web/hls_handlers.go`, loopback input authorization/range handling, heartbeat/stop routes;
+- `frontend/src/modules/mediaPlayer/hls.ts`, lease heartbeat/state integration, owner playback status;
 - bounded synthetic source/remux/transcode fixtures, generation script/license;
 - `.github/workflows/ci.yml` named `media-integration` job.
 
@@ -402,9 +404,9 @@ Public seams:
 
 Likely files:
 
-- `screens/presence.go`, `sessions.go`, `commands.go`, domain errors/tests;
-- `webserver/screen_handlers.go`, WebSocket registry/origin/auth/shutdown tests and owner connected-screen route;
-- `web/src/core/screens.ts`, `web/src/modules/screenCoordinator/`, chooser/readiness/player integration, and owner connected-screen view;
+- `backend/screens/presence.go`, `sessions.go`, `commands.go`, domain errors/tests;
+- `backend/web/screen_handlers.go`, WebSocket registry/origin/auth/shutdown tests and owner connected-screen route;
+- `frontend/src/core/screens.ts`, `frontend/src/modules/screenCoordinator/`, chooser/readiness/player integration, and owner connected-screen view;
 - two-browser Playwright fixtures and mismatch ledger.
 
 ### Dependencies
@@ -458,9 +460,9 @@ Public seams:
 
 Likely files:
 
-- `playback/cast_profile.go`, external signed media authorization tests;
-- `webserver/external_media_handlers.go`, TLS/prerequisite reporting;
-- `web/src/modules/screenCoordinator/cast.ts`, `airplay.ts`, lazy SDK loader and capability tests;
+- `backend/playback/cast_profile.go`, external signed media authorization tests;
+- `backend/web/external_media_handlers.go`, TLS/prerequisite reporting;
+- `frontend/src/modules/screenCoordinator/cast.ts`, `airplay.ts`, lazy SDK loader and capability tests;
 - owner/help documentation, browser/device test fixtures, performance harness and reports;
 - final `.github/workflows/ci.yml` gates and release-one README instructions.
 
@@ -494,7 +496,7 @@ Add browser tests with deterministic Cast/AirPlay API fakes before implementatio
 - Axe has no serious or critical findings in focal flows; keyboard/directional focus and reduced motion pass.
 - The documented reference machine with 10,000 indexed items records browse/search p95 at or below 200 ms excluding artwork transfer; virtualized rails and route bundle boundaries meet AC-018.
 - Blocking external provider traffic leaves local profile/catalog/cached-artwork/search/detail/playback behavior working.
-- Full Go unit/race/vet, web lint/type/unit/build, browser, media-integration, security, shutdown, and stack-base checks pass once against the frozen Delivery Unit 3 tree.
+- Full Go unit/race/vet, frontend lint/type/unit/build, browser, media-integration, security, shutdown, and stack-base checks pass once against the frozen Delivery Unit 3 tree.
 - A fixed-diff formal review covers intent, architecture, security, casting authorization, lifecycle, accessibility, maintainability, and boundary compliance before publication.
 
 Any change to signed URLs, Cast profile, adapter state, progress reporting, HTTPS prerequisites, shared navigation/player UI, final fixtures, or lower-stack contracts invalidates the corresponding focused evidence and final gate.

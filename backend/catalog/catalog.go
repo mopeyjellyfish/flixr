@@ -1,0 +1,842 @@
+// Package catalog indexes film and episodic TV files beneath owner-configured roots.
+package catalog
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mopeyjellyfish/flixr/backend/sqlite"
+	"golang.org/x/sync/errgroup"
+)
+
+var (
+	ErrOutsideRoot = errors.New("path outside configured roots")
+	ErrScanActive  = errors.New("scan already active")
+)
+
+// MediaProperties is the path-free inspection result persisted with a catalog item.
+type MediaProperties struct {
+	Container  string          `json:"container,omitempty"`
+	VideoCodec string          `json:"video_codec,omitempty"`
+	Audio      []AudioTrack    `json:"audio,omitempty"`
+	Subtitles  []SubtitleTrack `json:"subtitles,omitempty"`
+}
+
+type AudioTrack struct {
+	Codec    string `json:"codec"`
+	Channels int    `json:"channels,omitempty"`
+	Language string `json:"language,omitempty"`
+}
+
+type SubtitleTrack struct {
+	Codec    string `json:"codec"`
+	Language string `json:"language,omitempty"`
+}
+
+type Item struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Kind       string `json:"kind"`
+	Season     int    `json:"season,omitempty"`
+	Episode    int    `json:"episode,omitempty"`
+	SeriesID   string `json:"series_id,omitempty"`
+	LocalOnly  bool   `json:"local_only"`
+	ProviderID string `json:"provider_id,omitempty"`
+	Year       int    `json:"year,omitempty"`
+	Synopsis   string `json:"synopsis,omitempty"`
+	Poster     string `json:"poster,omitempty"`
+	Backdrop   string `json:"backdrop,omitempty"`
+	MediaProperties
+
+	path        string
+	rootKind    string
+	fingerprint string
+	size        int64
+	mtime       int64
+}
+
+// Season is an ordered group of playable episode records.
+type Season struct {
+	ID       string `json:"id"`
+	Number   int    `json:"number"`
+	Episodes []Item `json:"episodes"`
+}
+
+// Series is a catalog entity, distinct from its playable episode records.
+type Series struct {
+	ID         string   `json:"id"`
+	Title      string   `json:"title"`
+	Kind       string   `json:"kind"`
+	LocalOnly  bool     `json:"local_only"`
+	ProviderID string   `json:"provider_id,omitempty"`
+	Year       int      `json:"year,omitempty"`
+	Synopsis   string   `json:"synopsis,omitempty"`
+	Poster     string   `json:"poster,omitempty"`
+	Backdrop   string   `json:"backdrop,omitempty"`
+	Seasons    []Season `json:"seasons,omitempty"`
+}
+
+type ScanStatus struct {
+	ID         string `json:"id"`
+	StartedAt  int64  `json:"started_at"`
+	FinishedAt int64  `json:"finished_at,omitempty"`
+	Status     string `json:"status"`
+	Scanned    int    `json:"scanned"`
+	Failed     int    `json:"failed"`
+	Unmatched  int    `json:"unmatched"`
+	Message    string `json:"message,omitempty"`
+}
+
+type Catalog struct {
+	mu       sync.RWMutex
+	db       *sqlite.DB
+	film, tv string
+	items    map[string]Item
+	series   map[string]Series
+	prober   Prober
+	provider MetadataProvider
+	token    string
+	scanning bool
+	cancel   context.CancelFunc
+	done     chan struct{}
+	status   ScanStatus
+}
+
+func New() *Catalog { return &Catalog{items: map[string]Item{}, prober: newFFprobe()} }
+
+// Open uses the production ffprobe prober. Tests can inject a prober with OpenWithProber.
+func Open(db *sqlite.DB) (*Catalog, error) { return OpenWithProber(db, newFFprobe()) }
+
+func OpenWithProber(db *sqlite.DB, prober Prober) (*Catalog, error) {
+	if prober == nil {
+		return nil, errors.New("catalog prober is nil")
+	}
+	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, prober: prober, provider: NewTMDB(nil)}
+	if db == nil {
+		return c, nil
+	}
+	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop FROM catalog_items`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var x Item
+		var local int
+		var audio, subtitles string
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(audio), &x.Audio); err != nil {
+			return nil, fmt.Errorf("decode audio tracks: %w", err)
+		}
+		if err := json.Unmarshal([]byte(subtitles), &x.Subtitles); err != nil {
+			return nil, fmt.Errorf("decode subtitle tracks: %w", err)
+		}
+		x.LocalOnly = local != 0
+		episodeFields(&x)
+		seriesFields(&x)
+		c.items[x.ID] = x
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	seriesRows, err := db.Query(`SELECT id,title,local_only,provider_id,year,synopsis,poster,backdrop FROM catalog_series`)
+	if err != nil {
+		return nil, err
+	}
+	defer seriesRows.Close()
+	for seriesRows.Next() {
+		var x Series
+		var local int
+		if err := seriesRows.Scan(&x.ID, &x.Title, &local, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
+			return nil, err
+		}
+		x.Kind, x.LocalOnly = "series", local != 0
+		c.series[x.ID] = x
+	}
+	if err := seriesRows.Err(); err != nil {
+		return nil, err
+	}
+	_ = db.QueryRow("SELECT value FROM settings WHERE key='film_root'").Scan(&c.film)
+	_ = db.QueryRow("SELECT value FROM settings WHERE key='tv_root'").Scan(&c.tv)
+	_ = db.QueryRow("SELECT value FROM settings WHERE key='tmdb_token'").Scan(&c.token)
+	c.status = c.lastStatus()
+	return c, nil
+}
+
+func id(kind, fingerprint string) string {
+	s := sha256.Sum256([]byte(kind + "\000" + fingerprint))
+	return hex.EncodeToString(s[:16])
+}
+func title(path string) string {
+	n := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	n = regexp.MustCompile(`(?i)[. _-]?(s\d{1,2}e\d{1,2}|\d{1,2}x\d{1,2})$`).ReplaceAllString(n, "")
+	n = strings.NewReplacer(".", " ", "_", " ").Replace(n)
+	return strings.TrimSpace(n)
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+var episodeRE = regexp.MustCompile(`(?i)(?:s(\d{1,2})e(\d{1,2})|(\d{1,2})x(\d{1,2}))`)
+
+func episodeFields(x *Item) {
+	m := episodeRE.FindStringSubmatch(x.path)
+	if len(m) == 0 {
+		return
+	}
+	if m[1] != "" {
+		fmt.Sscanf(m[1], "%d", &x.Season)
+		fmt.Sscanf(m[2], "%d", &x.Episode)
+	} else {
+		fmt.Sscanf(m[3], "%d", &x.Season)
+		fmt.Sscanf(m[4], "%d", &x.Episode)
+	}
+}
+
+func seriesFields(x *Item) {
+	if x.rootKind != "episode" {
+		return
+	}
+	parts := strings.Split(filepath.ToSlash(x.path), "/")
+	name := ""
+	if len(parts) > 1 {
+		name = strings.TrimSpace(parts[0])
+	}
+	if name == "" {
+		name = x.Title
+	}
+	x.SeriesID = id("series", strings.ToLower(name))
+}
+
+func seriesTitle(path, fallback string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	if len(parts) > 1 && strings.TrimSpace(parts[0]) != "" {
+		return strings.NewReplacer(".", " ", "_", " ").Replace(strings.TrimSpace(parts[0]))
+	}
+	return fallback
+}
+
+func (c *Catalog) SetRoots(film, tv string) error {
+	for _, p := range []string{film, tv} {
+		if p == "" {
+			continue
+		}
+		a, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(a)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("root %q: %w", p, ErrOutsideRoot)
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var err error
+	if film != "" {
+		c.film, err = filepath.Abs(film)
+		if err != nil {
+			return err
+		}
+	}
+	if tv != "" {
+		c.tv, err = filepath.Abs(tv)
+		if err != nil {
+			return err
+		}
+	}
+	if c.db != nil {
+		for k, v := range map[string]string{"film_root": c.film, "tv_root": c.tv} {
+			if _, err := c.db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Roots returns the persisted owner library roots without exposing media paths to household routes.
+func (c *Catalog) Roots() (film, tv string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.film, c.tv
+}
+
+func media(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".mp4", ".mkv", ".webm", ".mov", ".avi":
+		return true
+	}
+	return false
+}
+
+type scanFile struct {
+	root, kind, rel string
+	size, mtime     int64
+}
+type scanKey struct{ kind, rel string }
+type scanResult struct {
+	item Item
+	file scanFile
+	err  error
+}
+
+type scanObservation struct {
+	identifier, outcome, message string
+}
+
+var readRandom = rand.Read
+
+func randomScanID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := readRandom(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// StartScan begins one bounded asynchronous scan. Its current and last outcome is available through ScanStatus.
+func (c *Catalog) StartScan(ctx context.Context, workers int) error {
+	if workers < 1 {
+		workers = 1
+	}
+	scanID, err := randomScanID()
+	if err != nil {
+		return fmt.Errorf("generate scan ID: %w", err)
+	}
+	c.mu.Lock()
+	if c.scanning {
+		c.mu.Unlock()
+		return ErrScanActive
+	}
+	ctx, c.cancel = context.WithCancel(ctx)
+	c.done = make(chan struct{})
+	c.scanning = true
+	c.status = ScanStatus{ID: scanID, StartedAt: time.Now().Unix(), Status: "running"}
+	status := c.status
+	c.mu.Unlock()
+	c.saveStatus(status)
+	go c.runScan(ctx, workers)
+	return nil
+}
+
+// Scan waits for one scan, retaining the synchronous API for command and test callers.
+func (c *Catalog) Scan(ctx context.Context, workers int) error {
+	if err := c.StartScan(ctx, workers); err != nil {
+		return err
+	}
+	c.mu.RLock()
+	done, active := c.done, c.scanning
+	c.mu.RUnlock()
+	if !active {
+		return c.scanError()
+	}
+	select {
+	case <-done:
+		return c.scanError()
+	case <-ctx.Done():
+		c.Cancel()
+		<-done
+		return ctx.Err()
+	}
+}
+
+func (c *Catalog) runScan(ctx context.Context, workers int) {
+	err := c.scan(ctx, workers)
+	c.mu.Lock()
+	if err != nil {
+		c.status.Status = "failed"
+		c.status.Message = err.Error()
+	} else if c.status.Failed > 0 {
+		c.status.Status = "partial"
+	} else {
+		c.status.Status = "complete"
+	}
+	c.status.FinishedAt = time.Now().Unix()
+	status := c.status
+	c.scanning, c.cancel = false, nil
+	close(c.done)
+	c.done = nil
+	c.mu.Unlock()
+	c.saveStatus(status)
+}
+
+func (c *Catalog) scanError() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.status.Status == "failed" {
+		return errors.New(c.status.Message)
+	}
+	return nil
+}
+
+func (c *Catalog) scan(ctx context.Context, workers int) error {
+	c.mu.RLock()
+	roots := []struct{ path, kind string }{{c.film, "film"}, {c.tv, "episode"}}
+	previousByPath := make(map[scanKey]Item, len(c.items))
+	for _, item := range c.items {
+		previousByPath[scanKey{item.rootKind, item.path}] = item
+	}
+	c.mu.RUnlock()
+
+	var files []scanFile
+	for _, r := range roots {
+		if r.path == "" {
+			continue
+		}
+		err := filepath.WalkDir(r.path, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if d.IsDir() || d.Type()&os.ModeSymlink != 0 || !media(path) {
+				return nil
+			}
+			rel, err := filepath.Rel(r.path, path)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return ErrOutsideRoot
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			files = append(files, scanFile{root: r.path, kind: r.kind, rel: filepath.ToSlash(rel), size: info.Size(), mtime: info.ModTime().UnixNano()})
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].kind+"/"+files[i].rel < files[j].kind+"/"+files[j].rel })
+	results := make(chan scanResult, len(files))
+	g, groupCtx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	for _, f := range files {
+		g.Go(func() error {
+			// A stable path, size and mtime never opens, hashes, or probes the file again.
+			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime {
+				select {
+				case results <- scanResult{item: old, file: f}:
+					return nil
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				}
+			}
+			x, err := c.inspect(groupCtx, f)
+			if err != nil && groupCtx.Err() != nil {
+				return groupCtx.Err()
+			}
+			select {
+			case results <- scanResult{item: x, file: f, err: err}:
+				return nil
+			case <-groupCtx.Done():
+				return groupCtx.Err()
+			}
+		})
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- g.Wait(); close(results) }()
+	next := make(map[string]Item, len(files))
+	failures := map[scanKey]string{}
+	for result := range results {
+		c.mu.Lock()
+		c.status.Scanned++
+		if result.err != nil {
+			c.status.Failed++
+		}
+		c.mu.Unlock()
+		if result.err != nil {
+			failures[scanKey{result.file.kind, result.file.rel}] = result.err.Error()
+			continue
+		}
+		// Sorted discovery plus overwrite makes duplicate content deterministic.
+		if old, duplicate := next[result.item.ID]; !duplicate || result.file.rel < old.path {
+			next[result.item.ID] = result.item
+		}
+	}
+	if err := <-wait; err != nil {
+		return err
+	}
+	observations, err := c.enrich(ctx, next)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	for _, observation := range observations {
+		if observation.outcome == "unmatched" {
+			c.status.Unmatched++
+		} else {
+			c.status.Failed++
+		}
+	}
+	c.mu.Unlock()
+	return c.persist(next, failures, observations)
+}
+
+func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
+	root, err := os.OpenRoot(f.root)
+	if err != nil {
+		return Item{}, err
+	}
+	defer root.Close()
+	file, err := root.Open(f.rel) // os.Root enforces containment at open time, including nested symlinks.
+	if err != nil {
+		return Item{}, fmt.Errorf("open indexed file: %w", err)
+	}
+	defer file.Close()
+	fingerprint, err := contentFingerprint(file)
+	if err != nil {
+		return Item{}, fmt.Errorf("fingerprint indexed file: %w", err)
+	}
+	properties, err := c.prober.Probe(ctx, file)
+	if err != nil {
+		return Item{}, err
+	}
+	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime}
+	episodeFields(&x)
+	seriesFields(&x)
+	return x, nil
+}
+
+func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObservation, error) {
+	c.mu.RLock()
+	provider, token := c.provider, c.token
+	previousSeries := make(map[string]Series, len(c.series))
+	for id, series := range c.series {
+		previousSeries[id] = series
+	}
+	c.mu.RUnlock()
+	var observations []scanObservation
+	if provider != nil && token != "" {
+		for id, item := range next {
+			if item.Kind != "film" || item.ProviderID != "" {
+				continue
+			}
+			enrichment, err := provider.Lookup(ctx, token, "film", item.Title)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				observations = append(observations, providerFailure("film:"+id, "provider_failed"))
+				continue
+			}
+			if enrichment.ProviderID == "" {
+				observations = append(observations, providerFailure("film:"+id, "unmatched"))
+				continue
+			}
+			artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if artworkFailed {
+				observations = append(observations, providerFailure("film:"+id, "provider_artwork_failed"))
+			}
+			item.LocalOnly = false
+			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			next[id] = item
+		}
+	}
+	series := map[string]Series{}
+	for _, item := range next {
+		if item.SeriesID == "" {
+			continue
+		}
+		if existing, ok := series[item.SeriesID]; ok {
+			existing.LocalOnly = existing.LocalOnly && item.LocalOnly
+			series[item.SeriesID] = existing
+			continue
+		}
+		series[item.SeriesID] = Series{ID: item.SeriesID, Title: seriesTitle(item.path, item.Title), Kind: "series", LocalOnly: item.LocalOnly}
+	}
+	for id, value := range series {
+		if previous, ok := previousSeries[id]; ok && previous.ProviderID != "" {
+			value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
+			value.LocalOnly = previous.LocalOnly
+		} else if provider != nil && token != "" {
+			enrichment, err := provider.Lookup(ctx, token, "series", value.Title)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				observations = append(observations, providerFailure("series:"+id, "provider_failed"))
+			} else if enrichment.ProviderID == "" {
+				observations = append(observations, providerFailure("series:"+id, "unmatched"))
+			} else {
+				artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if artworkFailed {
+					observations = append(observations, providerFailure("series:"+id, "provider_artwork_failed"))
+				}
+				value.LocalOnly = false
+				value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			}
+		}
+		series[id] = value
+	}
+	c.mu.Lock()
+	c.series = series
+	c.mu.Unlock()
+	return observations, nil
+}
+
+func providerFailure(identifier, outcome string) scanObservation {
+	message := "metadata provider lookup failed"
+	if outcome == "unmatched" {
+		message = "metadata provider returned no match"
+	} else if outcome == "provider_artwork_failed" {
+		message = "metadata provider artwork failed"
+	}
+	return scanObservation{identifier: identifier, outcome: outcome, message: message}
+}
+
+func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, observations []scanObservation) error {
+	c.mu.RLock()
+	previous := make(map[string]Item, len(c.items))
+	for k, v := range c.items {
+		previous[k] = v
+	}
+	status := c.status
+	seriesState := make(map[string]Series, len(c.series))
+	for id, series := range c.series {
+		seriesState[id] = series
+	}
+	c.mu.RUnlock()
+	for _, old := range previous {
+		if _, failed := failures[scanKey{old.rootKind, old.path}]; failed {
+			next[old.ID] = old
+		}
+	}
+	if c.db != nil {
+		tx, err := c.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		series := map[string]string{}
+		for _, x := range next {
+			if x.SeriesID != "" {
+				series[x.SeriesID] = seriesTitle(x.path, x.Title)
+			}
+		}
+		for seriesID, seriesTitle := range series {
+			value, ok := seriesState[seriesID]
+			if !ok {
+				value = Series{ID: seriesID, Title: seriesTitle, Kind: "series", LocalOnly: true}
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_series(id,title,local_only,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,local_only=excluded.local_only,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, value.ID, value.Title, boolInt(value.LocalOnly), value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop, time.Now().Unix()); err != nil {
+				return err
+			}
+		}
+		for _, x := range next {
+			audio, err := json.Marshal(x.Audio)
+			if err != nil {
+				return err
+			}
+			subtitles, err := json.Marshal(x.Subtitles)
+			if err != nil {
+				return err
+			}
+			seasonID := ""
+			if x.SeriesID != "" {
+				seasonID = id("season", x.SeriesID+fmt.Sprintf("/%d", x.Season))
+				if _, err = tx.Exec(`INSERT INTO catalog_seasons(id,series_id,number) VALUES(?,?,?) ON CONFLICT(series_id,number) DO NOTHING`, seasonID, x.SeriesID, x.Season); err != nil {
+					return err
+				}
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix()); err != nil {
+				return err
+			}
+		}
+		for oldID := range previous {
+			if _, keep := next[oldID]; !keep {
+				if _, err = tx.Exec("DELETE FROM catalog_items WHERE id=?", oldID); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_seasons WHERE NOT EXISTS (SELECT 1 FROM catalog_items WHERE catalog_items.season_id=catalog_seasons.id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_series WHERE NOT EXISTS (SELECT 1 FROM catalog_seasons WHERE catalog_seasons.series_id=catalog_series.id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("DELETE FROM scan_files WHERE scan_id=?", status.ID); err != nil {
+			return err
+		}
+		for key, message := range failures {
+			if _, err = tx.Exec("INSERT INTO scan_files(scan_id,relative_path,outcome,message) VALUES(?,?,?,?)", status.ID, key.kind+":"+key.rel, "failed", message); err != nil {
+				return err
+			}
+		}
+		for _, observation := range observations {
+			if _, err = tx.Exec("INSERT INTO scan_files(scan_id,relative_path,outcome,message) VALUES(?,?,?,?)", status.ID, observation.identifier, observation.outcome, observation.message); err != nil {
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.items = next
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Catalog) saveStatus(status ScanStatus) {
+	if c.db == nil {
+		return
+	}
+	_, _ = c.db.Exec(`INSERT INTO scan_runs(id,started_at,finished_at,status,scanned,failed,unmatched,message) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,scanned=excluded.scanned,failed=excluded.failed,unmatched=excluded.unmatched,message=excluded.message`, status.ID, status.StartedAt, nullableTime(status.FinishedAt), status.Status, status.Scanned, status.Failed, status.Unmatched, status.Message)
+}
+func nullableTime(t int64) any {
+	if t == 0 {
+		return nil
+	}
+	return t
+}
+func (c *Catalog) lastStatus() ScanStatus {
+	var s ScanStatus
+	_ = c.db.QueryRow(`SELECT id,started_at,COALESCE(finished_at,0),status,scanned,failed,unmatched,message FROM scan_runs ORDER BY started_at DESC LIMIT 1`).Scan(&s.ID, &s.StartedAt, &s.FinishedAt, &s.Status, &s.Scanned, &s.Failed, &s.Unmatched, &s.Message)
+	return s
+}
+func (c *Catalog) ScanStatus() ScanStatus { c.mu.RLock(); defer c.mu.RUnlock(); return c.status }
+func (c *Catalog) Cancel() {
+	c.mu.RLock()
+	cancel := c.cancel
+	c.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+func (c *Catalog) Shutdown(ctx context.Context) error {
+	c.mu.RLock()
+	cancel, done := c.cancel, c.done
+	c.mu.RUnlock()
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
+	if offset < 0 {
+		return []Item{}, nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.db == nil {
+		return c.listMemory(query, offset, limit), nil
+	}
+	sqlLimit := limit
+	if sqlLimit <= 0 {
+		sqlLimit = -1
+	}
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,audio_json,subtitle_json FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list catalog: %w", err)
+	}
+	defer rows.Close()
+	var out []Item
+	for rows.Next() {
+		var x Item
+		var local int
+		var audio, subtitles string
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &audio, &subtitles); err != nil {
+			return nil, fmt.Errorf("scan catalog item: %w", err)
+		}
+		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil {
+			return nil, errors.New("decode catalog media properties")
+		}
+		x.LocalOnly = local != 0
+		episodeFields(&x)
+		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate catalog: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Catalog) listMemory(query string, offset, limit int) []Item {
+	out := []Item{}
+	for _, v := range c.items {
+		if query == "" || strings.Contains(strings.ToLower(v.Title), strings.ToLower(query)) {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Title == out[j].Title {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Title < out[j].Title
+	})
+	if offset >= len(out) {
+		return []Item{}
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+func (c *Catalog) Item(itemID string) (Item, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if item, ok := c.items[itemID]; ok {
+		return item, true
+	}
+	series, ok := c.series[itemID]
+	if !ok {
+		return Item{}, false
+	}
+	return Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}, true
+}
+func (c *Catalog) Open(id string) (*os.File, error) {
+	c.mu.RLock()
+	x, ok := c.items[id]
+	root := c.film
+	if x.rootKind == "episode" {
+		root = c.tv
+	}
+	c.mu.RUnlock()
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return r.Open(x.path)
+}
