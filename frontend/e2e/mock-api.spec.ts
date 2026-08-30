@@ -7,14 +7,17 @@ type JSONValue = Record<string, unknown>;
 const ready = { claimed: true, readiness: { ffprobe: true, ffmpeg: true } };
 const posterArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="#183a82"/><stop offset="1" stop-color="#05070c"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="295" cy="160" r="105" fill="#5b8cff" opacity=".52"/><path d="M0 430L230 250l170 155v195H0z" fill="#101623" opacity=".82"/></svg>').toString('base64')}`;
 const backdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><defs><radialGradient id="g"><stop stop-color="#5b8cff"/><stop offset="1" stop-color="#05070c"/></radialGradient></defs><rect width="1600" height="900" fill="#05070c"/><ellipse cx="1180" cy="330" rx="520" ry="380" fill="url(#g)" opacity=".58"/><path d="M580 900L1100 330l500 430v140z" fill="#101623" opacity=".85"/></svg>').toString('base64')}`;
+const brightBackdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="#f7d96b"/><circle cx="1180" cy="280" r="360" fill="#f6f8ff"/><path d="M500 900L1100 260l500 500v140z" fill="#5b8cff"/></svg>').toString('base64')}`;
 const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264' };
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
 
-async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue }) {
+async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue } | undefined) {
   await page.unrouteAll();
   await page.route('**/api/v1/**', (route) => {
     const request = route.request();
-    const response = handler(new URL(request.url()).pathname, request.method(), new URL(request.url()).search, request.postDataJSON() as Record<string, unknown> | undefined);
+    const url = new URL(request.url());
+    const response = handler(url.pathname, request.method(), url.search, request.postDataJSON() as Record<string, unknown> | undefined);
+    if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });
 }
@@ -55,7 +58,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/catalog/home')) return { json: { items: [film], total: 1, next: null } };
       if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [film] }, { name: 'My List', items: [] }] } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
-      return { json: {} };
+      return undefined;
     });
     await open(page, '/');
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
@@ -87,7 +90,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/setup/status')) return { json: ready };
       if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'protected', name: 'Protected', protected: true }] } };
       if (path.endsWith('/select')) { pinAttempts += 1; return pinAttempts === 1 ? { status: 401, json: { error: { code: 'invalid_pin' } } } : { status: 429, json: { error: { code: 'pin_rate_limited' } } }; }
-      return { json: {} };
+      return undefined;
     });
     await open(page, '/');
     await page.getByRole('button', { name: /protected/i }).click();
@@ -103,17 +106,22 @@ for (const viewport of viewports) {
       if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
       if (path.endsWith('/select')) return { json: {} };
       if (path.endsWith('/catalog/home')) return { json: { items: [film, series], total: 2, next: null } };
-      if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [film, series] }, { name: 'My List', items: [] }] } };
-      if (path.endsWith('/catalog/films/film-1')) return { json: film };
+      if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [film] }, { name: 'New', items: [series] }, { name: 'My List', items: [] }] } };
       if (path.endsWith('/catalog/items/film-1')) return { json: film };
       if (path.endsWith('/catalog/items/series-1')) return { json: series };
       if (path.endsWith('/catalog/series/series-1')) return { json: { ...series, seasons: [{ id: 'season-1', number: 1, episodes: [{ id: 'episode-1', title: 'First Signal', kind: 'episode', season: 1, episode: 1, local_only: true }] }] } };
       if (path.endsWith('/catalog/search')) return { json: { items: query.includes('relay') ? [series] : [], total: query.includes('relay') ? 1 : 0, next: null } };
-      return { json: {} };
+      return undefined;
     });
     await open(page, '/');
     await page.getByRole('button', { name: 'Viewer' }).click();
     await expect(page.getByRole('heading', { name: 'Cobalt Sky' })).toBeVisible();
+    await page.getByTestId('card-film-1').focus();
+    await page.getByTestId('card-film-1').press('ArrowDown');
+    await expect(page.getByTestId('card-series-1')).toBeFocused();
+    await page.getByTestId('card-series-1').press('ArrowUp');
+    await page.getByTestId('card-film-1').press('ArrowUp');
+    await expect(page.getByRole('button', { name: 'Home' })).toBeFocused();
     await page.getByRole('button', { name: /view details for cobalt sky/i }).click();
     await expect(page.getByRole('dialog')).toContainText(/Media: mp4/i);
     await page.getByRole('button', { name: /close details/i }).click();
@@ -135,7 +143,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
       if (path.endsWith('/scan/status')) return { json: { scan: { status: 'partial', scanned: 2, unmatched: 1, failed: 1 } } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
-      return { json: {} };
+      return undefined;
     });
     await open(page, '/owner');
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
@@ -149,7 +157,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/select')) return { json: {} };
       if (path.endsWith('/catalog/home')) return { json: { items: [{ ...film, local_only: true, synopsis: '' }], next: null } };
       if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ ...film, local_only: true, synopsis: '' }] }, { name: 'My List', items: [] }] } };
-      return { json: {} };
+      return undefined;
     });
     await open(page, '/');
     await page.getByRole('button', { name: 'Viewer' }).click();
@@ -187,10 +195,10 @@ test('mocked viewer journey: filtered grids, sort, demo detail, and My List', as
       const preference = preferences[media];
       return { json: preference.view === 'grid' ? { preference, items: [{ ...item, listed: item.id === filmDemo.id && listed }] } : { preference, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ ...item, listed: item.id === filmDemo.id && listed }] }, { name: 'My List', items: listed && item.id === filmDemo.id ? [{ ...item, listed }] : [] }] } };
     }
-    if (path.endsWith('/catalog/items/demo-film') || path.endsWith('/catalog/films/demo-film')) return { json: filmDemo };
+    if (path.endsWith('/catalog/items/demo-film')) return { json: filmDemo };
     if (path.endsWith('/catalog/items/demo-series') || path.endsWith('/catalog/series/demo-series')) return { json: seriesDemo };
     if (path.endsWith('/catalog/home')) return { json: { items: [filmDemo] } };
-    return { json: {} };
+    return undefined;
   });
   await open(page, '/');
   await page.getByRole('button', { name: 'Viewer' }).click();
@@ -217,6 +225,44 @@ test('mocked viewer journey: filtered grids, sort, demo detail, and My List', as
   await page.screenshot({ path: testInfo.outputPath('demo-detail.png'), fullPage: true });
 });
 
+
+
+test('large poster grids keep a bounded browser DOM while scrolling to the final row', async ({ page }) => {
+  const items = Array.from({ length: 1_000 }, (_, index) => ({ id: `grid-${index}`, title: `Grid title ${index}`, kind: 'film', local_only: true, listed: false }));
+  await mock(page, (path) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+    if (path.endsWith('/select')) return { json: {} };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'grid', sort: 'title' }, items } };
+    return undefined;
+  });
+  await open(page, '/');
+  await page.getByRole('button', { name: 'Viewer' }).click();
+  const grid = page.getByRole('region', { name: 'Titles' });
+  await expect(grid).toBeVisible();
+  expect(await grid.locator('[data-card]').count()).toBeLessThan(100);
+  await grid.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await expect(page.getByTestId('card-grid-999')).toBeVisible();
+  expect(await grid.locator('[data-card]').count()).toBeLessThan(100);
+});
+test('bright artwork keeps the shared hero scrim above artwork and below content', async ({ page }, testInfo) => {
+  const brightFilm = { ...film, backdrop: brightBackdropArt };
+  await mock(page, (path) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+    if (path.endsWith('/select')) return { json: {} };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [brightFilm] }, { name: 'My List', items: [] }] } };
+    return undefined;
+  });
+  await open(page, '/');
+  await page.getByRole('button', { name: 'Viewer' }).click();
+  await expect(page.getByRole('heading', { name: 'Cobalt Sky' })).toBeVisible();
+  const layers = await page.locator('.hero').evaluate((hero) => ({ scrim: getComputedStyle(hero, '::before').backgroundImage, scrimZ: getComputedStyle(hero, '::before').zIndex, contentZ: getComputedStyle(hero.querySelector('h1')!).zIndex }));
+  expect(layers.scrim).not.toBe('none');
+  expect(layers.scrimZ).toBe('0');
+  expect(layers.contentZ).toBe('1');
+  await page.screenshot({ path: testInfo.outputPath('bright-artwork-scrim.png'), fullPage: true });
+});
 test('mocked playback planning and capacity error states', async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
@@ -224,7 +270,9 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   await mock(page, (path) => {
     if (path.endsWith('/setup/status')) return { json: ready };
     if (path.endsWith('/playback/plans')) return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/api/v1/playback/sessions/session-1/heartbeat', seek_url: '/api/v1/playback/sessions/session-1/seek', stop_url: '/api/v1/playback/sessions/session-1/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
-    return { json: {} };
+    if (path.endsWith('/heartbeat')) return { json: { expires_at: 9999999999 } };
+    if (path.endsWith('/stop')) return { json: { stopped: true } };
+    return undefined;
   });
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
@@ -244,7 +292,7 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   await mock(page, (path) => {
     if (path.endsWith('/setup/status')) return { json: ready };
     if (path.endsWith('/playback/plans')) return { status: 503, json: { error: { code: 'playback_capacity' } } };
-    return { json: {} };
+    return undefined;
   });
   await page.goto('/play/film-2');
   await expect(page.getByRole('alert')).toContainText(/playback limit/i);
@@ -263,6 +311,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
   };
   const handler = (path: string) => {
     if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [] } };
     if (path.endsWith('/playback/plans')) {
       plans += 1;
       return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: `session-${plans}`, media_url: 'data:video/mp4;base64,', heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/api/v1/playback/sessions/session-${plans}/seek`, stop_url: `/api/v1/playback/sessions/session-${plans}/stop`, resume_ms: plans > 1 ? 12_000 : 0, stream_offset_ms: 0, expires_at: 9999999999 } };
@@ -277,7 +326,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
       stops += 1;
       return { json: { stopped: true } };
     }
-    return { json: {} };
+    return undefined;
   };
   observe(page);
   await mock(page, handler);
