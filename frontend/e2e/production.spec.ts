@@ -22,20 +22,28 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.goto('/setup');
   await page.getByLabel(/setup token/i).fill(token);
   await page.getByLabel(/owner password/i).fill('production-owner-password');
-  await page.getByRole('button', { name: /claim flixr/i }).click();
-  await expect(page.getByRole('heading', { name: /keep your local cinema ready/i })).toBeVisible();
-  await page.getByLabel(/films root/i).fill(filmsRoot);
-  await page.getByLabel(/tv root/i).fill(tvRoot);
-  await page.getByRole('button', { name: /save roots/i }).click();
-  await expect(page.getByRole('status')).toContainText(/library roots saved/i);
-  await page.getByRole('button', { name: /start scan/i }).click();
-  await expect(page.getByText(/complete: 4 scanned, 0 unmatched, 0 failed/i)).toBeVisible({ timeout: 30_000 });
+  const scan = page.waitForResponse((response) => response.url().includes('/api/v1/owner/scan') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: /secure this server/i }).click();
+  await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
+  await page.getByLabel(/films library/i).fill(filmsRoot);
+  await page.getByLabel(/tv library/i).fill(tvRoot);
+  await page.getByRole('button', { name: /save libraries/i }).click();
+  expect((await scan).ok()).toBeTruthy();
+  await expect(page.getByRole('heading', { name: /profile/i })).toBeVisible();
+  await expect.poll(async () => page.evaluate(async () => {
+    const response = await fetch('/api/v1/owner/scan/status');
+    const body = await response.json() as { scan?: { status?: string; scanned?: number; unmatched?: number; failed?: number } };
+    const scanStatus = body.scan;
+    return `${scanStatus?.status}:${scanStatus?.scanned}:${scanStatus?.unmatched}:${scanStatus?.failed}`;
+  }), { timeout: 30_000 }).toBe('complete:4:0:0');
   await page.getByLabel(/^name$/i).fill('Production viewer');
   await page.getByRole('button', { name: /create profile/i }).click();
-  await page.getByRole('button', { name: /log out/i }).click();
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(page.getByRole('heading', { name: /blue horizon 2026/i })).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('button', { name: /switch profile/i }).click();
   await page.getByRole('button', { name: /production viewer/i }).click();
-
   await expect(page.getByRole('heading', { name: /blue horizon 2026/i })).toBeVisible();
+
   await expect(page.getByTestId(/card-.*$/)).toHaveCount(3);
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
