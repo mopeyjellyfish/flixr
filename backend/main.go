@@ -26,7 +26,12 @@ import (
 )
 
 func main() {
-	if err := run(context.Background(), config.Load()); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("load Flixr configuration", "err", err)
+		os.Exit(1)
+	}
+	if err := run(context.Background(), cfg); err != nil {
 		slog.Error("Flixr stopped", "err", err)
 		os.Exit(1)
 	}
@@ -81,7 +86,12 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	if err != nil {
 		return err
 	}
-	c, err := catalog.Open(db)
+	var c *catalog.Catalog
+	if cfg.Demo {
+		c, err = catalog.OpenDemo(db)
+	} else {
+		c, err = catalog.Open(db)
+	}
 	if err != nil {
 		return err
 	}

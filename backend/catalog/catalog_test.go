@@ -48,6 +48,9 @@ func TestScanProbesMediaAndKeepsIdentityOnMove(t *testing.T) {
 	if len(items) != 2 || items[1].Season != 1 || items[1].Episode != 2 || items[0].VideoCodec != "h264" || items[0].Audio[0].Channels != 2 || items[0].Subtitles[0].Language != "en" {
 		t.Fatalf("got %#v", items)
 	}
+	if !items[0].Playable || items[0].AddedAt == 0 || !items[1].Playable || items[1].AddedAt == 0 {
+		t.Fatalf("newly scanned items are not browse-ready: %#v", items)
+	}
 	before := items[0].ID
 	if err := os.Rename(film, filepath.Join(films, "Moved.Film.mp4")); err != nil {
 		t.Fatal(err)
@@ -75,7 +78,7 @@ func TestScanProbesMediaAndKeepsIdentityOnMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := reopened.Item(before); !ok || got.VideoCodec != "h264" || len(got.Subtitles) != 1 {
+	if got, ok := reopened.Item(before); !ok || got.VideoCodec != "h264" || len(got.Subtitles) != 1 || !got.Playable || got.AddedAt == 0 {
 		t.Fatalf("persisted item = %#v, exists = %v", got, ok)
 	}
 }

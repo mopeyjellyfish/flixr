@@ -51,7 +51,7 @@ Invalidation map:
 - embed, Dockerfile, Compose, or Makefile edits invalidate the production executable and `make demo` smoke proof.
 - demo title/genre edits invalidate exact seed-count, row-order, type-filter, category, and non-playable-title assertions.
 
-## [ ] 001 — Persist personalized catalog metadata and filename-only demo records
+## [x] 001 — Persist personalized catalog metadata and filename-only demo records
 
 ### Outcome and requirement trace
 

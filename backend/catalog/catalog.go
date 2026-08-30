@@ -49,18 +49,22 @@ type SubtitleTrack struct {
 }
 
 type Item struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	Kind       string `json:"kind"`
-	Season     int    `json:"season,omitempty"`
-	Episode    int    `json:"episode,omitempty"`
-	SeriesID   string `json:"series_id,omitempty"`
-	LocalOnly  bool   `json:"local_only"`
-	ProviderID string `json:"provider_id,omitempty"`
-	Year       int    `json:"year,omitempty"`
-	Synopsis   string `json:"synopsis,omitempty"`
-	Poster     string `json:"poster,omitempty"`
-	Backdrop   string `json:"backdrop,omitempty"`
+	ID         string   `json:"id"`
+	Title      string   `json:"title"`
+	Kind       string   `json:"kind"`
+	Season     int      `json:"season,omitempty"`
+	Episode    int      `json:"episode,omitempty"`
+	SeriesID   string   `json:"series_id,omitempty"`
+	LocalOnly  bool     `json:"local_only"`
+	ProviderID string   `json:"provider_id,omitempty"`
+	Year       int      `json:"year,omitempty"`
+	Synopsis   string   `json:"synopsis,omitempty"`
+	Poster     string   `json:"poster,omitempty"`
+	Backdrop   string   `json:"backdrop,omitempty"`
+	Genres     []string `json:"genres"`
+	AddedAt    int64    `json:"added_at"`
+	Playable   bool     `json:"playable"`
+	Demo       bool     `json:"demo"`
 	MediaProperties
 
 	path        string
@@ -88,6 +92,10 @@ type Series struct {
 	Synopsis   string   `json:"synopsis,omitempty"`
 	Poster     string   `json:"poster,omitempty"`
 	Backdrop   string   `json:"backdrop,omitempty"`
+	Genres     []string `json:"genres"`
+	AddedAt    int64    `json:"added_at"`
+	Playable   bool     `json:"playable"`
+	Demo       bool     `json:"demo"`
 	Seasons    []Season `json:"seasons,omitempty"`
 }
 
@@ -139,16 +147,16 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if db == nil {
 		return c, nil
 	}
-	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, video_profile, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop FROM catalog_items`)
+	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, video_profile, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop, genres_json, added_at, playable, demo FROM catalog_items`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var x Item
-		var local int
-		var audio, subtitles string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
+		var local, playable, demo int
+		var audio, subtitles, genres string
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(audio), &x.Audio); err != nil {
@@ -157,7 +165,10 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 		if err := json.Unmarshal([]byte(subtitles), &x.Subtitles); err != nil {
 			return nil, fmt.Errorf("decode subtitle tracks: %w", err)
 		}
-		x.LocalOnly = local != 0
+		if err := json.Unmarshal([]byte(genres), &x.Genres); err != nil {
+			return nil, fmt.Errorf("decode genres: %w", err)
+		}
+		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		seriesFields(&x)
 		c.items[x.ID] = x
@@ -165,18 +176,22 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	seriesRows, err := db.Query(`SELECT id,title,local_only,provider_id,year,synopsis,poster,backdrop FROM catalog_series`)
+	seriesRows, err := db.Query(`SELECT id,title,local_only,provider_id,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_series`)
 	if err != nil {
 		return nil, err
 	}
 	defer seriesRows.Close()
 	for seriesRows.Next() {
 		var x Series
-		var local int
-		if err := seriesRows.Scan(&x.ID, &x.Title, &local, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
+		var local, playable, demo int
+		var genres string
+		if err := seriesRows.Scan(&x.ID, &x.Title, &local, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, err
 		}
-		x.Kind, x.LocalOnly = "series", local != 0
+		if err := json.Unmarshal([]byte(genres), &x.Genres); err != nil {
+			return nil, fmt.Errorf("decode genres: %w", err)
+		}
+		x.Kind, x.LocalOnly, x.Playable, x.Demo = "series", local != 0, playable != 0, demo != 0
 		c.series[x.ID] = x
 	}
 	if err := seriesRows.Err(); err != nil {
@@ -526,7 +541,7 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	case ".webm":
 		properties.Container = "webm"
 	}
-	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime}
+	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, AddedAt: time.Now().Unix(), Playable: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime}
 	episodeFields(&x)
 	seriesFields(&x)
 	return x, nil
@@ -580,7 +595,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			series[item.SeriesID] = existing
 			continue
 		}
-		series[item.SeriesID] = Series{ID: item.SeriesID, Title: seriesTitle(item.path, item.Title), Kind: "series", LocalOnly: item.LocalOnly}
+		series[item.SeriesID] = Series{ID: item.SeriesID, Title: seriesTitle(item.path, item.Title), Kind: "series", LocalOnly: item.LocalOnly, Playable: true}
 	}
 	for id, value := range series {
 		if previous, ok := previousSeries[id]; ok && previous.ProviderID != "" {
@@ -608,6 +623,11 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 		}
 		series[id] = value
+	}
+	for id, value := range previousSeries {
+		if value.Demo {
+			series[id] = value
+		}
 	}
 	c.mu.Lock()
 	c.series = series
@@ -638,6 +658,10 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 	}
 	c.mu.RUnlock()
 	for _, old := range previous {
+		if old.Demo {
+			next[old.ID] = old
+			continue
+		}
 		if _, failed := failures[scanKey{old.rootKind, old.path}]; failed {
 			next[old.ID] = old
 		}
@@ -657,13 +681,27 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 		for seriesID, seriesTitle := range series {
 			value, ok := seriesState[seriesID]
 			if !ok {
-				value = Series{ID: seriesID, Title: seriesTitle, Kind: "series", LocalOnly: true}
+				value = Series{ID: seriesID, Title: seriesTitle, Kind: "series", LocalOnly: true, AddedAt: time.Now().Unix(), Playable: true}
 			}
-			if _, err = tx.Exec(`INSERT INTO catalog_series(id,title,local_only,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,local_only=excluded.local_only,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, value.ID, value.Title, boolInt(value.LocalOnly), value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop, time.Now().Unix()); err != nil {
+			if value.Demo {
+				continue
+			}
+			genres, err := json.Marshal(value.Genres)
+			if err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_series(id,title,local_only,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,local_only=excluded.local_only,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, value.ID, value.Title, boolInt(value.LocalOnly), value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop, time.Now().Unix(), string(genres), value.AddedAt, boolInt(value.Playable)); err != nil {
 				return err
 			}
 		}
 		for _, x := range next {
+			if x.Demo {
+				continue
+			}
+			genres, err := json.Marshal(x.Genres)
+			if err != nil {
+				return err
+			}
 			audio, err := json.Marshal(x.Audio)
 			if err != nil {
 				return err
@@ -679,7 +717,7 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 					return err
 				}
 			}
-			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,video_profile=excluded.video_profile,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, x.VideoProfile, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix()); err != nil {
+			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,video_profile=excluded.video_profile,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, x.VideoProfile, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix(), string(genres), x.AddedAt, boolInt(x.Playable)); err != nil {
 				return err
 			}
 		}
@@ -774,7 +812,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	if sqlLimit <= 0 {
 		sqlLimit = -1
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
@@ -782,15 +820,15 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	var out []Item
 	for rows.Next() {
 		var x Item
-		var local int
-		var audio, subtitles string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles); err != nil {
+		var local, playable, demo int
+		var audio, subtitles, genres string
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, fmt.Errorf("scan catalog item: %w", err)
 		}
-		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil {
+		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {
 			return nil, errors.New("decode catalog media properties")
 		}
-		x.LocalOnly = local != 0
+		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		out = append(out, x)
 	}
@@ -832,7 +870,7 @@ func (c *Catalog) Item(itemID string) (Item, bool) {
 	if !ok {
 		return Item{}, false
 	}
-	return Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}, true
+	return Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop, Genres: series.Genres, AddedAt: series.AddedAt, Playable: series.Playable, Demo: series.Demo}, true
 }
 func (c *Catalog) Open(id string) (*os.File, error) {
 	c.mu.RLock()
