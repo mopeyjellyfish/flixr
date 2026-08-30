@@ -6,14 +6,16 @@ import { ProfileChooser } from '../features/profiles/Profiles';
 
 const Owner = lazy(async () => ({ default: (await import('../features/owner/Owner')).Owner }));
 const Browse = lazy(async () => ({ default: (await import('../features/browse/Browse')).Browse }));
+const Player = lazy(async () => ({ default: (await import('../modules/mediaPlayer/Player')).Player }));
 
-type Route = 'loading' | 'setup' | 'login' | 'profiles' | 'owner' | 'browse' | 'failure';
+type Route = 'loading' | 'setup' | 'login' | 'profiles' | 'owner' | 'browse' | 'player' | 'failure';
 function routeFor(path = window.location.pathname): Route {
   const pathname = path.split(/[?#]/, 1)[0];
   if (pathname === '/setup') return 'setup';
   if (pathname === '/login') return 'login';
   if (pathname === '/profiles') return 'profiles';
   if (pathname === '/owner') return 'owner';
+  if (pathname.startsWith('/play/')) return 'player';
   if (pathname === '/home' || pathname === '/search' || pathname.startsWith('/detail/')) return 'browse';
   return 'loading';
 }
@@ -22,6 +24,7 @@ export function App() {
   const [status, setStatus] = useState<SetupStatus>();
   const [route, setRoute] = useState<Route>(routeFor());
   const [path, setPath] = useState(window.location.pathname);
+  const [restoreFocusID, setRestoreFocusID] = useState<string>();
   const navigate = (nextPath: string, replace = false) => {
     window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
     setPath(nextPath);
@@ -43,7 +46,11 @@ export function App() {
   if (route === 'setup' && status) return <main><Setup readiness={status.readiness} onClaimed={() => navigate('/owner')} /></main>;
   if (route === 'login') return <main><OwnerLogin onLogin={() => navigate('/owner')} /></main>;
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
-  if (route === 'browse') return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={path.startsWith('/search') ? 'search' : 'home'} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} onNavigate={navigate} /></Suspense>;
+  if (route === 'player') {
+    const catalogID = decodeURIComponent(path.slice('/play/'.length));
+    return <Suspense fallback={<RouteFallback />}><Player catalogID={catalogID} onExit={() => { setRestoreFocusID(catalogID); navigate('/home'); }} /></Suspense>;
+  }
+  if (route === 'browse') return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={path.startsWith('/search') ? 'search' : 'home'} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} restoreFocusID={restoreFocusID} onFocusRestored={() => setRestoreFocusID(undefined)} onNavigate={navigate} /></Suspense>;
   return <ProfileChooser owner={() => navigate('/login')} onSelected={() => navigate('/home')} />;
 }
 

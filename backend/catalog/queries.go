@@ -94,7 +94,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		return Series{}, false
 	}
 	out.Kind, out.LocalOnly = "series", local != 0
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,audio_json,subtitle_json,series_id,provider_id,year,synopsis,poster,backdrop,season_id FROM catalog_items WHERE series_id=? ORDER BY season_id, id`, seriesID)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,provider_id,year,synopsis,poster,backdrop,season_id FROM catalog_items WHERE series_id=? ORDER BY season_id, id`, seriesID)
 	if err != nil {
 		return Series{}, false
 	}
@@ -104,7 +104,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		var x Item
 		var local int
 		var audio, subtitles, seasonID string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &seasonID); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &seasonID); err != nil {
 			return Series{}, false
 		}
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil {

@@ -77,6 +77,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		Streams []struct {
 			CodecType string            `json:"codec_type"`
 			CodecName string            `json:"codec_name"`
+			Profile   string            `json:"profile"`
 			Channels  int               `json:"channels"`
 			Tags      map[string]string `json:"tags"`
 		} `json:"streams"`
@@ -90,6 +91,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		case "video":
 			if media.VideoCodec == "" {
 				media.VideoCodec = stream.CodecName
+				media.VideoProfile = stream.Profile
 			}
 		case "audio":
 			media.Audio = append(media.Audio, AudioTrack{Codec: stream.CodecName, Channels: stream.Channels, Language: stream.Tags["language"]})

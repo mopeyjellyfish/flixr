@@ -10,6 +10,7 @@ const viewports = [
 ];
 
 test('built binary completes setup, scan, profile, browse, and detail flow', async ({ page }, testInfo) => {
+  test.setTimeout(90_000);
   const token = process.env.FLIXR_SETUP_TOKEN;
   const filmsRoot = process.env.FLIXR_FILMS_ROOT;
   const tvRoot = process.env.FLIXR_TV_ROOT;
@@ -28,14 +29,14 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /save roots/i }).click();
   await expect(page.getByRole('status')).toContainText(/library roots saved/i);
   await page.getByRole('button', { name: /start scan/i }).click();
-  await expect(page.getByText(/complete: 3 scanned, 0 unmatched, 0 failed/i)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/complete: 4 scanned, 0 unmatched, 0 failed/i)).toBeVisible({ timeout: 30_000 });
   await page.getByLabel(/^name$/i).fill('Production viewer');
   await page.getByRole('button', { name: /create profile/i }).click();
   await page.getByRole('button', { name: /log out/i }).click();
   await page.getByRole('button', { name: /production viewer/i }).click();
 
   await expect(page.getByRole('heading', { name: /blue horizon 2026/i })).toBeVisible();
-  await expect(page.getByTestId(/card-.*$/)).toHaveCount(2);
+  await expect(page.getByTestId(/card-.*$/)).toHaveCount(3);
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto('/home');
@@ -46,6 +47,36 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
     await page.screenshot({ path: testInfo.outputPath(`production-home-${viewport.name}.png`), fullPage: true });
   }
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole('button', { name: /view details for blue horizon 2026/i }).click();
+  await page.getByRole('button', { name: /play blue horizon 2026/i }).click();
+  await expectPlayback(page);
+  await page.screenshot({ path: testInfo.outputPath('production-direct-playback-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('production-direct-playback-phone.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole('button', { name: /back to library/i }).click();
+  await expect(page.getByRole('button', { name: /view details for blue horizon 2026/i })).toBeFocused();
+  await page.getByRole('button', { name: /film compatibility check 2026/i }).click();
+  await page.getByRole('button', { name: /play compatibility check 2026/i }).click();
+  await expectPlayback(page);
+  await page.screenshot({ path: testInfo.outputPath('production-transcode-playback-desktop.png'), fullPage: true });
+  await page.getByRole('button', { name: /back to library/i }).click();
+
+
+  await page.getByRole('button', { name: /series signal/i }).click();
+  await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
+  await expectPlayback(page);
+  const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
+  await page.locator('video').evaluate((video) => {
+    const media = video as HTMLVideoElement;
+    media.currentTime = 0.1;
+    media.dispatchEvent(new Event('seeked', { bubbles: true }));
+  });
+  expect((await seekResponse).ok()).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
+  await page.getByRole('button', { name: /back to library/i }).click();
+
   await page.getByRole('button', { name: /series signal/i }).click();
   await expect(page.getByRole('dialog')).toContainText(/S1 E1 Signal/i);
   await expect(page).toHaveURL(/\/detail\//);
@@ -63,3 +94,11 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
   expect(errors).toEqual([]);
 });
+
+async function expectPlayback(page: import('@playwright/test').Page) {
+  const video = page.locator('video');
+  await expect(video).toBeVisible();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
+}

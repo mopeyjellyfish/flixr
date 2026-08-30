@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/afero"
 )
 
 func artworkURL(id, kind string) string {
@@ -27,16 +29,16 @@ func (c *Catalog) cacheArtwork(id, kind string, art Artwork) (string, error) {
 		return "", nil
 	}
 	dir := filepath.Join(c.db.DataDir(), "artwork")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := c.fs.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	tmp, err := os.CreateTemp(dir, ".tmp-")
+	tmp, err := afero.TempFile(c.fs, dir, ".tmp-")
 	if err != nil {
 		return "", err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
-	if err := tmp.Chmod(0600); err != nil {
+	defer c.fs.Remove(name)
+	if err := c.fs.Chmod(name, 0o600); err != nil {
 		tmp.Close()
 		return "", err
 	}
@@ -47,7 +49,7 @@ func (c *Catalog) cacheArtwork(id, kind string, art Artwork) (string, error) {
 	if err := tmp.Close(); err != nil {
 		return "", err
 	}
-	if err := os.Rename(name, artworkFile(c.db.DataDir(), id, kind)); err != nil {
+	if err := c.fs.Rename(name, artworkFile(c.db.DataDir(), id, kind)); err != nil {
 		return "", err
 	}
 	if _, err := c.db.Exec(`INSERT INTO catalog_artwork(catalog_id,kind,content_type) VALUES(?,?,?) ON CONFLICT(catalog_id,kind) DO UPDATE SET content_type=excluded.content_type`, id, kind, art.ContentType); err != nil {
@@ -99,7 +101,7 @@ func (c *Catalog) Artwork(id, kind string) ([]byte, string, error) {
 	if err := c.db.QueryRow(`SELECT content_type FROM catalog_artwork WHERE catalog_id=? AND kind=?`, id, kind).Scan(&contentType); err != nil {
 		return nil, "", os.ErrNotExist
 	}
-	data, err := os.ReadFile(artworkFile(c.db.DataDir(), id, kind))
+	data, err := afero.ReadFile(c.fs, artworkFile(c.db.DataDir(), id, kind))
 	if err != nil {
 		return nil, "", fmt.Errorf("read cached artwork: %w", err)
 	}
