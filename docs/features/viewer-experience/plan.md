@@ -96,7 +96,7 @@ Atomic commit: catalog persistence and explicit demo seed. Delivery unit 1; PR b
 
 The migrated database and catalog public seam expose the exact provider-free demo records, and normal production startup remains unchanged.
 
-## [ ] 002 — Serve Home rows, filters, My List, and profile view preferences
+## [x] 002 — Serve Home rows, filters, My List, and profile view preferences
 
 ### Outcome and requirement trace
 

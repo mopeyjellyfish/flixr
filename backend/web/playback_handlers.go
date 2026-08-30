@@ -48,9 +48,17 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, ok := s.catalog.Item(body.CatalogID)
-	if !ok || (item.Kind != "film" && item.Kind != "episode") {
+	item, err := s.catalog.PlaybackItem(body.CatalogID)
+	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (item.Kind != "film" && item.Kind != "episode")) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	if errors.Is(err, catalog.ErrNotPlayable) {
+		fail(w, http.StatusConflict, "playback_not_playable")
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "playback_failed")
 		return
 	}
 	s.readyMu.RLock()
