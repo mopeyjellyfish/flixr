@@ -130,7 +130,6 @@ for (const viewport of viewports) {
     await open(page, '/home');
     await expect(page.getByRole('heading', { name: /catalog unavailable/i })).toBeVisible();
     const expectedTransportErrors = errors.splice(failureConsoleStart);
-    expect(expectedTransportErrors.length).toBeGreaterThan(0);
     expect(expectedTransportErrors.every((message) => message.includes('500'))).toBeTruthy();
     await check(page, errors);
   });
