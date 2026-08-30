@@ -3,7 +3,7 @@
 ## Authority
 
 - Accepted direction: `DESIGN.md` — Cobalt Signal.
-- Product states: setup, owner operations, profile selection, home, search, film detail, series detail, local-only metadata, partial scan, request failure, direct playback, remux playback, compatibility transcode, pause, resume, and capacity failure.
+- Product states: provider-free Secure → Libraries → Profile onboarding, owner operations, profile selection, home, search, film detail, series detail, local-only metadata, partial scan, request failure, direct playback, remux playback, compatibility transcode, pause, resume, and capacity failure.
 - Media and artwork: generated synthetic fixtures and original geometric SVG artwork only.
 
 The local Chromium, Firefox, and WebKit mocked matrix and embedded-production Chromium acceptance passed for Delivery Unit 2. The Delivery Unit 1 matrix also passed in GitHub Actions run [`33285726565`](https://github.com/mopeyjellyfish/flixr/actions/runs/33285726565), which uploaded the browser evidence artifacts.
@@ -12,13 +12,13 @@ The local Chromium, Firefox, and WebKit mocked matrix and embedded-production Ch
 
 | Route or flow | Viewport | State and interaction | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| `/setup` → `/owner` | 1920×1080, 1440×900, 1024×768, 390×844 | Claim the first owner, including missing-tool readiness | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
+| `/setup` → `/home` | 1920×1080, 1440×900, 1024×768, 390×844 | Secure the local server, optionally add film/TV roots, start a scan, create/select the first profile, and show missing-tool guidance without requiring a metadata provider | Local Chromium/Firefox/WebKit mocked matrix; embedded-production Chromium; manual desktop/phone captures | Pass |
 | `/profiles` | All four named viewports | Select an open profile; reject an invalid PIN; show rate limiting | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
 | `/home` | All four named viewports | Populated film and series rails; focal title and visible details action; film and ordered episode details; close and restore focus | Local Chromium `populated-home.png` output and CI Chromium/Firefox/WebKit artifacts | Pass |
 | `/search` | All four named viewports | Empty query, no results, and one result after debounce | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
 | `/owner` | All four named viewports | Missing ffprobe, persisted roots, configured TMDB state, and partial scan | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
 | `/home` | All four named viewports | Local-only metadata and request failure | Local Chromium and CI Chromium/Firefox/WebKit mocked matrix | Pass |
-| Production executable | 1920×1080, 1440×900, 1024×768, 390×844 Chromium | Claim, save roots, scan four generated media files, create/select a profile, capture focal home, reload a series deep link, use browser Back, and search | `frontend/e2e/production.spec.ts`; `production-home-*.png`; `production-search-desktop.png` | Pass |
+| Production executable | 1920×1080, 1440×900, 1024×768, 390×844 Chromium | Complete provider-free Secure → Libraries → Profile onboarding, scan four generated media files, enter the selected profile, capture focal home, reload a series deep link, use browser Back, and search | `frontend/e2e/production.spec.ts`; `production-home-*.png`; `production-search-desktop.png` | Pass |
 | Production playback | 1440×900 and 390×844 Chromium | Capability-planned direct MP4, Matroska remux with in-window seek, MPEG-4/MP3 AVI to H.264/AAC transcode, native controls, explicit actions, local status, and no horizontal overflow | `production-direct-playback-desktop.png`; `production-direct-playback-phone.png`; `production-remux-playback-desktop.png`; `production-transcode-playback-desktop.png` | Pass |
 | Mocked player | 1920×1080, 1440×900, 1024×768, 390×844 Chromium/Firefox/WebKit | Axe, overflow, console/page errors, direct seek intent, buffering, paused heartbeat, cross-client resume, stop, expired authority, recovery, network interruption, and capacity | `frontend/e2e/mock-api.spec.ts`; `player-*.png` | Pass |
 | Production executable | 1440×900 and 390×844 Chrome | Existing durable catalog with one generated film and a two-episode generated series | Manual browser capture and accessibility snapshot | Pass |
@@ -33,6 +33,7 @@ The Playwright screenshots are generated under ignored `frontend/test-results/` 
 - Film and series dialogs use catalog IDs only. The series dialog shows ordered seasons and episodes without filesystem paths.
 - Dialog close, Escape, and browser Back restore a coherent route and focus state.
 - Axe reports no serious or critical violations on the focal home, owner, local-only, request-failure, production home, and production search states.
+- Setup exposes no TMDB/TVDB credential, reports missing local tools without blocking direct play, and keeps the focal action visible through all three steps at every named viewport.
 - The tests report no page errors or console errors on the checked flows.
 - The tests report no horizontal document overflow at the four named viewports or on the production path.
 - Touch controls keep a minimum 44 px target. Reduced-motion CSS removes effective transition and animation duration.
@@ -56,6 +57,7 @@ The Playwright screenshots are generated under ignored `frontend/test-results/` 
 | High | Nominal four-second arithmetic could misclassify a variable-duration remux segment as retained. | Reuse and seek follow the actual manifest window. | Remux boundaries follow source keyframes. | Resolved by accumulating observed `EXTINF` durations and forcing four-second transcode keyframes. Variable-duration sliding-manifest tests pass. |
 | Medium | Playback shutdown drained the long-lived FFmpeg input response before terminating FFmpeg. | Signal shutdown remains bounded with an active compatibility stream. | Private-listener shutdown preceded generation shutdown. | Resolved by stopping public requests, terminating playback while loopback input remains available, then draining the private input listener. |
 | Medium | Initial player proof omitted accessibility, lifecycle states, focus return, and lazy-bundle enforcement. | The signature player meets the same responsive, accessible, and bounded-loading contract as browse. | The first acceptance path proved startup only. | Resolved with four-viewport axe/overflow evidence, lifecycle state tests, deterministic focus entry/return, and the bundle boundary gate. |
+| Medium | First-run setup looked like a raw administrator form and routed directly into a square owner-settings grid where optional TMDB controls appeared alongside required tasks. | A new owner gets a modern local-only journey with no hosted account or metadata-provider credential. | First-run behavior reused owner operations instead of owning an onboarding hierarchy. | Resolved with the accepted Signal Path Secure → Libraries → Profile flow, softer shared controls/surfaces, optional library skip, automatic scan, direct profile selection, and desktop/phone visual rechecks. |
 
 ## Result
 

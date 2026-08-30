@@ -35,29 +35,52 @@ async function check(page: Page, errors: string[]) {
 
 for (const viewport of viewports) {
   test(`mocked delivery-unit states: ${viewport.name}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     await page.setViewportSize(viewport);
     const errors: string[] = [];
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
     page.on('pageerror', (error) => errors.push(error.message));
 
     let claimed = false;
-    await mock(page, (path) => {
+    let scanStarts = 0;
+    let profileCreates = 0;
+    let profileSelections = 0;
+    await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed, readiness: { ffprobe: false, ffmpeg: false } } };
       if (path.endsWith('/setup/claim')) { claimed = true; return { json: { claimed: true } }; }
-      if (path.endsWith('/owner/roots')) return { json: { films: '', tv: '' } };
-      if (path.endsWith('/settings/tmdb')) return { json: { configured: false } };
-      if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
-      if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
-      if (path.endsWith('/scan/status')) return { json: { scan: { status: '', scanned: 0, unmatched: 0, failed: 0 } } };
+      if (path.endsWith('/owner/roots')) return { json: { saved: true } };
+      if (path.endsWith('/owner/scan')) { scanStarts += 1; return { json: { scan: { status: 'running', scanned: 0, unmatched: 0, failed: 0 } } }; }
+      if (path.endsWith('/profiles') && method === 'POST') { profileCreates += 1; return { json: { id: 'first-run-viewer', name: 'First-run viewer', protected: false } }; }
+      if (path.endsWith('/profiles/first-run-viewer/select')) { profileSelections += 1; return { json: { selected: true } }; }
+      if (path.endsWith('/catalog/home')) return { json: { items: [film], total: 1, next: null } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return { json: {} };
     });
     await open(page, '/');
+    await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
+    await expect(page.getByText(/direct play can continue/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /secure this server/i })).toBeVisible();
+    await check(page, errors);
     await page.getByLabel(/setup token/i).fill('first-run-token');
     await page.getByLabel(/owner password/i).fill('safe owner password');
-    await page.getByRole('button', { name: /claim flixr/i }).click();
-    await expect(page.getByText('No scan has started.')).toBeVisible();
-
+    await page.getByRole('button', { name: /secure this server/i }).click();
+    await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
+    await expect(page.getByLabel(/tmdb/i)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /save libraries/i })).toBeVisible();
+    await check(page, errors);
+    await page.getByLabel(/films library/i).fill('/media/films');
+    await page.getByRole('button', { name: /save libraries/i }).click();
+    await expect(page.getByRole('heading', { name: /profile/i })).toBeVisible();
+    await expect(page.getByRole('status')).toContainText(/direct play still works/i);
+    expect(scanStarts).toBe(0);
+    await expect(page.getByRole('button', { name: /create profile/i })).toBeVisible();
+    await check(page, errors);
+    await page.getByLabel(/^name$/i).fill('First-run viewer');
+    await page.getByRole('button', { name: /create profile/i }).click();
+    await expect(page.getByRole('heading', { name: 'Cobalt Sky' })).toBeVisible();
+    expect(profileCreates).toBe(1);
+    expect(profileSelections).toBe(1);
+    await check(page, errors);
     let pinAttempts = 0;
     await mock(page, (path) => {
       if (path.endsWith('/setup/status')) return { json: ready };
