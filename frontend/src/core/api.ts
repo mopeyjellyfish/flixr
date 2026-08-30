@@ -18,7 +18,13 @@ export type CatalogItem = {
   synopsis?: string;
   poster?: string;
   backdrop?: string;
+  playable?: boolean;
+  demo?: boolean;
 };
+export type ViewerItem = CatalogItem & { listed: boolean };
+export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
+export type ViewerSection = { name: string; items: ViewerItem[] };
+export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
@@ -39,7 +45,8 @@ export type ApiErrorCode =
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
   | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
-  | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found'
+  | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
+  | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
 export type PlaybackPlan = {

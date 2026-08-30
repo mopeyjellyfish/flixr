@@ -1,4 +1,4 @@
-import { ApiError, type CatalogItem, type CatalogPage, type FilmDetail, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings } from '../core/api';
+import { ApiError, type CatalogItem, type CatalogPage, type FilmDetail, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -41,6 +41,9 @@ export const api = {
   item: (id: string) => request<CatalogItem>(`/catalog/items/${id}`),
   film: (id: string) => request<FilmDetail>(`/catalog/films/${id}`),
   series: (id: string) => request<SeriesDetail>(`/catalog/series/${id}`),
+  viewer: (media: 'all' | 'film' | 'series') => request<ViewerModel>(`/catalog/view?media=${media}`),
+  saveViewerPreference: (media: 'all' | 'film' | 'series', preference: ViewerPreference) => request<ViewerPreference>(`/catalog/preferences/${media}`, { method: 'PUT', body: JSON.stringify(preference) }),
+  setListed: (kind: 'film' | 'series', id: string, listed: boolean) => request<{ listed: boolean }>(`/catalog/list/${kind}/${encodeURIComponent(id)}`, { method: listed ? 'PUT' : 'DELETE' }),
   playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, capabilities }) }),
   playbackHeartbeat: (sessionID: string, positionMs: number) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
   playbackSeek: (sessionID: string, positionMs: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),

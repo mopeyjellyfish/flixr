@@ -138,7 +138,7 @@ Atomic commit: personalized viewer API. Delivery unit 1.
 
 Two profiles can hold different lists and display preferences while receiving deterministic, provider-free rows and filters from the same catalog.
 
-## [ ] 003 — Build the accepted Editorial Stream viewer and simplified poster grid
+## [x] 003 — Build the accepted Editorial Stream viewer and simplified poster grid
 
 ### Outcome and requirement trace
 

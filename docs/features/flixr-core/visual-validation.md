@@ -59,6 +59,25 @@ The Playwright screenshots are generated under ignored `frontend/test-results/` 
 | Medium | Initial player proof omitted accessibility, lifecycle states, focus return, and lazy-bundle enforcement. | The signature player meets the same responsive, accessible, and bounded-loading contract as browse. | The first acceptance path proved startup only. | Resolved with four-viewport axe/overflow evidence, lifecycle state tests, deterministic focus entry/return, and the bundle boundary gate. |
 | Medium | First-run setup looked like a raw administrator form and routed directly into a square owner-settings grid where optional TMDB controls appeared alongside required tasks. | A new owner gets a modern local-only journey with no hosted account or metadata-provider credential. | First-run behavior reused owner operations instead of owning an onboarding hierarchy. | Resolved with the accepted Signal Path Secure → Libraries → Profile flow, softer shared controls/surfaces, optional library skip, automatic scan, direct profile selection, and desktop/phone visual rechecks. |
 
+## Viewer experience Slice 003
+
+### Evidence matrix
+
+| Route or flow | Viewport | State and interaction | Evidence | Status |
+| --- | --- | --- | --- | --- |
+| `/home` | 1920×1080, 1440×900, 1024×768, 390×844 | Mocked profile selection into Editorial Stream Home with the fixed Continue Watching, New, and My List rows, top navigation, semantic view/sort controls, keyboard focus, axe, and overflow checks | `frontend/e2e/mock-api.spec.ts`; `frontend/test-results/mock-api-mocked-delivery-unit-states-{tv,desktop,tablet,phone}-chromium/populated-home.png` | Pass |
+| `/movies` and `/tv` | 1440×900 | Filtered full-width poster grids, independent view/sort preferences, deterministic demo artwork, and profile list mutation | `frontend/e2e/mock-api.spec.ts`; `frontend/test-results/mock-api-mocked-viewer-jou-8f02c-ort-demo-detail-and-My-List-{chromium,firefox,webkit}/{movies-grid,tv-grid,demo-detail}.png` | Pass |
+| `/play/:id` | 1920×1080, 1440×900, 1024×768, 390×844 | Existing lazy Player direct-play, capacity, heartbeat, expiry, interruption, resume, stop, axe, and overflow paths | `frontend/e2e/mock-api.spec.ts`; `frontend/test-results/mock-api-mocked-playback-planning-and-capacity-error-states-chromium/player-{tv,desktop,tablet,phone}.png` | Pass |
+| Viewer controls and title detail | React DOM and Chromium/Firefox/WebKit public seams | Server preference save and reload, filtered media navigation, profile-list mutation without duplicates, direct-search membership, demo title treatment without Play, and dialog focus return | `frontend/src/features/browse/Browse.test.tsx`; `frontend/e2e/mock-api.spec.ts` | Pass |
+
+### Slice 003 mismatch ledger
+
+| Severity | Observed evidence | Accepted expectation | Cause | Resolution and recheck |
+| --- | --- | --- | --- | --- |
+| Medium | The legacy browse surface only loaded `/catalog/home`, so it could not render fixed Home rows, persisted view/sort choices, or profile-specific My List state. | Editorial Stream receives the server-owned viewer model and preserves Home row order. | The frontend had not consumed Slice 002 viewer endpoints. | Resolved with typed viewer/list/preference client calls and row/grid rendering. Rechecked with Browse tests and mocked Chromium captures at all four named viewports. |
+| Medium | Demo records could look like ordinary titles and expose a misleading playback affordance. | Demo titles explain that no media file exists and do not offer Play. | `playable`/`demo` were absent from the client model and detail action policy. | Resolved with additive typed fields, deterministic tonal artwork, and a non-playable detail state. Rechecked in the public DOM test. |
+| Low | After closing a detail opened from the second card, the focused rail may retain its browser scroll offset, so the preceding poster is partially outside the rail viewport in the capture. | Focus stays on the originating item and horizontal rails may scroll to retain that focus. | Native horizontal scroll follows the restored focused card. | Expected focus behavior, not an open mismatch. Chromium overflow checks pass; the focused card and focal action remain visible. |
+
 ## Result
 
-The Delivery Unit 1 and Delivery Unit 2 mismatch ledger has no open blocker. The local Chromium/Firefox/WebKit mocked matrix, real FFmpeg media integration, and embedded production-executable direct/remux/transcode acceptance passed. CI preserves the mocked and production browser artifacts.
+The Delivery Unit 1, Delivery Unit 2, and viewer-experience Slice 003 mismatch ledger has no open blocker. The local Chromium/Firefox/WebKit mocked matrix, real FFmpeg media integration, and embedded production-executable direct/remux/transcode acceptance passed. CI preserves the mocked and production browser artifacts.
