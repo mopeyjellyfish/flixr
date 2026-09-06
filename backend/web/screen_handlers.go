@@ -15,7 +15,7 @@ type screenMessage struct {
 	Version    int    `json:"version"`
 	Type       string `json:"type"`
 	CatalogID  string `json:"catalog_id,omitempty"`
-	PositionMS int64  `json:"position_ms,omitempty"`
+	PositionMS int64  `json:"position_ms"`
 }
 
 func (s *Server) screenProfile(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -100,7 +100,7 @@ func (s *Server) screenReceiver(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.CloseNow()
 	defer disconnect()
-	closed := conn.CloseRead(context.Background())
+	closed := conn.CloseRead(s.screens.Context())
 	for {
 		select {
 		case <-closed.Done():
@@ -111,7 +111,10 @@ func (s *Server) screenReceiver(w http.ResponseWriter, r *http.Request) {
 			}
 			message := screenMessage{Version: 1, Type: command.Type, CatalogID: command.CatalogID, PositionMS: command.PositionMS}
 			data, _ := json.Marshal(message)
-			if conn.Write(context.Background(), websocket.MessageText, data) != nil {
+			writeCtx, cancel := context.WithTimeout(closed, 5*time.Second)
+			err := conn.Write(writeCtx, websocket.MessageText, data)
+			cancel()
+			if err != nil {
 				return
 			}
 		}
@@ -127,18 +130,24 @@ func (s *Server) screenControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authority := r.URL.Query().Get("token")
-	if err := s.screens.Validate(authority, profileID, time.Now()); err != nil {
+	ctx, cancel, err := s.screens.ControlContext(authority, profileID, time.Now())
+	if err != nil {
 		screenFailure(w, err)
 		return
 	}
+	defer cancel()
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.CloseNow()
 	for {
-		_, data, err := conn.Read(context.Background())
+		_, data, err := conn.Read(ctx)
 		if err != nil {
+			return
+		}
+		current, selected := s.house.Profile(s.session(r))
+		if !selected || current.ID != profileID {
 			return
 		}
 		var message screenMessage

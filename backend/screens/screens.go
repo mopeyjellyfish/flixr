@@ -2,6 +2,7 @@
 package screens
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -38,12 +39,16 @@ type Command struct {
 type presence struct {
 	screen            Screen
 	profileID, ticket string
+	expires           time.Time
 	connected         bool
 	commands          chan Command
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 type authority struct {
 	screenID, profileID string
 	expires             time.Time
+	claimed             bool
 }
 
 type Manager struct {
@@ -53,10 +58,43 @@ type Manager struct {
 	tickets  map[string]authority
 	sessions map[string]authority
 	closed   bool
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 func New(ttl time.Duration) *Manager {
-	return &Manager{ttl: ttl, screens: map[string]*presence{}, tickets: map[string]authority{}, sessions: map[string]authority{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Manager{ttl: ttl, screens: map[string]*presence{}, tickets: map[string]authority{}, sessions: map[string]authority{}, ctx: ctx, cancel: cancel}
+}
+
+// Context is canceled when shutdown starts, including for upgraded connections.
+func (m *Manager) Context() context.Context { return m.ctx }
+
+// ControlContext bounds socket I/O by authority expiry and receiver lifetime.
+// The caller must call cancel when the socket closes.
+func (m *Manager) ControlContext(value, profileID string, now time.Time) (context.Context, context.CancelFunc, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.sessions[value]
+	if !ok || a.profileID != profileID || a.claimed || m.closed {
+		return nil, nil, ErrForbidden
+	}
+	if !now.Before(a.expires) {
+		return nil, nil, ErrExpired
+	}
+	p := m.screens[a.screenID]
+	if p == nil || !p.connected {
+		return nil, nil, ErrUnavailable
+	}
+	a.claimed = true
+	m.sessions[value] = a
+	ctx, cancel := context.WithDeadline(p.ctx, a.expires)
+	return ctx, func() {
+		cancel()
+		m.mu.Lock()
+		delete(m.sessions, value)
+		m.mu.Unlock()
+	}, nil
 }
 
 func token() (string, error) {
@@ -84,9 +122,14 @@ func (m *Manager) Advertise(profileID, name string, now time.Time) (Screen, stri
 	if m.closed {
 		return Screen{}, "", ErrUnavailable
 	}
-	p := &presence{screen: Screen{ID: id, Name: strings.TrimSpace(name), State: "available"}, profileID: profileID, ticket: ticket, commands: make(chan Command, 8)}
+	m.pruneLocked(now)
+	if len(m.screens) >= 128 || len(name) > 120 {
+		return Screen{}, "", ErrUnavailable
+	}
+	p := &presence{screen: Screen{ID: id, Name: strings.TrimSpace(name), State: "available"}, profileID: profileID, ticket: ticket, expires: now.Add(m.ttl), commands: make(chan Command, 8)}
+	p.ctx, p.cancel = context.WithCancel(m.ctx)
 	m.screens[id] = p
-	m.tickets[ticket] = authority{screenID: id, profileID: profileID, expires: now.Add(m.ttl)}
+	m.tickets[ticket] = authority{screenID: id, profileID: profileID, expires: p.expires}
 	return p.screen, ticket, nil
 }
 
@@ -116,15 +159,21 @@ func (m *Manager) ConnectReceiver(ticket, profileID string, now time.Time) (<-ch
 					}
 				}
 				close(p.commands)
+				p.cancel()
 			}
 		})
 	}
 	return p.commands, disconnect, nil
 }
 
-func (m *Manager) List(profileID string) []Screen {
+func (m *Manager) List(profileID string, at ...time.Time) []Screen {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
+	if len(at) != 0 {
+		now = at[0]
+	}
+	m.pruneLocked(now)
 	out := []Screen{}
 	for _, p := range m.screens {
 		if p.profileID == profileID && p.connected {
@@ -136,6 +185,7 @@ func (m *Manager) List(profileID string) []Screen {
 func (m *Manager) ListAll() []Screen {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneLocked(time.Now())
 	out := []Screen{}
 	for _, p := range m.screens {
 		if p.connected {
@@ -148,12 +198,16 @@ func (m *Manager) ListAll() []Screen {
 func (m *Manager) Authorize(screenID, profileID string, now time.Time) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneLocked(now)
 	p := m.screens[screenID]
 	if p == nil || !p.connected {
 		return Session{}, ErrUnavailable
 	}
 	if p.profileID != profileID {
 		return Session{}, ErrForbidden
+	}
+	if len(m.sessions) >= 128 {
+		return Session{}, ErrUnavailable
 	}
 	value, err := token()
 	if err != nil {
@@ -162,23 +216,6 @@ func (m *Manager) Authorize(screenID, profileID string, now time.Time) (Session,
 	expires := now.Add(m.ttl)
 	m.sessions[value] = authority{screenID: screenID, profileID: profileID, expires: expires}
 	return Session{Token: value, ScreenID: screenID, ExpiresAt: expires}, nil
-}
-
-func (m *Manager) Validate(value, profileID string, now time.Time) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	a, ok := m.sessions[value]
-	if !ok || a.profileID != profileID {
-		return ErrForbidden
-	}
-	if !now.Before(a.expires) {
-		delete(m.sessions, value)
-		return ErrExpired
-	}
-	if p := m.screens[a.screenID]; p == nil || !p.connected {
-		return ErrUnavailable
-	}
-	return nil
 }
 
 func (m *Manager) Control(value, profileID string, command Command, now time.Time) (Screen, error) {
@@ -199,26 +236,49 @@ func (m *Manager) Control(value, profileID string, command Command, now time.Tim
 	if p == nil || !p.connected {
 		return Screen{}, ErrUnavailable
 	}
+	updated := p.screen
 	switch command.Type {
 	case "play":
-		p.screen.State = "playing"
-		p.screen.CatalogID = command.CatalogID
-		p.screen.PositionMS = command.PositionMS
+		updated.State = "playing"
+		updated.CatalogID = command.CatalogID
+		updated.PositionMS = command.PositionMS
 	case "pause":
-		p.screen.State = "paused"
+		updated.State = "paused"
 	case "seek":
-		p.screen.PositionMS = command.PositionMS
+		updated.PositionMS = command.PositionMS
 	case "handoff":
-		p.screen.State = "available"
-		p.screen.CatalogID = ""
-		p.screen.PositionMS = 0
-		delete(m.sessions, value)
+		updated.State = "available"
+		updated.CatalogID = ""
+		updated.PositionMS = 0
 	}
 	select {
 	case p.commands <- command:
-		return p.screen, nil
+		p.screen = updated
+		if command.Type == "handoff" {
+			delete(m.sessions, value)
+		}
+		return updated, nil
 	default:
 		return Screen{}, ErrUnavailable
+	}
+}
+
+func (m *Manager) pruneLocked(now time.Time) {
+	for key, authority := range m.tickets {
+		if !now.Before(authority.expires) {
+			delete(m.tickets, key)
+		}
+	}
+	for key, authority := range m.sessions {
+		if !now.Before(authority.expires) {
+			delete(m.sessions, key)
+		}
+	}
+	for id, p := range m.screens {
+		if !p.connected && !now.Before(p.expires) {
+			delete(m.screens, id)
+			p.cancel()
+		}
 	}
 }
 
@@ -229,8 +289,10 @@ func (m *Manager) Shutdown() {
 		return
 	}
 	m.closed = true
+	m.cancel()
 	for _, p := range m.screens {
 		close(p.commands)
+		p.cancel()
 	}
 	m.screens = map[string]*presence{}
 	m.sessions = map[string]authority{}

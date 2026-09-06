@@ -63,6 +63,16 @@ func TestScreenWebSocketRequiresProfileAndSameOrigin(t *testing.T) {
 	_, payload, err := conn.Read(ctx)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"version":1,"type":"play","catalog_id":"film-1","position_ms":42}`, string(payload))
+	// An idle controller and receiver must not survive manager shutdown.
+	manager.Shutdown()
+	deadline, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	_, _, err = control.Read(deadline)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	_, _, err = conn.Read(deadline)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func screenProfileClient(t *testing.T, base string, house interface{ SetupToken() string }) (*http.Client, string) {

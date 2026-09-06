@@ -16,7 +16,9 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
   await page.route('**/api/v1/**', (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const response = handler(url.pathname, request.method(), url.search, request.postDataJSON() as Record<string, unknown> | undefined);
+    const response = handler(url.pathname, request.method(), url.search, request.postDataJSON() as Record<string, unknown> | undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });

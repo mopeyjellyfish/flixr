@@ -49,3 +49,49 @@ func TestRestartInvalidatesAuthority(t *testing.T) {
 	_, err = second.Control(session.Token, "profile", Command{Type: "pause"}, now)
 	assert.ErrorIs(t, err, ErrForbidden)
 }
+
+func TestFailedQueueDoesNotPublishCommandState(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	manager := New(time.Minute)
+	screen, ticket, err := manager.Advertise("profile", "Screen", now)
+	require.NoError(t, err)
+	_, disconnect, err := manager.ConnectReceiver(ticket, "profile", now)
+	require.NoError(t, err)
+	defer disconnect()
+	session, err := manager.Authorize(screen.ID, "profile", now)
+	require.NoError(t, err)
+
+	for range 8 {
+		_, err = manager.Control(session.Token, "profile", Command{Type: "pause"}, now)
+		require.NoError(t, err)
+	}
+	_, err = manager.Control(session.Token, "profile", Command{Type: "play", CatalogID: "film-1", PositionMS: 4200}, now)
+	assert.ErrorIs(t, err, ErrUnavailable)
+	listed := manager.List("profile", now)
+	require.Len(t, listed, 1)
+	assert.Equal(t, "paused", listed[0].State)
+	assert.Empty(t, listed[0].CatalogID)
+}
+
+func TestLivePresenceSurvivesTicketExpiry(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	manager := New(time.Minute)
+	_, ticket, err := manager.Advertise("profile", "Screen", now)
+	require.NoError(t, err)
+	_, disconnect, err := manager.ConnectReceiver(ticket, "profile", now)
+	require.NoError(t, err)
+	defer disconnect()
+	assert.Len(t, manager.List("profile", now), 1)
+	assert.Len(t, manager.List("profile", now.Add(time.Minute)), 1)
+}
+
+func TestUnconnectedPresenceExpires(t *testing.T) {
+	now := time.Now()
+	manager := New(time.Minute)
+	defer manager.Shutdown()
+	_, _, err := manager.Advertise("profile", "Screen", now)
+	require.NoError(t, err)
+	manager.List("profile", now.Add(time.Minute))
+	assert.Empty(t, manager.screens)
+	assert.Empty(t, manager.tickets)
+}
