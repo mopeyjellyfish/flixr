@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Browse } from './Browse';
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/home'); });
 describe('browse', () => {
   it('virtualizes a 10k logical rail and restores focus after details close', async () => {
     const items = Array.from({ length: 10_000 }, (_, index) => ({ id: `${index}`, title: `Film ${index}`, kind: 'film', local_only: index === 0 }));
@@ -70,4 +70,87 @@ describe('browse', () => {
     await screen.findByRole('heading', { name: /no matching titles/i });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
+
+  it('renders persistent destinations and the server ordered Home rows', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ id: 'film-1', title: 'Arrival', kind: 'film', local_only: false, playable: true, listed: false }] }, { name: 'My List', items: [] }, { name: 'Drama', items: [] }] })));
+    render(<Browse onExit={() => undefined} />);
+		expect(await screen.findByRole('navigation', { name: 'Main navigation' })).toHaveTextContent('HomeMoviesTV');
+		expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual(['Continue Watching', 'New', 'My List', 'Drama']);
+		fireEvent.click(screen.getByRole('button', { name: 'Movies' }));
+		expect(screen.getByRole('button', { name: 'Movies' })).toHaveAttribute('aria-current', 'page');
+		expect(screen.getByRole('button', { name: 'Home' })).not.toHaveAttribute('aria-current');
+	});
+
+it('persists viewer controls, updates My List, and never offers Play for a demo title', async () => {
+  const demo = { id: 'demo-1', title: 'Demo Signal', kind: 'film', local_only: false, playable: false, demo: true, listed: false };
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/preferences/')) return new Response(JSON.stringify({ view: 'grid', sort: 'year' }));
+    if (path.includes('/list/')) return new Response(JSON.stringify({ listed: true }));
+    if (path.includes('/films/demo-1') || path.includes('/items/demo-1')) return new Response(JSON.stringify(demo));
+    return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [demo] }, { name: 'My List', items: [] }] }));
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse onExit={() => undefined} />);
+  fireEvent.change(await screen.findByLabelText('View'), { target: { value: 'grid' } });
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/catalog/preferences/all', expect.objectContaining({ method: 'PUT' })));
+  fireEvent.click(screen.getByTestId('card-demo-1'));
+  expect(await screen.findAllByText('Demo title · no media file')).not.toHaveLength(0);
+  expect(screen.queryByRole('button', { name: /play demo signal/i })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add to My List' }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/catalog/list/film/demo-1', expect.objectContaining({ method: 'PUT' })));
+});
+
+it('reloads the server viewer model after a preference save and only exposes sort in grid mode', async () => {
+  const grid = { preference: { view: 'grid' as const, sort: 'title' as const }, items: [{ id: 'b', title: 'Beta', kind: 'film', local_only: false, listed: false }, { id: 'a', title: 'Alpha', kind: 'film', local_only: false, listed: false }] };
+  const rows = { preference: { view: 'rows' as const, sort: 'title' as const }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [grid.items[1], grid.items[0]] }, { name: 'My List', items: [] }] };
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/preferences/')) return new Response(JSON.stringify({ view: 'rows', sort: 'title' }));
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify(views++ ? rows : grid));
+    return new Response(JSON.stringify({}));
+  });
+  render(<Browse mode="movies" onExit={() => undefined} />);
+  expect(await screen.findByLabelText('Sort')).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('View'), { target: { value: 'rows' } });
+  expect(await screen.findByRole('heading', { name: 'New' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('Sort')).not.toBeInTheDocument();
+  expect(screen.getAllByTestId(/card-/).map((card) => card.dataset.catalogId)).toEqual(['a', 'b']);
+});
+
+it('keeps direct search membership and adds one My List card when a title is repeated in rows', async () => {
+  window.history.replaceState({}, '', '/search?q=demo');
+  const demo = { id: 'demo-1', title: 'Demo Signal', kind: 'film', local_only: false, playable: false, demo: true, listed: true };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/search')) return new Response(JSON.stringify({ items: [demo] }));
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [demo] }, { name: 'Drama', items: [demo] }, { name: 'My List', items: [demo] }] }));
+    if (path.includes('/catalog/films/demo-1')) return new Response(JSON.stringify(demo));
+    if (path.includes('/catalog/list/')) return new Response(JSON.stringify({ listed: false }));
+    return new Response(JSON.stringify(demo));
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse mode="search" onExit={() => undefined} />);
+  fireEvent.click(await screen.findByTestId('card-demo-1'));
+  expect(await screen.findByRole('button', { name: 'Remove from My List' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /play demo signal/i })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Remove from My List' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Add to My List' })).toBeInTheDocument());
+});
+
+it('adds a repeated title to My List only once', async () => {
+  const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: false, listed: false };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }, { name: 'Drama', items: [title] }, { name: 'My List', items: [] }] }));
+    if (path.includes('/catalog/films/film-1') || path.includes('/catalog/items/film-1')) return new Response(JSON.stringify(title));
+    return new Response(JSON.stringify({ listed: true }));
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse onExit={() => undefined} />);
+  fireEvent.click((await screen.findAllByTestId('card-film-1'))[0]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add to My List' }));
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'My List' })).getAllByTestId('card-film-1')).toHaveLength(1));
+});
 });

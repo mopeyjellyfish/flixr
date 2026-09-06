@@ -6,11 +6,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
-type Bootstrap struct{ DataDir, ListenAddr, TLSCert, TLSKey string }
+type Bootstrap struct {
+	DataDir, ListenAddr, TLSCert, TLSKey string
+	Demo                                 bool
+}
 
-func Load() Bootstrap {
+func Load() (Bootstrap, error) {
 	d := os.Getenv("FLIXR_DATA_DIR")
 	if d == "" {
 		d = filepath.Join(".", "flixr-data")
@@ -19,7 +23,11 @@ func Load() Bootstrap {
 	if a == "" {
 		a = "127.0.0.1:8787"
 	}
-	return Bootstrap{d, a, os.Getenv("FLIXR_TLS_CERT"), os.Getenv("FLIXR_TLS_KEY")}
+	demo, err := strconv.ParseBool(os.Getenv("FLIXR_DEMO"))
+	if os.Getenv("FLIXR_DEMO") != "" && err != nil {
+		return Bootstrap{}, err
+	}
+	return Bootstrap{DataDir: d, ListenAddr: a, TLSCert: os.Getenv("FLIXR_TLS_CERT"), TLSKey: os.Getenv("FLIXR_TLS_KEY"), Demo: demo}, nil
 }
 
 // Validate rejects incomplete or unreadable TLS configuration before serving.

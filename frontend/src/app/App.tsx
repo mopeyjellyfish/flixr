@@ -16,7 +16,7 @@ function routeFor(path = window.location.pathname): Route {
   if (pathname === '/profiles') return 'profiles';
   if (pathname === '/owner') return 'owner';
   if (pathname.startsWith('/play/')) return 'player';
-  if (pathname === '/home' || pathname === '/search' || pathname.startsWith('/detail/')) return 'browse';
+  if (pathname === '/home' || pathname === '/movies' || pathname === '/tv' || pathname === '/search' || pathname.startsWith('/detail/')) return 'browse';
   return 'loading';
 }
 
@@ -25,10 +25,13 @@ export function App() {
   const [route, setRoute] = useState<Route>(routeFor());
   const [path, setPath] = useState(window.location.pathname);
   const [restoreFocusID, setRestoreFocusID] = useState<string>();
+  const [lastBrowsePath, setLastBrowsePath] = useState(() => routeFor() === 'browse' && !window.location.pathname.startsWith('/detail/') ? `${window.location.pathname}${window.location.search}` : '/home');
   const navigate = (nextPath: string, replace = false) => {
     window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
     setPath(nextPath);
-    setRoute(routeFor(nextPath));
+    const nextRoute = routeFor(nextPath);
+    if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
+    setRoute(nextRoute);
   };
   const load = () => api.setupStatus().then((value) => {
     setStatus(value);
@@ -38,10 +41,12 @@ export function App() {
   useEffect(() => {
     void load();
     const popstate = () => {
-      const nextPath = window.location.pathname;
+      const nextPath = `${window.location.pathname}${window.location.search}`;
       setPath(nextPath);
-      if (routeFor(nextPath) === 'setup') { setRoute('loading'); void load(); return; }
-      setRoute(routeFor(nextPath));
+      const nextRoute = routeFor(nextPath);
+      if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
+      if (nextRoute === 'setup') { setRoute('loading'); void load(); return; }
+      setRoute(nextRoute);
     };
     window.addEventListener('popstate', popstate);
     return () => window.removeEventListener('popstate', popstate);
@@ -53,9 +58,12 @@ export function App() {
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
   if (route === 'player') {
     const catalogID = decodeURIComponent(path.slice('/play/'.length));
-    return <Suspense fallback={<RouteFallback />}><Player catalogID={catalogID} onExit={() => { setRestoreFocusID(catalogID); navigate('/home'); }} /></Suspense>;
+    return <Suspense fallback={<RouteFallback />}><Player catalogID={catalogID} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
   }
-  if (route === 'browse') return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={path.startsWith('/search') ? 'search' : 'home'} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} restoreFocusID={restoreFocusID} onFocusRestored={() => setRestoreFocusID(undefined)} onNavigate={navigate} /></Suspense>;
+  if (route === 'browse') {
+    const browsePath = path.startsWith('/detail/') ? lastBrowsePath : path;
+    return <Suspense fallback={<RouteFallback />}><Browse onExit={() => navigate('/profiles')} mode={browsePath.startsWith('/search') ? 'search' : browsePath.startsWith('/movies') ? 'movies' : browsePath.startsWith('/tv') ? 'tv' : 'home'} detailID={path.startsWith('/detail/') ? decodeURIComponent(path.slice('/detail/'.length)) : undefined} restoreFocusID={restoreFocusID} onFocusRestored={() => setRestoreFocusID(undefined)} onNavigate={navigate} /></Suspense>;
+  }
   return <ProfileChooser owner={() => navigate('/login')} onSelected={() => navigate('/home')} />;
 }
 

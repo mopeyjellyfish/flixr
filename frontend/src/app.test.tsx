@@ -114,12 +114,13 @@ describe('Flixr routes', () => {
     expect(window.location.pathname).toBe('/profiles');
   });
 
-  it('loads the lazy browse route and updates detail state when history moves', async () => {
-    window.history.replaceState({}, '', '/home');
+	it('preserves the viewer destination while detail history opens and closes', async () => {
+		window.history.replaceState({}, '', '/movies');
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/catalog/films/film-1')) return new Response(JSON.stringify({ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }));
+		if (path.includes('/catalog/items/film-1')) return new Response(JSON.stringify({ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }));
       return new Response(JSON.stringify({ items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }], total: 1, next: null }));
     });
     HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
@@ -127,10 +128,10 @@ describe('Flixr routes', () => {
     render(<App />);
     fireEvent.click(await screen.findByTestId('card-film-1'));
     expect(await screen.findByRole('dialog')).toBeVisible();
-    expect(window.location.pathname).toBe('/detail/film-1');
-    window.history.pushState({}, '', '/home');
-    window.dispatchEvent(new PopStateEvent('popstate'));
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+		expect(window.location.pathname).toBe('/detail/film-1');
+		fireEvent.click(screen.getByRole('button', { name: /close details/i }));
+		await waitFor(() => expect(window.location.pathname).toBe('/movies'));
+		expect(screen.getByRole('button', { name: 'Movies' })).toHaveAttribute('aria-current', 'page');
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     fireEvent.change(screen.getByLabelText(/search titles/i), { target: { value: 'Signal' } });
     await waitFor(() => expect(window.location.pathname + window.location.search).toBe('/search?q=Signal'));

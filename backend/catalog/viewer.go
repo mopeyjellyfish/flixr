@@ -1,0 +1,266 @@
+package catalog
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+var (
+	ErrNotPlayable       = errors.New("catalog item is not playable")
+	ErrCatalogNotFound   = errors.New("catalog item not found")
+	ErrInvalidViewerMode = errors.New("invalid viewer mode")
+)
+
+type ViewPreference struct {
+	View string `json:"view"`
+	Sort string `json:"sort"`
+}
+
+type ViewerItem struct {
+	Item
+	Listed bool `json:"listed"`
+}
+
+type ViewerSection struct {
+	Name  string       `json:"name"`
+	Items []ViewerItem `json:"items"`
+}
+
+type ViewerModel struct {
+	Preference ViewPreference  `json:"preference"`
+	Sections   []ViewerSection `json:"sections,omitempty"`
+	Items      []ViewerItem    `json:"items,omitempty"`
+}
+
+type viewerItem struct {
+	Item
+	lastProgress int64
+	listAdded    int64
+}
+
+func validMedia(media string) bool { return media == "all" || media == "film" || media == "series" }
+func validPreference(p ViewPreference) bool {
+	return (p.View == "rows" || p.View == "grid") && (p.Sort == "title" || p.Sort == "year" || p.Sort == "added" || p.Sort == "watched")
+}
+
+func (c *Catalog) Preference(profileID, media string) (ViewPreference, error) {
+	if c.db == nil || profileID == "" || !validMedia(media) {
+		return ViewPreference{}, ErrInvalidViewerMode
+	}
+	if _, err := c.db.Exec(`INSERT INTO profile_view_preferences(profile_id,media,view_mode,sort_mode) VALUES(?,?, 'rows','title') ON CONFLICT(profile_id,media) DO NOTHING`, profileID, media); err != nil {
+		return ViewPreference{}, fmt.Errorf("save default viewer preference: %w", err)
+	}
+	var p ViewPreference
+	if err := c.db.QueryRow(`SELECT view_mode,sort_mode FROM profile_view_preferences WHERE profile_id=? AND media=?`, profileID, media).Scan(&p.View, &p.Sort); err != nil {
+		return ViewPreference{}, fmt.Errorf("load viewer preference: %w", err)
+	}
+	return p, nil
+}
+
+func (c *Catalog) SavePreference(profileID, media string, p ViewPreference) (ViewPreference, error) {
+	if c.db == nil || profileID == "" || !validMedia(media) || !validPreference(p) {
+		return ViewPreference{}, ErrInvalidViewerMode
+	}
+	if _, err := c.db.Exec(`INSERT INTO profile_view_preferences(profile_id,media,view_mode,sort_mode) VALUES(?,?,?,?) ON CONFLICT(profile_id,media) DO UPDATE SET view_mode=excluded.view_mode,sort_mode=excluded.sort_mode`, profileID, media, p.View, p.Sort); err != nil {
+		return ViewPreference{}, fmt.Errorf("save viewer preference: %w", err)
+	}
+	return p, nil
+}
+
+func (c *Catalog) SetListed(profileID, kind, id string, listed bool) error {
+	if c.db == nil || profileID == "" || id == "" || (kind != "film" && kind != "series") {
+		return ErrCatalogNotFound
+	}
+	table, exists := "profile_film_list", "SELECT 1 FROM catalog_items WHERE id=? AND kind='film' AND series_id=''"
+	if kind == "series" {
+		table, exists = "profile_series_list", "SELECT 1 FROM catalog_series WHERE id=?"
+	}
+	var found int
+	if err := c.db.QueryRow(exists, id).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCatalogNotFound
+		}
+		return fmt.Errorf("check catalog list item: %w", err)
+	}
+	if listed {
+		_, err := c.db.Exec("INSERT INTO "+table+"(profile_id,catalog_id,added_at) VALUES(?,?,?) ON CONFLICT(profile_id,catalog_id) DO NOTHING", profileID, id, time.Now().Unix())
+		if err != nil {
+			return fmt.Errorf("add catalog list item: %w", err)
+		}
+		return nil
+	}
+	if _, err := c.db.Exec("DELETE FROM "+table+" WHERE profile_id=? AND catalog_id=?", profileID, id); err != nil {
+		return fmt.Errorf("remove catalog list item: %w", err)
+	}
+	return nil
+}
+
+func (c *Catalog) Viewer(profileID, media string) (ViewerModel, error) {
+	preference, err := c.Preference(profileID, media)
+	if err != nil {
+		return ViewerModel{}, err
+	}
+	items, err := c.viewerItems(profileID, media)
+	if err != nil {
+		return ViewerModel{}, err
+	}
+	model := ViewerModel{Preference: preference}
+	if preference.View == "grid" {
+		sortViewerItems(items, preference.Sort)
+		model.Items = publicItems(items)
+		return model, nil
+	}
+	model.Sections = viewerSections(items)
+	return model, nil
+}
+
+func (c *Catalog) viewerItems(profileID, media string) ([]viewerItem, error) {
+	if c.db == nil {
+		return nil, ErrInvalidViewerMode
+	}
+	rows, err := c.db.Query(`SELECT id,kind,title,local_only,provider_id,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo,last_progress_at,list_added FROM (
+		SELECT i.id,'film' AS kind,i.title,i.local_only,i.provider_id,i.year,i.synopsis,i.poster,i.backdrop,i.genres_json,i.added_at,i.playable,i.demo,COALESCE(p.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added
+		FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? LEFT JOIN profile_film_list l ON l.catalog_id=i.id AND l.profile_id=? WHERE i.series_id=''
+		UNION ALL
+		SELECT s.id,'series' AS kind,s.title,s.local_only,s.provider_id,s.year,s.synopsis,s.poster,s.backdrop,s.genres_json,s.added_at,s.playable,s.demo,COALESCE(w.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added
+		FROM catalog_series s LEFT JOIN (SELECT i.series_id,MAX(p.updated_at) AS updated_at FROM catalog_items i JOIN progress p ON p.catalog_id=i.id WHERE p.profile_id=? GROUP BY i.series_id) w ON w.series_id=s.id LEFT JOIN profile_series_list l ON l.catalog_id=s.id AND l.profile_id=?
+	) WHERE ?='all' OR kind=?`, profileID, profileID, profileID, profileID, media, media)
+	if err != nil {
+		return nil, fmt.Errorf("query viewer catalog: %w", err)
+	}
+	defer rows.Close()
+	items := []viewerItem{}
+	for rows.Next() {
+		var item viewerItem
+		var local, playable, demo int
+		var genres string
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &local, &item.ProviderID, &item.Year, &item.Synopsis, &item.Poster, &item.Backdrop, &genres, &item.AddedAt, &playable, &demo, &item.lastProgress, &item.listAdded); err != nil {
+			return nil, fmt.Errorf("scan viewer catalog: %w", err)
+		}
+		if err := json.Unmarshal([]byte(genres), &item.Genres); err != nil {
+			return nil, fmt.Errorf("decode viewer genres: %w", err)
+		}
+		item.LocalOnly, item.Playable, item.Demo = local != 0, playable != 0, demo != 0
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate viewer catalog: %w", err)
+	}
+	return items, nil
+}
+
+func viewerSections(items []viewerItem) []ViewerSection {
+	sections := []ViewerSection{
+		{Name: "Continue Watching", Items: publicItems(filterViewerItems(items, func(item viewerItem) bool { return item.lastProgress > 0 }, "watched"))},
+		{Name: "New", Items: publicItems(sortedViewerItems(items, "added"))},
+		{Name: "My List", Items: publicItems(filterViewerItems(items, func(item viewerItem) bool { return item.listAdded > 0 }, "list"))},
+	}
+	genres := map[string]struct{}{}
+	for _, item := range items {
+		for _, genre := range item.Genres {
+			if genre != "" {
+				genres[genre] = struct{}{}
+			}
+		}
+	}
+	names := make([]string, 0, len(genres))
+	for genre := range genres {
+		names = append(names, genre)
+	}
+	sort.Slice(names, func(i, j int) bool { return strings.ToLower(names[i]) < strings.ToLower(names[j]) })
+	for _, genre := range names {
+		sections = append(sections, ViewerSection{Name: genre, Items: publicItems(filterViewerItems(items, func(item viewerItem) bool {
+			for _, itemGenre := range item.Genres {
+				if itemGenre == genre {
+					return true
+				}
+			}
+			return false
+		}, "title"))})
+	}
+	return sections
+}
+
+func filterViewerItems(items []viewerItem, keep func(viewerItem) bool, mode string) []viewerItem {
+	filtered := make([]viewerItem, 0)
+	for _, item := range items {
+		if keep(item) {
+			filtered = append(filtered, item)
+		}
+	}
+	sortViewerItems(filtered, mode)
+	return filtered
+}
+
+func sortedViewerItems(items []viewerItem, mode string) []viewerItem {
+	out := append([]viewerItem(nil), items...)
+	sortViewerItems(out, mode)
+	return out
+}
+
+func sortViewerItems(items []viewerItem, mode string) {
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		switch mode {
+		case "year":
+			if a.Year != b.Year {
+				return a.Year > b.Year
+			}
+			if titleCompare(a.Title, b.Title) != 0 {
+				return titleCompare(a.Title, b.Title) < 0
+			}
+		case "added", "list":
+			left, right := a.AddedAt, b.AddedAt
+			if mode == "list" {
+				left, right = a.listAdded, b.listAdded
+			}
+			if left != right {
+				return left > right
+			}
+		case "watched":
+			if a.lastProgress != b.lastProgress {
+				return a.lastProgress > b.lastProgress
+			}
+		default:
+			if titleCompare(a.Title, b.Title) != 0 {
+				return titleCompare(a.Title, b.Title) < 0
+			}
+		}
+		return a.ID < b.ID
+	})
+}
+
+func titleCompare(left, right string) int {
+	left, right = strings.ToLower(left), strings.ToLower(right)
+	if left < right {
+		return -1
+	}
+	if left > right {
+		return 1
+	}
+	return 0
+}
+
+func publicItems(items []viewerItem) []ViewerItem {
+	out := make([]ViewerItem, len(items))
+	for i, item := range items {
+		out[i] = ViewerItem{Item: item.Item, Listed: item.listAdded > 0}
+	}
+	return out
+}
+
+func (c *Catalog) PlaybackItem(id string) (Item, error) {
+	item, ok := c.Item(id)
+	if !ok {
+		return Item{}, ErrCatalogNotFound
+	}
+	if !item.Playable {
+		return Item{}, ErrNotPlayable
+	}
+	return item, nil
+}

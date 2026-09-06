@@ -39,23 +39,23 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByLabel(/^name$/i).fill('Production viewer');
   await page.getByRole('button', { name: /create profile/i }).click();
   await expect(page).toHaveURL(/\/home$/);
-  await expect(page.getByRole('heading', { name: /blue horizon 2026/i })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible({ timeout: 30_000 });
   await page.getByRole('button', { name: /switch profile/i }).click();
   await page.getByRole('button', { name: /production viewer/i }).click();
-  await expect(page.getByRole('heading', { name: /blue horizon 2026/i })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible();
 
   await expect(page.getByTestId(/card-.*$/)).toHaveCount(3);
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto('/home');
-    await expect(page.getByRole('button', { name: /view details for blue horizon 2026/i })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible();
     const axe = await new AxeBuilder({ page }).analyze();
     expect(axe.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await page.screenshot({ path: testInfo.outputPath(`production-home-${viewport.name}.png`), fullPage: true });
   }
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByRole('button', { name: /view details for blue horizon 2026/i }).click();
+  await page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i }).click();
   await page.getByRole('button', { name: /play blue horizon 2026/i }).click();
   await expectPlayback(page);
   await page.screenshot({ path: testInfo.outputPath('production-direct-playback-desktop.png'), fullPage: true });
@@ -71,7 +71,6 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.screenshot({ path: testInfo.outputPath('production-transcode-playback-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: /back to library/i }).click();
 
-
   await page.getByRole('button', { name: /series signal/i }).click();
   await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
   await expectPlayback(page);
@@ -85,7 +84,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: /back to library/i }).click();
 
-  await page.getByRole('button', { name: /series signal/i }).click();
+  await page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i }).click();
   await expect(page.getByRole('dialog')).toContainText(/S1 E1 Signal/i);
   await expect(page).toHaveURL(/\/detail\//);
   await page.reload();

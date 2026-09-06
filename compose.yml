@@ -1,0 +1,25 @@
+name: flixr-demo
+
+services:
+  flixr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      FLIXR_DATA_DIR: /data
+      FLIXR_LISTEN_ADDR: 0.0.0.0:8787
+      FLIXR_DEMO: "true"
+    volumes:
+      - flixr-demo-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "status=$$(wget -qO- http://127.0.0.1:8787/api/v1/setup/status) && echo \"$$status\" | grep -q '\"ffmpeg\":true' && echo \"$$status\" | grep -q '\"ffprobe\":true'"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  flixr-demo-data:
+    name: flixr-demo-data

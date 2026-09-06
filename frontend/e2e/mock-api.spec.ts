@@ -10,11 +10,11 @@ const backdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http:/
 const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264' };
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
 
-async function mock(page: Page, handler: (path: string, method: string, query: string) => { status?: number; json: JSONValue }) {
+async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue }) {
   await page.unrouteAll();
   await page.route('**/api/v1/**', (route) => {
     const request = route.request();
-    const response = handler(new URL(request.url()).pathname, request.method(), new URL(request.url()).search);
+    const response = handler(new URL(request.url()).pathname, request.method(), new URL(request.url()).search, request.postDataJSON() as Record<string, unknown> | undefined);
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });
 }
@@ -53,6 +53,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/profiles') && method === 'POST') { profileCreates += 1; return { json: { id: 'first-run-viewer', name: 'First-run viewer', protected: false } }; }
       if (path.endsWith('/profiles/first-run-viewer/select')) { profileSelections += 1; return { json: { selected: true } }; }
       if (path.endsWith('/catalog/home')) return { json: { items: [film], total: 1, next: null } };
+      if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [film] }, { name: 'My List', items: [] }] } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return { json: {} };
     });
@@ -102,6 +103,7 @@ for (const viewport of viewports) {
       if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
       if (path.endsWith('/select')) return { json: {} };
       if (path.endsWith('/catalog/home')) return { json: { items: [film, series], total: 2, next: null } };
+      if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [film, series] }, { name: 'My List', items: [] }] } };
       if (path.endsWith('/catalog/films/film-1')) return { json: film };
       if (path.endsWith('/catalog/items/film-1')) return { json: film };
       if (path.endsWith('/catalog/items/series-1')) return { json: series };
@@ -146,11 +148,12 @@ for (const viewport of viewports) {
       if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
       if (path.endsWith('/select')) return { json: {} };
       if (path.endsWith('/catalog/home')) return { json: { items: [{ ...film, local_only: true, synopsis: '' }], next: null } };
+      if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ ...film, local_only: true, synopsis: '' }] }, { name: 'My List', items: [] }] } };
       return { json: {} };
     });
     await open(page, '/');
     await page.getByRole('button', { name: 'Viewer' }).click();
-    await expect(page.getByText('Local-only metadata')).toBeVisible();
+    await expect(page.getByText('Local-only metadata')).toHaveCount(0);
     await check(page, errors);
     const failureConsoleStart = errors.length;
     await mock(page, (path) => path.endsWith('/setup/status') ? { json: ready } : { status: 500, json: { error: { code: 'request_failed' } } });
@@ -161,6 +164,58 @@ for (const viewport of viewports) {
     await check(page, errors);
   });
 }
+
+test('mocked viewer journey: filtered grids, sort, demo detail, and My List', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const preferences: Record<'all' | 'film' | 'series', { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' }> = { all: { view: 'rows', sort: 'title' }, film: { view: 'rows', sort: 'title' }, series: { view: 'rows', sort: 'title' } };
+  let listed = false;
+  const filmDemo = { id: 'demo-film', title: 'Demo Film', kind: 'film', year: 2026, local_only: false, playable: false, demo: true };
+  const seriesDemo = { id: 'demo-series', title: 'Demo Series', kind: 'series', year: 2026, local_only: false, playable: false, demo: true };
+  await mock(page, (path, method, query, body) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+    if (path.endsWith('/select')) return { json: {} };
+    const preferenceMedia = path.match(/preferences\/(all|film|series)$/)?.[1] as keyof typeof preferences | undefined;
+    if (preferenceMedia) {
+      if (method === 'PUT') Object.assign(preferences[preferenceMedia], body);
+      return { json: preferences[preferenceMedia] };
+    }
+    if (path.endsWith('/catalog/list/film/demo-film')) { listed = method === 'PUT'; return { json: { listed } }; }
+    if (path.endsWith('/catalog/view')) {
+      const media = query.includes('media=film') ? 'film' : query.includes('media=series') ? 'series' : 'all';
+      const item = media === 'series' ? seriesDemo : filmDemo;
+      const preference = preferences[media];
+      return { json: preference.view === 'grid' ? { preference, items: [{ ...item, listed: item.id === filmDemo.id && listed }] } : { preference, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ ...item, listed: item.id === filmDemo.id && listed }] }, { name: 'My List', items: listed && item.id === filmDemo.id ? [{ ...item, listed }] : [] }] } };
+    }
+    if (path.endsWith('/catalog/items/demo-film') || path.endsWith('/catalog/films/demo-film')) return { json: filmDemo };
+    if (path.endsWith('/catalog/items/demo-series') || path.endsWith('/catalog/series/demo-series')) return { json: seriesDemo };
+    if (path.endsWith('/catalog/home')) return { json: { items: [filmDemo] } };
+    return { json: {} };
+  });
+  await open(page, '/');
+  await page.getByRole('button', { name: 'Viewer' }).click();
+  await page.getByRole('button', { name: 'Movies' }).click();
+  await page.getByLabel('View').selectOption('grid');
+  await expect(page.getByLabel('Titles').getByText('Demo Film')).toBeVisible();
+  await page.getByLabel('Sort').selectOption('year');
+  await page.screenshot({ path: testInfo.outputPath('movies-grid.png'), fullPage: true });
+  await page.getByRole('button', { name: 'TV' }).click();
+  await expect(page.getByLabel('View')).toHaveValue('rows');
+  await page.getByLabel('View').selectOption('grid');
+  await expect(page.getByLabel('Titles').getByText('Demo Series')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('tv-grid.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Movies' }).click();
+  await expect(page.getByLabel('Sort')).toHaveValue('year');
+  await page.getByTestId('card-demo-film').click();
+  const detail = page.getByRole('dialog');
+  await expect(detail.getByText('Demo title · no media file')).toBeVisible();
+  await expect(detail.getByRole('button', { name: /play demo film/i })).toHaveCount(0);
+  await detail.getByRole('button', { name: 'Add to My List' }).click();
+  await expect(detail.getByRole('button', { name: 'Remove from My List' })).toBeVisible();
+  await detail.getByRole('button', { name: 'Remove from My List' }).click();
+  await expect(detail.getByRole('button', { name: 'Add to My List' })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('demo-detail.png'), fullPage: true });
+});
 
 test('mocked playback planning and capacity error states', async ({ page }, testInfo) => {
   const errors: string[] = [];

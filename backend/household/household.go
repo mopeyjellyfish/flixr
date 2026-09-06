@@ -381,7 +381,7 @@ func (m *Manager) ProgressForProfile(profileID, catalogID string, position int64
 	if m.db == nil {
 		return nil
 	}
-	_, err := m.db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms) VALUES(?,?,?) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms", profileID, catalogID, position)
+	_, err := m.db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms,updated_at) VALUES(?,?,?,?) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms,updated_at=excluded.updated_at", profileID, catalogID, position, time.Now().Unix())
 	return err
 }
 func (m *Manager) Position(session, catalogID string) (int64, error) {
