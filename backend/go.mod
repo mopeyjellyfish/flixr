@@ -3,7 +3,7 @@ module github.com/mopeyjellyfish/flixr/backend
 go 1.27.1
 
 require (
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/gofrs/flock v0.13.1
 	github.com/spf13/afero v1.15.0
 	github.com/stretchr/testify v1.12.1
