@@ -1,301 +1,68 @@
-![FlixR — your media, your network. Demo across desktop, tablet and mobile.](docs/images/flixr-banner.png)
+![FlixR — your media, your network.](docs/images/flixr-banner.png)
 
 # FlixR
 
-**A local-first home cinema. Free, open source, and built for your own media.**
+FlixR is a free, open-source media server for your movies and TV shows.
+Run it at home, choose a profile, and watch in your browser. Your accounts,
+library and playback stay on your server and work without an internet connection.
+Internet access is needed to download FlixR and optional metadata or artwork.
 
-[Try the demo](#development-demo) · [Run with Docker](#published-docker-image) · [Capabilities](#what-you-can-do) · [Responsive layouts](#responsive-layouts) · [Contribute](#development)
+**Early development (0.x).** Browser playback is available; native TV/mobile apps,
+Cast, AirPlay and full audio/subtitle selection are still being built.
 
-Flixr is an MIT-licensed, LAN-first media server for locally owned films and episodic TV.
+## Get started in five minutes
 
-Flixr runs local owner authentication, household profiles, library scanning, browsing,
-search, My List, viewing progress, direct playback, FFmpeg remux/transcode, and
-Flixr-to-Flixr screen control on your server. Fonts, the web app, SQLite data,
-and downloaded artwork are served locally. No hosted account or metadata provider
-is required to sign in or watch your media.
+You need Docker with Compose 2.24 or newer, and a folder of movies or TV shows.
+The first download and library scan may take longer.
 
-## What you can do
+### 1. Save the Compose file
 
-| Capability | What FlixR provides |
-| --- | --- |
-| Watch locally | Local owner accounts and household profiles; no hosted login service. Cached libraries remain available without a WAN connection. |
-| Browse beautifully | Movie/TV destinations, featured artwork, concise summaries, search, virtualized rows and grids, My List and Continue Watching. |
-| Play your files | Direct playback where supported, bounded FFmpeg remux/transcode for compatible conversions, and per-profile progress. |
-| Use your local screens | Discover and control another FlixR browser on your network. This is FlixR-to-FlixR control, not native Cast or AirPlay. |
-| Manage the server | Setup walkthrough, optional profile PINs, library roots, scan status, optional TMDB enrichment and playback resource limits. |
-| Deploy your way | One Go executable with an embedded React interface, or a small Alpine container with FFmpeg, persistent volumes and environment/file-secret configuration. |
+Save [compose.release.yml](compose.release.yml) as **`compose.yaml`** in a new folder.
+It includes FlixR, FFmpeg, persistent storage and a read-only media mount.
 
-FlixR is in **0.x development**. See [current scope](#current-scope) for the features
-and device integrations still being built. Feature releases increment minor versions;
-fixes increment patch versions. Moving to v1 requires an explicit maintainer decision.
+Create a **`.env`** file beside it:
 
-## Responsive layouts
-
-The interface adapts from narrow phones to native 4K and 8K browser viewports.
-Above 1920 CSS pixels, typography, poster dimensions and spacing scale together;
-grids remain virtualized rather than filling a large display with tiny controls.
-Touch targets, keyboard navigation and reduced-motion preferences are supported.
-
-The banner is an illustrated demo showcase. View the original browser captures:
-[mobile, 390 × 844](docs/images/demo-mobile.png) ·
-[tablet, 768 × 1024](docs/images/demo-tablet.png) ·
-[desktop, 1440 × 900](docs/images/demo-desktop.png).
-The demo uses 50 curated movies and 50 TV shows, with artwork and metadata but no media files.
-
-| Browser viewport | Layout scale |
-| --- | --- |
-| 320–1920 CSS pixels wide | Standard text size; responsive navigation and collections |
-| 3840 × 2160 (4K) | 2× base text, poster and spacing scale |
-| 7680 × 4320 (8K) | 4× base text, poster and spacing scale |
-
-These are browser viewport checks, not certification of every phone, TV browser or
-codec. A high-DPI screen may use a smaller CSS viewport; browser zoom and OS scaling
-still apply. See [responsive verification](#responsive-verification) to repeat the checks.
-
-## Published Docker image
-
-Use `ghcr.io/mopeyjellyfish/flixr` with [compose.release.yml](compose.release.yml).
-The image includes everything needed to run: mount persistent `/config`, disposable
-`/cache`, and read-only media under `/media`. Environment variables, `env_file` and
-credential `_FILE` secrets support Compose-managed deployments.
-
-See [Docker setup and configuration](docs/docker.md) and [automated releases](docs/releases.md).
-Images publish only after main’s release checks pass. See [available releases](https://github.com/mopeyjellyfish/flixr/releases) before pinning a version.
-
-## Start with your own media
-
-From this checkout, with Docker and Docker Compose installed:
-
-```bash
-FLIXR_MEDIA_DIR=/absolute/path/to/your/media make start
+```dotenv
+FLIXR_MEDIA_DIR=/absolute/path/to/your/media
+FLIXR_BIND_ADDR=0.0.0.0
 ```
 
-Open **http://localhost:8787** on the server, or **http://SERVER-LAN-IP:8787** on
-another device. The command prints a one-time setup token. The walkthrough asks
-you to secure the owner account, choose library folders, and create a profile.
-For a media folder containing `films/` and `tv/`, enter **`/media/films`** and
-**`/media/tv`** in the walkthrough: these are paths inside the container.
+Replace the media path with an existing folder that the container can read.
+This enables HTTP access on your trusted home network. For HTTPS or access only
+from this computer, see [network setup](docs/docker.md#https-on-the-lan).
 
-`make start` without an override creates and mounts `./media`. Put your films and
-TV folders there before scanning. The media mount is read-only; the named
-`flixr_flixr-data` volume holds the database, settings, artwork, and playback
-segments. The container runs as an unprivileged user, so the source folders must
-be readable and traversable by that user. No demo titles are added.
+### 2. Start FlixR
 
-The initial image build downloads dependencies and needs internet access. Once
-built, `make start` reuses the existing image and starts offline. Authentication,
-scans without metadata, browsing, and playback
-continue to work without internet access while the server and LAN are available.
-
-- `make stop` stops the server and preserves its data.
-- `make logs` follows server logs.
-- `FLIXR_PORT=8788 make start` changes the published port.
-- `FLIXR_BIND_ADDR=127.0.0.1 make start` restricts access to this computer.
-
-After updating the source, rebuild explicitly with
-`docker compose -f compose.local.yml up --build --detach --wait`.
-
-Keep the same `FLIXR_MEDIA_DIR`, `FLIXR_PORT`, and `FLIXR_BIND_ADDR` overrides when
-recreating the container. You can put them in a local `.env` file for Compose.
-The default listener is available on all host interfaces for LAN access; Flixr
-is intended for a trusted home network, without router port forwarding.
-
-If setup is interrupted after owner creation, return to `/setup` using the same
-browser to resume with saved folders. If the session expired, use **Owner sign
-in** on the profile chooser; an empty household returns to the walkthrough.
-
-## Current scope
-
-The web client supports films and episodic TV with one root folder for each.
-Optional TMDB enrichment downloads metadata and caches artwork locally. Direct
-play is preferred; incompatible files use a bounded FFmpeg compatibility stream
-when their media formats can be converted. The owner can configure storage and
-concurrency limits and inspect connected Flixr screens.
-
-Google Cast, native AirPlay integration, dedicated TV/mobile apps, and full
-subtitle/audio-track selection are not implemented. This is a working local web
-media server, not a claim of complete Plex feature parity. See
-[product direction and competitor research](docs/product-direction.md).
-
-## Requirements
-
-Install these tools:
-
-- Go 1.27.1;
-- Node.js 22 and npm;
-- FFmpeg and ffprobe.
-
-## Build and run
-
-Build the frontend and copy it into the Go embed directory:
-
-```bash
-npm --prefix frontend ci
-npm --prefix frontend run build:embed
-```
-
-Build and start Flixr:
-
-```bash
-cd backend
-go build -o flixr .
-./flixr
-```
-
-Flixr prints a one-time setup token. Open http://localhost:8787 and use that token to claim the owner account.
-
-Native builds store data in `./flixr-data` and listen on `127.0.0.1:8787` by default. Set `FLIXR_LISTEN_ADDR=0.0.0.0:8787` to allow LAN devices to connect.
-
-## Development demo
-
-For UI development with live reload and the same 50-film / 50-show catalogue:
+Open a terminal in that folder and run:
 
 ```sh
-make demo-dev
+docker compose up -d --wait
+docker compose logs flixr
 ```
 
-Open **http://localhost:19879**. Vite provides React Fast Refresh and CSS updates;
-the demo API and cached artwork run on port 19880 using the existing showcase
-volume. Keep the command running. Stop Vite with Ctrl-C. Backend changes require
-a rebuild/restart; frontend changes appear automatically. The regular `make demo`
-command below serves a production build instead (stop Vite before using it).
+The image currently requires GHCR access. If the pull is denied, use the
+[source-build setup](docs/docker.md#build-locally).
 
-The demo banner links to `/dev/interior`, a development-only component playground.
-All 54 Interior components are vendored with their MIT license and pinned source
-revision in `frontend/src/vendor/interior/README.md`. The playground is a lazy
-chunk and is available only in Vite development or an explicit demo server.
+### 3. Open the setup screen
 
-The startup splash waits for profile/catalogue data and visible images, then
-reveals the page. Missing profile pictures are deterministic SVGs generated locally;
-there is no avatar-service or AI-service dependency. Reduced-motion preferences
-skip the zoom transition. A failed request reveals a retry screen.
+Visit **http://localhost:8787**, or **http://YOUR-SERVER-IP:8787** from another device.
+Copy the one-time setup token from the logs, create your owner account, choose
+library folders and add a profile.
 
+Use paths inside the container: if your media folder contains `films/` and `tv/`,
+enter **`/media/films`** and **`/media/tv`** in setup.
 
-```bash
-make demo
-```
+Your settings and history are saved in Docker volumes. Your media stays read-only.
+Use `docker compose down` to stop; **do not add `-v`** unless you want to delete
+FlixR's saved data.
 
-Open **http://localhost:19879** and select **Alex**. This dedicated development
-showcase has its own `flixr-showcase-data` volume and no media mounts. It does not
-change the real installation or the older `flixr-demo` container, if one exists.
+## More information
 
-Python 3 prepares **50 movies and 50 TV shows** with real posters, TV backdrops
-where available, descriptions, genres, years, and up to 24 episodes from the
-first two seasons. No video or audio files are downloaded. The default selection
-is curated from well-known titles, **not a live top-rated chart**. Film metadata
-comes from [Wikipedia via prust/wikipedia-movie-data](https://github.com/prust/wikipedia-movie-data);
-TV metadata comes from [TVmaze](https://www.tvmaze.com/api). Credits appear in the
-demo banner. Original artwork remains its owners' property. Downloaded assets stay
-in the ignored local `.demo/` cache and are excluded from the runtime image; the
-README banner and screenshots display sample titles for demonstration.
+- [Docker configuration, volumes, updates and backups](docs/docker.md)
+- [Build from source, run the demo and contribute](docs/development.md)
+- [Release process and versioning](docs/releases.md)
+- [Roadmap](https://github.com/mopeyjellyfish/flixr/issues/104)
+- [MIT license](LICENSE)
 
-New showcases have **Alex** and **Guest** profiles without PINs, and **Sam** with
-PIN **`2468`**. The demo-only owner password is **`flixr-demo-only`**. Existing owner
-credentials and profiles are never overwritten. Sample My List and Continue
-Watching entries are editable and persist. Expand the **Development demo** banner
-for navigation and credentials. Try profiles, PINs, search, movie/TV filters,
-rows/grids, sorting, lists, episode details, and owner settings. Playback and
-remote playback are unavailable without media; the backend rejects demo playback.
-
-For a TMDB top-rated snapshot, set `TMDB_READ_ACCESS_TOKEN` in your local
-environment, run `python3 scripts/prepare-demo.py --refresh`, then `make demo`.
-This downloads the first 50 top-rated results per category with available
-backdrops and first-season episodes. The token is never written to the snapshot
-or passed into the container.
-
-- `make demo-down` stops the showcase and preserves its data.
-- `make demo-reset` deletes only the showcase volume; the next start recreates the
-  sample household. Downloaded artwork remains cached.
-- `make demo-smoke` verifies counts, cached artwork, profiles, and rejection of
-  playback. It requires `curl`, `jq`, and the Alex sample profile.
-- `FLIXR_DEMO_PORT=19881 make demo` changes the local port.
-
-Initial preparation requires internet access. Later runs reuse `.demo/`. To start
-the existing image offline without rebuilding, run
-`docker compose up --detach --wait --no-build`. All cached demo assets are served
-locally. Normal startup never imports `.demo/` or creates sample credentials.
-
-## Back up and restore
-
-Stop Flixr before backing up its data volume so SQLite, settings, and artwork form a consistent snapshot. Back up the entire volume, not only the `.db` file; media files live separately in your source folder. Restore the volume with the same container ownership, mount the same media folders, and start Flixr. Do not use `docker compose down --volumes` on an installation you want to keep.
-
-## Bootstrap configuration
-
-Set bootstrap values with environment variables before you start Flixr:
-
-| Variable | Purpose |
-| --- | --- |
-| `FLIXR_DATA_DIR` | Override the durable data directory. |
-| `FLIXR_LISTEN_ADDR` | Override the HTTP listen address. |
-| `FLIXR_TLS_CERT` | Set the TLS certificate path. Use with `FLIXR_TLS_KEY`. |
-| `FLIXR_TLS_KEY` | Set the TLS private-key path. Use with `FLIXR_TLS_CERT`. |
-| `FLIXR_DEMO` | Set to `true` only to explicitly seed the metadata-only demo catalog. |
-
-Configure library roots and the optional TMDB token through the web interface or startup environment. See the [complete environment reference](docs/docker.md#environment-and-secrets) for provisioning, playback limits and file secrets. Flixr never returns the stored TMDB token to a client.
-
-## Development
-
-Run the Go checks:
-
-```bash
-cd backend
-go test ./...
-go test -race ./...
-go vet ./...
-```
-
-Run the frontend checks:
-
-```bash
-npm --prefix frontend run lint
-npm --prefix frontend run typecheck
-npm --prefix frontend test
-npm --prefix frontend run build
-```
-
-Run the mocked browser matrix after Playwright Chromium is available:
-
-```bash
-npm --prefix frontend run test:e2e -- --project=chromium
-```
-
-The production browser suite runs against the built `flixr` executable. See `.github/workflows/ci.yml` for the complete fixture and environment setup.
-
-To verify the local-first contract, run `make test-offline` after `npm --prefix
-frontend ci` and installing Playwright Chromium. This builds a disposable Docker
-installation on an internal network with no default internet route and runs the
-production setup, scan, playback, and screen-control flow through a local TCP
-relay. The main browser context rejects requests to external origins. It also checks durable
-owner state after restart. The command removes only its own temporary containers,
-network, image, and data volume. Screenshots and traces go to
-`output/playwright/offline/`.
-
-If port 4173 is already occupied, use `FLIXR_TEST_PORT=4180 npm --prefix frontend
-run test:e2e -- --project=chromium`. Tests refuse to reuse an unrelated server.
-
-### Responsive verification
-
-Start `make demo-dev`, then run the reusable check through Playwright CLI:
-
-```sh
-npx --package @playwright/cli playwright-cli --session flixr-responsive open http://localhost:19879
-npx --package @playwright/cli playwright-cli --session flixr-responsive run-code "$(cat scripts/check-responsive.js)"
-```
-
-The check requires the isolated demo and its Alex profile. It exercises rows, grids,
-detail dialogs, profile selection and sign-in from 320px through 8K, then resizes
-back to desktop to catch stale measurements. It checks navigation/page bounds and
-poster scaling without hiding failures behind screenshot-only assertions.
-
-## Repository layout
-
-- `backend/` — Go server, SQLite migrations, catalog, household, and embedded web assets.
-- `frontend/` — React, TypeScript, Vite, Tailwind CSS, unit tests, and Playwright tests.
-- `docs/features/flixr-core/` — accepted pitch, delivery plan, and validation evidence.
-- `DESIGN.md` — accepted Cobalt Signal interface direction.
-
-## License
-
-Flixr is available under the MIT License. See `LICENSE`.
-
-Native builds require FFmpeg and ffprobe as external runtime dependencies. The Docker image installs the Alpine FFmpeg package in its runtime image.
+The banner shows the demo, which contains artwork and metadata for 50 movies and
+50 TV shows, without video files. See the [demo guide](docs/development.md#development-demo).
