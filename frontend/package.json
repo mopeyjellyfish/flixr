@@ -12,13 +12,15 @@
     "preview": "vite preview --host 127.0.0.1",
     "build:embed": "npm run build && node scripts/embed.mjs",
     "test:e2e": "playwright test",
-    "test:e2e:list": "playwright test --list"
+    "test:e2e:list": "playwright test --list",
+    "dev": "vite --host 127.0.0.1 --port 19879 --strictPort"
   },
   "dependencies": {
     "@fontsource/atkinson-hyperlegible-next": "^5.3.0",
     "@fontsource/manrope": "^5.3.0",
     "@tanstack/react-virtual": "^3.14.10",
     "hls.js": "^1.7.1",
+    "motion": "^13.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

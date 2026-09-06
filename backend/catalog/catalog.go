@@ -111,19 +111,21 @@ type ScanStatus struct {
 }
 
 type Catalog struct {
-	mu       sync.RWMutex
-	db       *sqlite.DB
-	fs       afero.Fs
-	film, tv string
-	items    map[string]Item
-	series   map[string]Series
-	prober   Prober
-	provider MetadataProvider
-	token    string
-	scanning bool
-	cancel   context.CancelFunc
-	done     chan struct{}
-	status   ScanStatus
+	demo       bool
+	demoSource string
+	mu         sync.RWMutex
+	db         *sqlite.DB
+	fs         afero.Fs
+	film, tv   string
+	items      map[string]Item
+	series     map[string]Series
+	prober     Prober
+	provider   MetadataProvider
+	token      string
+	scanning   bool
+	cancel     context.CancelFunc
+	done       chan struct{}
+	status     ScanStatus
 }
 
 func New() *Catalog {
@@ -210,7 +212,7 @@ func id(kind, fingerprint string) string {
 }
 func title(path string) string {
 	n := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	n = regexp.MustCompile(`(?i)[. _-]?(s\d{1,2}e\d{1,2}|\d{1,2}x\d{1,2})$`).ReplaceAllString(n, "")
+	n = regexp.MustCompile(`(?i)[. _-]?(s\d{1,2}e\d{1,4}|\d{1,2}x\d{1,4})$`).ReplaceAllString(n, "")
 	n = strings.NewReplacer(".", " ", "_", " ").Replace(n)
 	return strings.TrimSpace(n)
 }
@@ -222,10 +224,10 @@ func boolInt(v bool) int {
 	return 0
 }
 
-var episodeRE = regexp.MustCompile(`(?i)(?:s(\d{1,2})e(\d{1,2})|(\d{1,2})x(\d{1,2}))`)
+var episodeRE = regexp.MustCompile(`(?i)(?:s(\d{1,2})e(\d{1,4})|(\d{1,2})x(\d{1,4}))`)
 
 func episodeFields(x *Item) {
-	m := episodeRE.FindStringSubmatch(x.path)
+	m := episodeRE.FindStringSubmatch(filepath.Base(x.path))
 	if len(m) == 0 {
 		return
 	}
@@ -431,7 +433,8 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		}
 		err := afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
-				return nil
+				// A disconnected or unreadable mount is not an empty library.
+				return fmt.Errorf("read media directory: %w", walkErr)
 			}
 			if err := ctx.Err(); err != nil {
 				return err

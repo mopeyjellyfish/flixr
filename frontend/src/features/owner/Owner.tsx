@@ -1,4 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { LoadingButton, useAsyncAction } from '../../vendor/interior/loading-button';
+import { ProgressBar } from '../../vendor/interior/progress-bar';
+import { Avatar } from '../../modules/ui/Feedback';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
@@ -24,11 +27,12 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [pin, setPin] = useState('');
   const [notice, setNotice] = useState('');
   const [profilesVersion, setProfilesVersion] = useState(0);
+  const [ownerRequired, setOwnerRequired] = useState(false);
 
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
     api.scanStatus().then((result) => setScan(result.scan.status ? result.scan : undefined)).catch(() => undefined);
-    api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch(() => setNotice('Library roots are unavailable.'));
+    api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
     api.tmdbSettings().then((settings) => setTMDBConfigured(settings.configured)).catch(() => setNotice('TMDB settings are unavailable.'));
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
@@ -36,6 +40,14 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   };
 
   const recheck = () => api.recheck().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
+  const refreshActivity = async () => {
+    try {
+      const [playback, connected] = await Promise.all([api.playbackStatus(), api.ownerScreens()]);
+      setPlaybackStatus(playback);
+      setScreens(connected.screens ?? []);
+      setNotice('Activity updated.');
+    } catch { setNotice('Activity is unavailable. Try refreshing again.'); }
+  };
   useEffect(load, []);
   useEffect(() => {
     if (scan?.status !== 'running') return;
@@ -104,21 +116,37 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     }
   };
 
+  if (ownerRequired) return <main className="owner"><OwnerHeader onBrowse={onBrowse} onLogout={onLogout} /><section className="auth-panel"><h1>Owner sign in required</h1><p>Your owner session has expired or this device has not signed in.</p><a className="button-link primary" href="/login">Sign in to administer Flixr</a></section></main>;
+
   return (
     <main className="owner">
       <OwnerHeader onBrowse={onBrowse} onLogout={onLogout} />
-      <h1>Keep your local cinema ready.</h1>
-      {notice && <p role="status">{notice}</p>}
-      {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-      <section className="owner-grid">
-        <RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} />
-        <ScanPanel scan={scan} onStart={startScan} />
-        <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
-        <ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} />
-        <ProfileManager version={profilesVersion} />
-        {playbackSettings && <PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} />}
-        <ConnectedScreens screens={screens} />
-      </section>
+      <div className="owner-intro"><p className="eyebrow">YOUR SERVER</p><h1>Server settings</h1><p>Manage your libraries, household, and playback from this device.</p></div>
+      {notice && <p className="owner-notice" role="status">{notice}</p>}
+      <div className="owner-layout">
+        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a></nav>
+        <div className="owner-sections">
+          <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
+            <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
+            {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
+            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} /><ScanPanel scan={scan} onStart={startScan} /></div>
+          </section>
+          <section id="household" className="owner-section" aria-labelledby="household-title">
+            <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
+            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} /></div>
+          </section>
+          <section id="playback" className="owner-section" aria-labelledby="playback-title">
+            <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
+            <LoadingButton onAction={refreshActivity} pendingLabel="Refreshing…" successLabel="Refresh activity">Refresh activity</LoadingButton>
+            <ConnectedScreens screens={screens} />
+            {playbackSettings && <details><summary>Playback resource limits</summary><PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} /></details>}
+          </section>
+          <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
+            <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
+            <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
+          </section>
+        </div>
+      </div>
     </main>
   );
 }
@@ -138,19 +166,19 @@ function ReadinessControls({ readiness, onRecheck }: { readiness: Readiness; onR
   return (
     <>
       <ReadinessPanel readiness={readiness} />
-      <button className="primary" onClick={() => void onRecheck()}>Recheck readiness</button>
+      <LoadingButton onAction={onRecheck} pendingLabel="Checking…" successLabel="Recheck readiness">Recheck readiness</LoadingButton>
     </>
   );
 }
 
 function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
   return (
-    <form onSubmit={onSubmit}>
+    <PendingForm onSubmit={onSubmit}>
       <h2>Library roots</h2>
       <label>Films root<input value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
       <label>TV root<input value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
       <button className="primary">Save roots</button>
-    </form>
+    </PendingForm>
   );
 }
 
@@ -160,14 +188,14 @@ function ScanPanel({ scan, onStart }: { scan?: Scan; onStart: () => Promise<void
       <h2>Manual scan</h2>
       <p>{scan ? `${scan.status}: ${scan.scanned} scanned, ${scan.unmatched} unmatched, ${scan.failed} failed.` : 'No scan has started.'}</p>
       {scan?.message && <p role="alert">{scan.message}</p>}
-      <button className="primary" disabled={scan?.status === 'running'} onClick={() => void onStart()}>{scan?.status === 'running' ? 'Scan in progress' : 'Start scan'}</button>
+      <LoadingButton onAction={onStart} disabled={scan?.status === 'running'} pendingLabel="Starting…" successLabel="Start scan">{scan?.status === 'running' ? 'Scan in progress' : 'Start scan'}</LoadingButton>{scan?.status === 'running' && <ProgressBar value={null} label="Library scan" pendingLabel="Scanning your library…" />}
     </section>
   );
 }
 
 function TMDBForm({ configured, token, onTokenChange, onSave, onRemove }: { configured: boolean; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void> }) {
   return (
-    <form onSubmit={onSave}>
+    <PendingForm onSubmit={onSave}>
       <h2>TMDB metadata</h2>
       <p>{configured ? 'Credential configured. Enter a replacement token to change it.' : 'No credential configured.'}</p>
       <label>TMDB access token<input type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
@@ -175,12 +203,12 @@ function TMDBForm({ configured, token, onTokenChange, onSave, onRemove }: { conf
         <button className="primary">Save TMDB credential</button>
         {configured && <button type="button" onClick={() => void onRemove()}>Remove credential</button>}
       </div>
-    </form>
+    </PendingForm>
   );
 }
 
 function PlaybackPanel({ settings, status, onChange, onSubmit }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void }) {
-  return <form onSubmit={onSubmit}>
+  return <PendingForm onSubmit={onSubmit}>
     <h2>Playback resources</h2>
     <p>{status?.generations?.length ? `${status.generations.length} compatibility generation${status.generations.length === 1 ? '' : 's'} active.` : 'No compatibility generations are active.'}</p>
     <label>Segment directory<input value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
@@ -188,7 +216,7 @@ function PlaybackPanel({ settings, status, onChange, onSubmit }: { settings: Pla
     <label>Global bytes<input type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
     <label>Concurrent generations<input type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
     <button className="primary">Save playback limits</button>
-  </form>;
+  </PendingForm>;
 }
 
 function ConnectedScreens({ screens }: { screens: ScreenPresence[] }) {
@@ -197,12 +225,12 @@ function ConnectedScreens({ screens }: { screens: ScreenPresence[] }) {
 
 function ProfileForm({ name, pin, onNameChange, onPinChange, onSubmit }: { name: string; pin: string; onNameChange: (value: string) => void; onPinChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
   return (
-    <form onSubmit={onSubmit}>
+    <PendingForm onSubmit={onSubmit}>
       <h2>Household profiles</h2>
       <label>Name<input required value={name} onChange={(event) => onNameChange(event.target.value)} /></label>
       <label>PIN (optional)<input type="password" value={pin} onChange={(event) => onPinChange(event.target.value)} /></label>
       <button className="primary">Create profile</button>
-    </form>
+    </PendingForm>
   );
 }
 
@@ -237,14 +265,20 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
   };
 
   return (
-    <form onSubmit={save}>
-      <strong>{profile.name} {profile.protected ? '· PIN protected' : '· no PIN'}</strong>
+    <PendingForm className="owner-profile-row" onSubmit={save}>
+      <strong><Avatar name={profile.name} />{profile.name} {profile.protected ? '· PIN protected' : '· no PIN'}</strong>
       <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>New PIN<input type="password" value={pin} onChange={(event) => setPin(event.target.value)} /></label>
       <div className="actions">
         <button>Save</button>
         {profile.protected && <button type="button" onClick={() => void api.updateProfile(profile.id, { unprotect: true }).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to remove PIN.'))}>Remove PIN</button>}
       </div>
-    </form>
+    </PendingForm>
   );
+}
+
+function PendingForm({ onSubmit, children, className }: { onSubmit: (event: FormEvent) => unknown; children: ReactNode; className?: string }) {
+  const submitted = useRef<FormEvent | null>(null);
+  const { run, pending } = useAsyncAction({ action: () => onSubmit(submitted.current!), resetAfter: 450 });
+  return <form className={className} aria-busy={pending} onSubmit={(event) => { event.preventDefault(); submitted.current = event; run(); }}><fieldset disabled={pending}>{children}</fieldset>{pending && <p role="status" className="save-status"><span className="button-spinner" aria-hidden="true" />Saving changes…</p>}</form>;
 }

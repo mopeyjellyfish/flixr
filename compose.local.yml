@@ -1,0 +1,29 @@
+name: flixr
+
+services:
+  flixr:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${FLIXR_BIND_ADDR:-0.0.0.0}:${FLIXR_PORT:-8787}:8787"
+    environment:
+      FLIXR_DATA_DIR: /data
+      FLIXR_SEGMENT_DIR: ""
+      FLIXR_LISTEN_ADDR: 0.0.0.0:8787
+    volumes:
+      - flixr-data:/data
+      - type: bind
+        source: ${FLIXR_MEDIA_DIR:-./media}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/api/v1/setup/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  flixr-data:

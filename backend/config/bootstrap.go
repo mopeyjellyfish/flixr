@@ -10,6 +10,7 @@ import (
 )
 
 type Bootstrap struct {
+	Environment
 	DataDir, ListenAddr, TLSCert, TLSKey string
 	Demo                                 bool
 }
@@ -27,7 +28,11 @@ func Load() (Bootstrap, error) {
 	if os.Getenv("FLIXR_DEMO") != "" && err != nil {
 		return Bootstrap{}, err
 	}
-	return Bootstrap{DataDir: d, ListenAddr: a, TLSCert: os.Getenv("FLIXR_TLS_CERT"), TLSKey: os.Getenv("FLIXR_TLS_KEY"), Demo: demo}, nil
+	environment, err := loadEnvironment()
+	if err != nil {
+		return Bootstrap{}, err
+	}
+	return Bootstrap{Environment: environment, DataDir: d, ListenAddr: a, TLSCert: os.Getenv("FLIXR_TLS_CERT"), TLSKey: os.Getenv("FLIXR_TLS_KEY"), Demo: demo}, nil
 }
 
 // Validate rejects incomplete or unreadable TLS configuration before serving.

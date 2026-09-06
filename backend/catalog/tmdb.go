@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const maxProviderBody = 1 << 20
@@ -67,6 +70,11 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 	} else {
 		u.Path = path.Join(u.Path, "/3/search/movie")
 	}
+	wantedYear := 0
+	if match := metadataYearRE.FindStringSubmatch(title); match != nil {
+		wantedYear, _ = strconv.Atoi(match[1])
+		title = strings.TrimSpace(title[:len(title)-len(match[0])])
+	}
 	q := u.Query()
 	q.Set("query", title)
 	u.RawQuery = q.Encode()
@@ -87,29 +95,63 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 	}
 	var body struct {
 		Results []struct {
-			ID           int    `json:"id"`
-			Overview     string `json:"overview"`
-			ReleaseDate  string `json:"release_date"`
-			FirstAirDate string `json:"first_air_date"`
-			PosterPath   string `json:"poster_path"`
-			BackdropPath string `json:"backdrop_path"`
+			ID            int    `json:"id"`
+			Title         string `json:"title"`
+			Name          string `json:"name"`
+			OriginalTitle string `json:"original_title"`
+			OriginalName  string `json:"original_name"`
+			Overview      string `json:"overview"`
+			ReleaseDate   string `json:"release_date"`
+			FirstAirDate  string `json:"first_air_date"`
+			PosterPath    string `json:"poster_path"`
+			BackdropPath  string `json:"backdrop_path"`
 		} `json:"results"`
 	}
 	if err := decodeLimitedJSON(resp.Body, &body); err != nil {
 		return Enrichment{}, err
 	}
-	if len(body.Results) == 0 {
-		return Enrichment{}, nil
+	var match Enrichment
+	for _, x := range body.Results {
+		if x.ID <= 0 || normalizedTitle(title) == "" {
+			continue
+		}
+		matchesTitle := false
+		for _, candidate := range []string{x.Title, x.Name, x.OriginalTitle, x.OriginalName} {
+			if normalizedTitle(candidate) == normalizedTitle(title) {
+				matchesTitle = true
+			}
+		}
+		date := x.ReleaseDate
+		if kind == "series" {
+			date = x.FirstAirDate
+		}
+		year := 0
+		if len(date) >= 4 {
+			year, _ = strconv.Atoi(date[:4])
+		}
+		if !matchesTitle || (wantedYear != 0 && year != wantedYear) {
+			continue
+		}
+		// Ambiguous titles stay local instead of silently selecting the wrong remake.
+		if match.ProviderID != "" {
+			return Enrichment{}, nil
+		}
+		match = Enrichment{ProviderID: fmt.Sprint(x.ID), Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}
 	}
-	x := body.Results[0]
-	date := x.ReleaseDate
-	if date == "" {
-		date = x.FirstAirDate
-	}
-	var year int
-	fmt.Sscanf(date, "%d", &year)
-	return Enrichment{ProviderID: fmt.Sprint(x.ID), Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}, nil
+	return match, nil
 }
+
+var metadataYearRE = regexp.MustCompile(`(?:\s+|\s*\()((?:19|20)\d{2})\)?$`)
+
+func normalizedTitle(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, value)
+}
+
 func decodeLimitedJSON(r io.Reader, value any) error {
 	data, err := io.ReadAll(io.LimitReader(r, maxProviderBody+1))
 	if err != nil {

@@ -1,6 +1,8 @@
+import { BusyButton } from '../../modules/ui/Feedback';
+import { useAsyncAction } from '../../vendor/interior/loading-button';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type Profile } from '../../core/api';
+import { ApiError, type OwnerRoots, type Profile } from '../../core/api';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
 
 type ReadinessProps = {
@@ -19,15 +21,15 @@ export function Readiness({ readiness }: ReadinessProps) {
   );
 }
 
-type SetupProps = ReadinessProps & { onCompleted: () => void };
+type SetupProps = ReadinessProps & { onCompleted: () => void; initialRoots?: OwnerRoots };
 type SetupStep = 'secure' | 'libraries' | 'profile';
 
-export function Setup({ readiness, onCompleted }: SetupProps) {
-  const [step, setStep] = useState<SetupStep>('secure');
+export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
+  const [step, setStep] = useState<SetupStep>(initialRoots ? 'libraries' : 'secure');
   const [token, setToken] = useState('');
   const [password, setPassword] = useState('');
-  const [films, setFilms] = useState('');
-  const [tv, setTV] = useState('');
+  const [films, setFilms] = useState(initialRoots?.films ?? '');
+  const [tv, setTV] = useState(initialRoots?.tv ?? '');
   const [name, setName] = useState('');
   const [pin, setPin] = useState('');
   const [createdProfile, setCreatedProfile] = useState<Profile>();
@@ -117,30 +119,6 @@ export function Setup({ readiness, onCompleted }: SetupProps) {
 export function OwnerLogin({ onLogin }: { onLogin: () => void }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setError('');
-    try {
-      await api.ownerLogin(password);
-      onLogin();
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : 'Unable to sign in.');
-    }
-  };
-
-  return (
-    <section className="auth-panel">
-      <p className="eyebrow">OWNER</p>
-      <h1>Owner sign in</h1>
-      <form onSubmit={submit}>
-        <label>
-          Owner password
-          <input required autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-        </label>
-        {error && <p role="alert">{error}</p>}
-        <button className="primary">Sign in</button>
-      </form>
-    </section>
-  );
+  const action = useAsyncAction({ action: async () => { setError(''); await api.ownerLogin(password); onLogin(); }, onError: (cause) => setError(cause instanceof ApiError ? cause.message : 'Unable to sign in.') });
+  return <section className="auth-panel owner-login"><Wordmark /><p className="eyebrow">YOUR HOUSE. YOUR RULES.</p><h1>Owner sign in</h1><p>Make Flixr feel like home. Manage your library, profiles, and screens.</p><form onSubmit={(event) => { event.preventDefault(); action.run(); }} aria-busy={action.pending}><input className="sr-only" name="username" autoComplete="username" value="owner" readOnly tabIndex={-1} aria-hidden="true" /><label>Owner password<input required autoFocus type="password" autoComplete="current-password" value={password} disabled={action.pending} onChange={(event) => setPassword(event.target.value)} /></label>{error && <p role="alert">{error}</p>}<BusyButton className="primary" busy={action.pending}>Sign in</BusyButton></form><a className="button-link" href="/profiles">← Back to profiles</a><p className="local-note">This account belongs to your local server.</p></section>;
 }

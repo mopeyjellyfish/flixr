@@ -38,3 +38,45 @@ func TestTMDBRejectsNonImageArtwork(t *testing.T) {
 		t.Fatal("non-image content type was accepted")
 	}
 }
+
+func TestTMDBMatchesTitleAndYearWithoutGuessing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("query") != "Dune" {
+			t.Errorf("unexpected query %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"id":1,"title":"Dune: Part Two","release_date":"2024-03-01"},{"id":2,"title":"Dune","release_date":"1984-12-14"},{"id":3,"title":"Dune","release_date":"2021-10-22"}]}`))
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	for _, test := range []struct{ title, want string }{{"Dune (2021)", "3"}, {"Dune 1984", "2"}, {"Dune", ""}, {"Dune (2000)", ""}} {
+		got, err := provider.Lookup(context.Background(), "test", "film", test.title)
+		if err != nil || got.ProviderID != test.want {
+			t.Errorf("%s: got %+v, %v", test.title, got, err)
+		}
+	}
+}
+
+func TestEpisodeNumbersBeyond99(t *testing.T) {
+	for _, name := range []string{"Show.S02E123.mkv", "Show.2x123.mkv"} {
+		item := Item{path: "Other S01E01/" + name}
+		episodeFields(&item)
+		if item.Season != 2 || item.Episode != 123 || title(name) != "Show" {
+			t.Errorf("%s: season=%d episode=%d title=%q", name, item.Season, item.Episode, title(name))
+		}
+	}
+}
+
+func TestTMDBTVUsesFirstAirYearAndOriginalName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "Bron Broen" {
+			t.Errorf("wrong TV search: %s", r.URL)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"id":7,"name":"The Bridge","original_name":"Bron/Broen","first_air_date":"2011-09-21","release_date":"2020-01-01"}]}`))
+	}))
+	defer server.Close()
+	got, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).Lookup(context.Background(), "test", "series", "Bron Broen (2011)")
+	if err != nil || got.ProviderID != "7" || got.Year != 2011 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}

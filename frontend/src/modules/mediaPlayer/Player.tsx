@@ -20,7 +20,7 @@ function browserCapabilities(): PlaybackCapabilities {
   };
 }
 
-export function Player({ catalogID, startPositionMS, onExit }: { catalogID: string; startPositionMS?: number; onExit: () => void }) {
+export function Player({ catalogID, startPositionMS, active = true, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
@@ -32,8 +32,8 @@ export function Player({ catalogID, startPositionMS, onExit }: { catalogID: stri
   const autoStart = useRef(startPositionMS !== undefined);
 
   useEffect(() => {
-    backButton.current?.focus();
-  }, []);
+    if (active) backButton.current?.focus();
+  }, [active]);
 
   const currentPosition = useCallback(() => {
     const relative = Math.round((video.current?.currentTime ?? 0) * 1000);
@@ -117,7 +117,7 @@ export function Player({ catalogID, startPositionMS, onExit }: { catalogID: stri
       hls.current = null;
       const plan = playback.current;
       if (plan && !finalizing.current) {
-        void api.playbackHeartbeat(plan.session_id, currentPosition()).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
+        void api.playbackHeartbeat(plan.session_id, currentPosition()).catch(() => undefined).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
   }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
@@ -162,7 +162,8 @@ export function Player({ catalogID, startPositionMS, onExit }: { catalogID: stri
     const plan = playback.current;
     if (plan) {
       try {
-        await api.playbackHeartbeat(plan.session_id, currentPosition());
+        // A failed progress write must not leave an FFmpeg session running.
+        await api.playbackHeartbeat(plan.session_id, currentPosition()).catch(() => undefined);
         await api.playbackStop(plan.session_id);
       } catch {
         // The durable progress write is best-effort during an explicit exit.
@@ -197,6 +198,7 @@ export function Player({ catalogID, startPositionMS, onExit }: { catalogID: stri
     {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p><button onClick={() => { void finish(); }}>Return to your library</button></section> :
       <section className="player-stage" aria-labelledby="player-title">
         <div className="player-frame">
+          {(state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{state.status === 'buffering' ? 'Buffering…' : 'Preparing your film…'}</span></div>}
           <video
             ref={video}
             controls
@@ -213,7 +215,9 @@ export function Player({ catalogID, startPositionMS, onExit }: { catalogID: stri
                 void video.current.play().catch(() => dispatch({ type: 'pause' }));
               }
             }}
-            onCanPlay={() => dispatch({ type: 'pause' })}
+            onCanPlay={() => dispatch({ type: video.current?.paused ? 'pause' : 'play' })}
+            onError={() => dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' })}
+            onEnded={() => { dispatch({ type: 'pause' }); void heartbeat(); }}
             onPlaying={() => dispatch({ type: 'play' })}
             onPause={() => {
               dispatch({ type: 'pause' });

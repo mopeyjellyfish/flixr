@@ -17,10 +17,18 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const tvRoot = process.env.FLIXR_TV_ROOT;
   if (!token || !filmsRoot || !tvRoot) throw new Error('FLIXR_SETUP_TOKEN, FLIXR_FILMS_ROOT, and FLIXR_TV_ROOT are required for production acceptance.');
   const errors: string[] = [];
+  const externalRequests: string[] = [];
+  const origin = new URL(testInfo.project.use.baseURL!).origin;
+  await page.context().route('**/*', (route) => {
+    if (new URL(route.request().url()).origin === origin) return route.continue();
+    externalRequests.push(route.request().url());
+    return route.abort();
+  });
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
 
   await page.goto('/setup');
+  await expect(page.locator('[data-app-content]')).not.toHaveAttribute('inert');
   await page.getByLabel(/setup token/i).fill(token);
   await page.getByLabel(/owner password/i).fill('production-owner-password');
   const scan = page.waitForResponse((response) => response.url().includes('/api/v1/owner/scan') && response.request().method() === 'POST');
@@ -49,6 +57,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto('/home');
+    await expect(page.locator('[data-app-content]')).not.toHaveAttribute('inert');
     await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible();
     const axe = await new AxeBuilder({ page }).analyze();
     expect(axe.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
@@ -65,7 +74,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.screenshot({ path: testInfo.outputPath('production-direct-playback-phone.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('button', { name: /back to library/i }).click();
-  await expect(page.getByRole('button', { name: /view details for blue horizon 2026/i })).toBeFocused();
+  await expect(page.locator('[data-catalog-id]:focus')).toHaveAccessibleName(/blue horizon 2026/i);
   await page.getByRole('button', { name: /film compatibility check 2026/i }).click();
   await page.getByRole('button', { name: /play compatibility check 2026/i }).click();
   await expectPlayback(page);
@@ -86,10 +95,10 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /back to library/i }).click();
 
   await page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i }).click();
-  await expect(page.getByRole('dialog')).toContainText(/S1 E1 Signal/i);
+  await expect(page.getByRole('dialog')).toContainText(/Signal.*Season 1 · Episode 1/i);
   await expect(page).toHaveURL(/\/detail\//);
   await page.reload();
-  await expect(page.getByRole('dialog')).toContainText(/S1 E1 Signal/i);
+  await expect(page.getByRole('dialog')).toContainText(/Signal.*Season 1 · Episode 1/i);
   await page.goBack();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.getByRole('button', { name: 'Search' }).click();
@@ -102,6 +111,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
   await acceptScreens(page, browser, testInfo);
   expect(errors).toEqual([]);
+  expect(externalRequests).toEqual([]);
 });
 
 async function expectPlayback(page: import('@playwright/test').Page) {

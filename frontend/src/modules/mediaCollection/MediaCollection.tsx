@@ -1,3 +1,4 @@
+import { Artwork } from '../ui/Feedback';
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { CSSProperties, KeyboardEventHandler, RefObject } from 'react';
@@ -58,7 +59,7 @@ function Rail({ label, items, onOpen }: { label: string; items: ViewerItem[]; on
   useLayoutEffect(() => virtualizer.measure(), [stride, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const cards = visible.length ? visible.map((virtual) => ({ index: virtual.index, start: virtual.start })) : items.slice(0, Math.ceil(width / stride) + 3).map((_, index) => ({ index, start: index * stride }));
-  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><span>{items.length} title{items.length === 1 ? '' : 's'}</span></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 32 }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} style={{ transform: `translateX(${virtual.start}px)`, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
+  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><div className="rail-controls"><span>{items.length} title{items.length === 1 ? '' : 's'}</span><button aria-label={`Scroll ${label} left`} onClick={() => parentRef.current?.scrollBy({ left: -width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>‹</button><button aria-label={`Scroll ${label} right`} onClick={() => parentRef.current?.scrollBy({ left: width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>›</button></div></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 32 }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} style={{ left: virtual.start, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
 }
 
 function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>) {
@@ -82,7 +83,7 @@ function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>) {
 }
 
 function PosterCard({ item, onOpen, style, onKeyDown }: { item: ViewerItem; onOpen: Open; style?: CSSProperties; onKeyDown?: KeyboardEventHandler<HTMLButtonElement> }) {
-  return <button data-testid={`card-${item.id}`} data-catalog-id={item.id} data-card className="card" style={style} onKeyDown={onKeyDown} onClick={(event) => onOpen(item, event.currentTarget)}>{item.poster ? <img src={item.poster} alt="" loading="lazy" /> : <span className="card-artwork" style={tonalStyle(item.title)} aria-hidden="true" />}<span className="card-scrim" aria-hidden="true" /><span>{kindLabel(item)}</span><strong>{item.title}</strong>{item.year && <small>{item.year}</small>}{item.demo && <small>Demo title · no media file</small>}</button>;
+  return <button data-testid={`card-${item.id}`} data-catalog-id={item.id} data-card className="card" style={style} onKeyDown={onKeyDown} onClick={(event) => onOpen(item, event.currentTarget)}>{item.poster ? <Artwork key={item.poster} src={item.poster} /> : <span className="card-artwork" style={tonalStyle(item.title)} aria-hidden="true" />}<span className="card-scrim" aria-hidden="true" /><span className="card-kind">{kindLabel(item)}</span><strong>{item.title}</strong>{item.year && <small>{item.year}</small>}{item.demo && <small className="card-demo">Preview</small>}<span className="card-open" aria-hidden="true">↗</span></button>;
 }
 
 function tonalStyle(title?: string) { if (!title) return undefined; let hash = 0; for (const character of title) hash = (hash * 31 + character.charCodeAt(0)) >>> 0; return { backgroundImage: `radial-gradient(circle at ${25 + hash % 60}% ${20 + (hash >>> 8) % 50}%, hsl(${215 + hash % 35} 88% 62% / .52), transparent 42%), linear-gradient(135deg, #101623, #05070c 70%)` }; }

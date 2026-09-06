@@ -10,6 +10,7 @@ export async function acceptScreens(sender: Page, browser: Browser, info: TestIn
   try {
     await receiver.goto('/profiles');
     await receiver.getByRole('button', { name: /production viewer/i }).click();
+    await expect(receiver).toHaveURL(/\/home$/);
     await openTitle(receiver);
     await receiver.getByRole('button', { name: 'Use this device as a screen' }).click();
     await expect(receiver.getByRole('region', { name: 'Local screens' })).toContainText('is ready');
@@ -19,6 +20,7 @@ export async function acceptScreens(sender: Page, browser: Browser, info: TestIn
       await sender.getByRole('button', { name: 'Choose a screen', exact: true }).click();
       const chooser = sender.getByRole('dialog', { name: 'Choose a local screen', exact: true });
       await expect(chooser.getByRole('button', { name: /screen · available/ })).toBeVisible();
+      await chooser.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))));
       expect((await new AxeBuilder({ page: sender }).analyze()).violations.filter((v) => v.impact === 'critical' || v.impact === 'serious')).toEqual([]);
       expect(await sender.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await sender.screenshot({ path: info.outputPath(`screen-chooser-${viewport.name}.png`), fullPage: true });
