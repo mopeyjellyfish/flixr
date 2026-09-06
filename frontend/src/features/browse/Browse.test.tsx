@@ -82,6 +82,8 @@ describe('browse', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(viewerFetch(viewer));
     const { rerender } = render(<Browse onExit={() => undefined} onNavigate={navigate} />);
 		expect(await screen.findByRole('navigation', { name: 'Main navigation' })).toHaveTextContent('HomeMoviesTV');
+    fireEvent.click(await screen.findByRole('button', { name: 'Play Arrival' }));
+    expect(navigate).toHaveBeenLastCalledWith('/play/film-1');
 		expect((await screen.findAllByRole('heading', { level: 2 })).map((heading) => heading.textContent)).toEqual(['Continue Watching', 'New', 'My List', 'Drama']);
 		fireEvent.click(screen.getByRole('button', { name: 'Movies' }));
     expect(navigate).toHaveBeenLastCalledWith('/movies');

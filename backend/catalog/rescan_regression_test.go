@@ -86,3 +86,40 @@ func TestUnchangedTenThousandPathsDoNotProbe(t *testing.T) {
 		t.Fatalf("unchanged paths caused %d probes, want 10000", got)
 	}
 }
+
+func TestUnavailableRootCannotEraseCatalog(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "mounted-media")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := catalog.OpenWithProber(nil, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetRoots(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.List("", 0, 10)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial catalog: %+v, %v", before, err)
+	}
+	if err := os.Rename(root, filepath.Join(parent, "disconnected")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err == nil {
+		t.Fatal("unavailable mount was accepted as empty")
+	}
+	after, err := c.List("", 0, 10)
+	if err != nil || len(after) != 1 || after[0].ID != before[0].ID {
+		t.Fatalf("catalog lost: %+v, %v", after, err)
+	}
+}

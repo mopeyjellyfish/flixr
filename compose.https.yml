@@ -1,0 +1,16 @@
+# Apply with: docker compose -f compose.release.yml -f compose.https.yml up -d
+# Supply a certificate trusted by household devices, matching the server hostname.
+services:
+  flixr:
+    environment:
+      FLIXR_TLS_CERT: /run/secrets/tls_cert
+      FLIXR_TLS_KEY: /run/secrets/tls_key
+    secrets: [tls_cert, tls_key]
+    healthcheck:
+      # Local readiness probe only; clients must validate the server certificate.
+      test: [CMD, wget, --no-check-certificate, -q, -O, /dev/null, 'https://127.0.0.1:8787/api/v1/setup/status']
+secrets:
+  tls_cert:
+    file: ${FLIXR_TLS_CERT_FILE:-./secrets/server.crt}
+  tls_key:
+    file: ${FLIXR_TLS_KEY_FILE:-./secrets/server.key}

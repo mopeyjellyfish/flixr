@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  server: { proxy: { '/api': 'http://127.0.0.1:8787' } },
+  server: { proxy: { '/api': { target: process.env.FLIXR_API_TARGET || 'http://127.0.0.1:19880', ws: true } } },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],

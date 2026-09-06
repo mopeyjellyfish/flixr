@@ -26,7 +26,14 @@ import (
 	"github.com/spf13/afero"
 )
 
+var version = "dev"
+var revision = "unknown"
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Printf("Flixr %s (%s)\n", version, revision)
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load Flixr configuration", "err", err)
@@ -60,9 +67,13 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		return errors.New("Flixr data directory is already in use")
 	}
 	defer unlock()
-	segmentDir, err := playback.LoadSegmentDir(filesystem, cfg.DataDir)
-	if err != nil {
-		return err
+	segmentDir := cfg.SegmentDir
+	if segmentDir == "" {
+		var err error
+		segmentDir, err = playback.LoadSegmentDir(filesystem, cfg.DataDir)
+		if err != nil {
+			return err
+		}
 	}
 	if err := filesystem.MkdirAll(segmentDir, 0o700); err != nil {
 		return fmt.Errorf("create playback segment directory: %w", err)
@@ -96,9 +107,45 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	if err != nil {
 		return err
 	}
+	if cfg.OwnerPassword != "" && !h.Claimed() {
+		if _, err := h.Claim(h.SetupToken(), cfg.OwnerPassword); err != nil {
+			return err
+		}
+	}
+	if cfg.InitialProfile != "" && h.Claimed() && len(h.Profiles()) == 0 {
+		if _, err := h.CreateProfile(cfg.InitialProfile, ""); err != nil {
+			return err
+		}
+	}
+	if cfg.FilmsRoot != nil || cfg.TVRoot != nil {
+		films, tv := c.Roots()
+		if cfg.FilmsRoot != nil {
+			films = *cfg.FilmsRoot
+		}
+		if cfg.TVRoot != nil {
+			tv = *cfg.TVRoot
+		}
+		if err := c.SetRoots(films, tv); err != nil {
+			return fmt.Errorf("environment media roots: %w", err)
+		}
+	}
+	if cfg.TMDBToken != nil {
+		if err := c.SetTMDBToken(*cfg.TMDBToken); err != nil {
+			return err
+		}
+	}
+	if cfg.Demo && c.DemoSource() != "" {
+		if err := prepareDemoHousehold(h, c); err != nil {
+			return err
+		}
+	}
 	settings, err := playback.LoadSettingsWithFilesystem(db, cfg.DataDir, filesystem)
 	if err != nil {
 		return err
+	}
+	settings, err = cfg.PlaybackSettings(settings)
+	if err != nil {
+		return fmt.Errorf("environment playback settings: %w", err)
 	}
 	inputListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -117,6 +164,15 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	}()
 	if !h.Claimed() {
 		fmt.Printf("Flixr setup token: %s\n", h.SetupToken())
+	}
+	if cfg.ScanOnStart {
+		workers := cfg.ScanWorkers
+		if workers == 0 {
+			workers = 4
+		}
+		if err := c.StartScan(ctx, workers); err != nil {
+			return err
+		}
 	}
 	screenManager := screens.New(time.Minute)
 	application := web.NewServerWithScreens(h, c, p, screenManager).Handler()
@@ -167,4 +223,58 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 func within(parent, child string) bool {
 	relative, err := filepath.Rel(parent, child)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// Only an explicit demo with a downloaded snapshot receives sample credentials/history.
+func prepareDemoHousehold(h *household.Manager, c *catalog.Catalog) error {
+	if !c.Demo() {
+		return errors.New("sample household requires demo mode")
+	}
+	if !h.Claimed() {
+		if _, err := h.Claim(h.SetupToken(), "flixr-demo-only"); err != nil {
+			return err
+		}
+		fmt.Println("Flixr development demo owner password: flixr-demo-only")
+	}
+	if len(h.Profiles()) != 0 {
+		return nil
+	}
+	items, _, err := c.Browse("", 0, 100)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"Alex", "Sam", "Guest"} {
+		pin := ""
+		if name == "Sam" {
+			pin = "2468"
+		}
+		profile, err := h.CreateProfile(name, pin)
+		if err != nil {
+			return err
+		}
+		for i, item := range items {
+			if !item.Demo {
+				continue
+			}
+			if i < 8 {
+				if err := c.SetListed(profile.ID, item.Kind, item.ID, true); err != nil {
+					return err
+				}
+			}
+			if i < 4 {
+				progressID := item.ID
+				if item.Kind == "series" {
+					show, ok := c.Series(item.ID)
+					if !ok || len(show.Seasons) == 0 || len(show.Seasons[0].Episodes) == 0 {
+						continue
+					}
+					progressID = show.Seasons[0].Episodes[0].ID
+				}
+				if err := h.ProgressForProfile(profile.ID, progressID, int64((i+1)*60000)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }

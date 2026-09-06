@@ -47,3 +47,18 @@ func TestReadinessRequiresOwnerAndSessionCookieIsStrict(t *testing.T) {
 		t.Fatalf("unsafe session cookie: %#v", cookie)
 	}
 }
+
+func TestTLSClaimUsesSecureSessionCookie(t *testing.T) {
+	house := newHousehold(t)
+	server := web.NewServer(house, catalog.New()).Handler()
+	request := httptest.NewRequest(http.MethodPost, "https://flixr.local/api/v1/setup/claim", bytes.NewBufferString(`{"token":"`+house.SetupToken()+`","password":"passphrase"}`))
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("claim status %d", recorder.Code)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatal("TLS claim cookie missing security attributes")
+	}
+}

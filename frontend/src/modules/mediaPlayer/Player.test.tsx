@@ -29,6 +29,16 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+it('shows an actionable error when native media playback fails', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/missing.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/missing.mp4'));
+  fireEvent.error(video);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/check that the file is still available/i);
+  expect(screen.getByRole('button', { name: /return to your library/i })).toBeVisible();
+});
+
 it('sends a final heartbeat before stopping an explicit player exit', async () => {
   const calls: string[] = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -94,4 +104,21 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
   await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && request.body === JSON.stringify({ position_ms: 7_000 }))).toBe(true));
   hls.error?.({}, { fatal: true });
   expect(await screen.findByRole('alert')).toHaveTextContent(/compatibility stream stopped unexpectedly/i);
+});
+
+it('still stops the server session when saving final progress fails', async () => {
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) throw new TypeError('Temporary connection failure');
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="film-1" onExit={exit} />);
+  await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/film.mp4'));
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  expect(calls.filter(path => path.endsWith('/stop'))).toHaveLength(1);
 });

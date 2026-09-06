@@ -19,10 +19,20 @@ func OpenDemo(db *sqlite.DB) (*Catalog, error) {
 	if db == nil {
 		return nil, fmt.Errorf("demo catalog requires a database")
 	}
-	if err := seedDemo(db); err != nil {
+	if imported, err := importDemo(db); err != nil {
+		return nil, err
+	} else if !imported {
+		if err := seedDemo(db); err != nil {
+			return nil, err
+		}
+	}
+	c, err := Open(db)
+	if err != nil {
 		return nil, err
 	}
-	return Open(db)
+	c.demo = true
+	_ = db.QueryRow("SELECT value FROM settings WHERE key='demo_source'").Scan(&c.demoSource)
+	return c, nil
 }
 
 var demoFilms = []demoRecord{
@@ -82,3 +92,6 @@ func seedDemo(db *sqlite.DB) error {
 func demoSlug(title string) string {
 	return strings.NewReplacer(" ", "-", ":", "", "!", "", ",", "", "'", "").Replace(strings.ToLower(title))
 }
+
+func (c *Catalog) Demo() bool         { return c.demo }
+func (c *Catalog) DemoSource() string { return c.demoSource }

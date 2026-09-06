@@ -1,26 +1,33 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   backend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: backend } }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.x' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version: '1.27.1' }
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
       - run: go build ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   media-integration:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: backend } }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.x' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version: '1.27.1' }
       - name: Install FFmpeg media dependencies
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: FLIXR_REQUIRE_MEDIA_INTEGRATION=1 go test -tags=media_integration ./...
@@ -29,10 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci
+      - run: npm audit --omit=dev
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -43,19 +51,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker compose config
-      - run: docker compose build
+      - run: docker compose -f compose.local.yml config
+      - run: docker compose -f compose.release.yml config
+      - run: docker build -t flixr:ci .
+      - run: bash scripts/image-smoke.sh flixr:ci
+      - run: bash scripts/compose-smoke.sh flixr:ci
+      - name: Scan runtime packages
+        run: |
+          docker save flixr:ci -o "$RUNNER_TEMP/flixr-image.tar"
+          docker run --rm --mount "type=bind,source=$RUNNER_TEMP/flixr-image.tar,target=/image.tar,readonly" \
+            aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --input /image.tar --scanners vuln --severity HIGH,CRITICAL --exit-code 1
 
   browser:
     runs-on: ubuntu-latest
     needs: [backend, frontend, media-integration]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25.x' }
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with: { go-version: '1.27.1' }
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium firefox webkit
@@ -66,7 +84,7 @@ jobs:
         working-directory: frontend
       - name: Upload mocked matrix evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: flixr-mocked-matrix-evidence
           path: frontend/test-results
@@ -85,14 +103,67 @@ jobs:
           FLIXR_DATA_DIR="$RUNNER_TEMP/flixr-data" FLIXR_LISTEN_ADDR=127.0.0.1:8787 ../bin/flixr > "$RUNNER_TEMP/flixr.log" 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
-          for i in {1..50}; do grep -q 'Flixr setup token:' "$RUNNER_TEMP/flixr.log" && break; sleep .1; done
-          export FLIXR_SETUP_TOKEN="$(sed -n 's/.*Flixr setup token: //p' "$RUNNER_TEMP/flixr.log" | head -1)"
+          for _ in {1..50}; do grep -q 'Flixr setup token:' "$RUNNER_TEMP/flixr.log" && break; sleep .1; done
+          FLIXR_SETUP_TOKEN="$(sed -n 's/.*Flixr setup token: //p' "$RUNNER_TEMP/flixr.log" | head -1)"
+          export FLIXR_SETUP_TOKEN
           test -n "$FLIXR_SETUP_TOKEN"
           FLIXR_ACCEPTANCE_URL=http://127.0.0.1:8787 FLIXR_SETUP_TOKEN="$FLIXR_SETUP_TOKEN" FLIXR_FILMS_ROOT="$media_root/films" FLIXR_TV_ROOT="$media_root/tv" npm --prefix ../frontend run test:e2e -- --project=chromium-production
       - name: Upload production acceptance evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: flixr-production-acceptance-evidence
           path: frontend/test-results
           if-no-files-found: warn
+      - name: Accept an internet-isolated media server
+        run: make test-offline
+      - name: Upload offline acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: flixr-offline-acceptance-evidence
+          path: output/playwright/offline
+          if-no-files-found: warn
+
+  release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: npm run test:release
+      - name: Check pull request title for squash merges
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-commit-title.mjs
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'mopeyjellyfish/flixr'
+    needs: [backend, frontend, media-integration, docker, browser, release-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: flixr-release-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version, publish verified images, and generate release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run release

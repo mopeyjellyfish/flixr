@@ -119,7 +119,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	s.readyMu.RLock()
 	ready := s.readiness
 	s.readyMu.RUnlock()
-	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready})
+	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready, "demo": s.catalog.Demo(), "demo_source": s.catalog.DemoSource()})
 }
 func (s *Server) checkReadiness() {
 	_, p := s.lookPath("ffprobe")

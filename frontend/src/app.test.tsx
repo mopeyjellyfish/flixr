@@ -4,7 +4,72 @@ import { App } from './app/App';
 import { strictFetch } from './test/http';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/'); });
+async function renderApp() {
+  render(<App />);
+  await waitFor(() => expect(document.querySelector('.boot-splash')).toBeNull(), { timeout: 3000 });
+}
+
 describe('Flixr routes', () => {
+  it.each([false, true])('shows demo guidance only when the server enables demo mode (%s)', async (demo) => {
+    window.history.replaceState({}, '', '/home');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, demo, demo_source: 'Curated showcase', readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: '/api/v1/catalog/view?media=all', handle: () => ({ json: { preference: { view: 'rows', sort: 'title' }, sections: [] } }) },
+    ]));
+    await renderApp();
+    await screen.findByRole('heading', { name: /your library is waiting/i });
+    expect(Boolean(screen.queryByRole('complementary', { name: 'Development demo' }))).toBe(demo);
+  });
+
+  it('returns an owner with no household profiles to the setup walkthrough after sign in', async () => {
+    window.history.replaceState({}, '', '/login');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: '/api/v1/owner/login', method: 'POST', handle: () => ({ json: {} }) },
+      { path: '/api/v1/profiles', handle: () => ({ json: { profiles: [] } }) },
+      { path: '/api/v1/owner/roots', handle: () => ({ json: { films: '/media/films', tv: '' } }) },
+    ]));
+    await renderApp();
+    fireEvent.change(await screen.findByLabelText(/owner password/i), { target: { value: 'existing owner password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByLabelText(/films library/i)).toHaveValue('/media/films');
+    expect(window.location.pathname).toBe('/setup');
+    expect(screen.queryByLabelText(/setup token/i)).not.toBeInTheDocument();
+  });
+
+  it('recovers a bookmarked home after the local server becomes available', async () => {
+    window.history.replaceState({}, '', '/home');
+    let online = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => {
+        if (!online) throw new Error('Server unavailable');
+        return { json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } };
+      } },
+      { path: '/api/v1/catalog/view?media=all', handle: () => ({ json: { preference: { view: 'rows', sort: 'title' }, sections: [] } }) },
+    ]));
+    await renderApp();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/local server did not respond/i);
+    online = true;
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByRole('heading', { name: /your library is waiting/i })).toBeVisible();
+    expect(window.location.pathname).toBe('/home');
+  });
+
+  it('resumes interrupted setup with saved libraries and never asks to claim twice', async () => {
+    window.history.replaceState({}, '', '/setup');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: '/api/v1/owner/roots', handle: () => ({ json: { films: '/media/films', tv: '/media/tv' } }) },
+      { path: '/api/v1/profiles', handle: () => ({ json: { profiles: [] } }) },
+    ]));
+    await renderApp();
+    expect(await screen.findByLabelText(/films library/i)).toHaveValue('/media/films');
+    expect(screen.getByLabelText(/tv library/i)).toHaveValue('/media/tv');
+    expect(screen.queryByLabelText(/setup token/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+    expect(await screen.findByRole('heading', { name: /first profile/i })).toBeInTheDocument();
+  });
+
   it('guides a claimed owner through libraries and a profile before entering home', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
@@ -19,7 +84,7 @@ describe('Flixr routes', () => {
       if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
       throw new Error(`Unexpected request ${method ?? 'GET'} ${path}`);
     });
-    render(<App />);
+    await renderApp();
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'one-time-token' } });
     expect(screen.getByRole('heading', { name: /local cinema/i })).not.toHaveFocus();
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
@@ -52,7 +117,7 @@ describe('Flixr routes', () => {
       if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
       throw new Error(`Unexpected request ${init?.method ?? 'GET'} ${path}`);
     });
-    render(<App />);
+    await renderApp();
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
@@ -79,7 +144,7 @@ describe('Flixr routes', () => {
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
       throw new Error(`Unexpected request ${path}`);
     });
-    render(<App />);
+    await renderApp();
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
@@ -97,8 +162,8 @@ describe('Flixr routes', () => {
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
       throw new Error(`Unexpected request ${path}`);
     });
-    render(<App />);
-    expect(await screen.findByRole('heading', { name: /choose your profile/i })).toBeInTheDocument();
+    await renderApp();
+    expect(await screen.findByRole('heading', { name: /who.s watching/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/profiles');
   });
 
@@ -111,11 +176,11 @@ describe('Flixr routes', () => {
       if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
       throw new Error(`Unexpected request ${path}`);
     });
-    render(<App />);
+    await renderApp();
     await screen.findByRole('heading', { name: /local cinema/i });
     window.history.pushState({}, '', '/setup');
     fireEvent(window, new PopStateEvent('popstate'));
-    expect(await screen.findByRole('heading', { name: /choose your profile/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /who.s watching/i })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/profiles');
   });
 
@@ -128,7 +193,7 @@ describe('Flixr routes', () => {
     ]));
     HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
     HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); };
-    render(<App />);
+    await renderApp();
     fireEvent.click(await screen.findByTestId('card-film-1'));
     expect(await screen.findByRole('dialog')).toBeVisible();
 		expect(window.location.pathname).toBe('/detail/film-1');

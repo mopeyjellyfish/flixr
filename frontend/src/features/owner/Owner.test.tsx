@@ -4,6 +4,35 @@ import { Owner } from './Owner';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('owner operations', () => {
+  it('refreshes activity without replacing unsaved library changes', async () => {
+    let activityLoads = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '' }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      if (path.includes('/owner/screens')) return new Response(JSON.stringify({ screens: ++activityLoads > 1 ? [{ id: 'tv', name: 'Living room', state: 'available' }] : [] }));
+      return new Response('{}');
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    const films = await screen.findByDisplayValue('/media/films');
+    fireEvent.change(films, { target: { value: '/media/new-films' } });
+    fireEvent.click(screen.getByRole('button', { name: /refresh activity/i }));
+    expect(await screen.findByText(/living room/i)).toBeVisible();
+    expect(films).toHaveValue('/media/new-films');
+  });
+
+  it('offers sign in when the owner session has expired', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      return new Response(JSON.stringify({ error: { code: 'owner_required' } }), { status: 401 });
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    expect(await screen.findByRole('link', { name: /sign in to administer/i })).toHaveAttribute('href', '/login');
+    expect(screen.queryByLabelText(/films root/i)).not.toBeInTheDocument();
+  });
+
   it('reads persisted roots and configured TMDB state without exposing a stored token', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
