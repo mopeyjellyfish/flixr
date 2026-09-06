@@ -25,13 +25,13 @@ describe('Flixr routes', () => {
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
     const libraries = await screen.findByRole('heading', { name: /libraries/i });
-    expect(libraries).toHaveFocus();
+    await waitFor(() => expect(libraries).toHaveFocus());
     expect(screen.queryByText(/owner operations/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/tmdb/i)).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/films library/i), { target: { value: '/media/films' } });
     fireEvent.click(screen.getByRole('button', { name: /save libraries/i }));
     const profile = await screen.findByRole('heading', { name: /profile/i });
-    expect(profile).toHaveFocus();
+    await waitFor(() => expect(profile).toHaveFocus());
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan', expect.objectContaining({ method: 'POST' })));
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Alex' } });
     fireEvent.click(screen.getByRole('button', { name: /create profile/i }));
