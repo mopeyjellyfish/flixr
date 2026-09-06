@@ -122,3 +122,28 @@ it('still stops the server session when saving final progress fails', async () =
   await waitFor(() => expect(exit).toHaveBeenCalledOnce());
   expect(calls.filter(path => path.endsWith('/stop'))).toHaveLength(1);
 });
+
+it('ignores late media heartbeats while the final stop request is pending', async () => {
+  const calls: string[] = [];
+  let finishStop: (() => void) | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/stop')) await new Promise<void>((resolve) => { finishStop = resolve; });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="film-1" onExit={exit} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/film.mp4'));
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  await waitFor(() => expect(finishStop).toBeTypeOf('function'));
+  // The server may already have revoked the session while its stop response is in flight.
+  fireEvent.ended(video);
+  fireEvent.pause(video);
+  await act(async () => { finishStop!(); });
+  expect(exit).toHaveBeenCalledOnce();
+  expect(calls.filter(path => path.endsWith('/heartbeat'))).toHaveLength(1);
+  expect(calls.filter(path => path.endsWith('/stop'))).toHaveLength(1);
+});

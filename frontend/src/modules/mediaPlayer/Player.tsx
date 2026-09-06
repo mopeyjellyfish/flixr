@@ -71,7 +71,8 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
 
   const heartbeat = useCallback(async () => {
     const plan = playback.current;
-    if (!plan) return;
+    // Stop revokes the session before the media element is unmounted.
+    if (!plan || finalizing.current) return;
     const positionMs = currentPosition();
     try {
       await api.playbackHeartbeat(plan.session_id, positionMs);
@@ -221,7 +222,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
             onPlaying={() => dispatch({ type: 'play' })}
             onPause={() => {
               dispatch({ type: 'pause' });
-              if (!finalizing.current) void heartbeat();
+              void heartbeat();
             }}
             onWaiting={() => dispatch({ type: 'buffering' })}
             onSeeked={() => {
