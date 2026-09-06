@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from './app/App';
+import { strictFetch } from './test/http';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/'); });
 describe('Flixr routes', () => {
@@ -15,7 +16,8 @@ describe('Flixr routes', () => {
       if (path.includes('/profiles/profile-1/select')) return new Response(JSON.stringify({ selected: true }));
       if (path.endsWith('/profiles') && method === 'POST') return new Response(JSON.stringify({ id: 'profile-1', name: 'Alex', protected: false }), { status: 201 });
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
-      return new Response(JSON.stringify({}));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
+      throw new Error(`Unexpected request ${method ?? 'GET'} ${path}`);
     });
     render(<App />);
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'one-time-token' } });
@@ -23,13 +25,13 @@ describe('Flixr routes', () => {
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
     const libraries = await screen.findByRole('heading', { name: /libraries/i });
-    expect(libraries).toHaveFocus();
+    await waitFor(() => expect(libraries).toHaveFocus());
     expect(screen.queryByText(/owner operations/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/tmdb/i)).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/films library/i), { target: { value: '/media/films' } });
     fireEvent.click(screen.getByRole('button', { name: /save libraries/i }));
     const profile = await screen.findByRole('heading', { name: /profile/i });
-    expect(profile).toHaveFocus();
+    await waitFor(() => expect(profile).toHaveFocus());
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan', expect.objectContaining({ method: 'POST' })));
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'Alex' } });
     fireEvent.click(screen.getByRole('button', { name: /create profile/i }));
@@ -47,7 +49,8 @@ describe('Flixr routes', () => {
       if (path.includes('/setup/claim')) return new Response(JSON.stringify({ claimed: true }), { status: 201 });
       if (path.endsWith('/profiles') && init?.method === 'POST') { creates += 1; return new Response(JSON.stringify({ id: 'profile-1', name: 'Alex', protected: false }), { status: 201 }); }
       if (path.includes('/profiles/profile-1/select')) { selections += 1; return selections === 1 ? new Response(JSON.stringify({ error: { code: 'credential_busy' } }), { status: 429 }) : new Response(JSON.stringify({ selected: true })); }
-      return new Response(JSON.stringify({ profiles: [] }));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
+      throw new Error(`Unexpected request ${init?.method ?? 'GET'} ${path}`);
     });
     render(<App />);
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
@@ -73,7 +76,8 @@ describe('Flixr routes', () => {
       if (path.includes('/setup/claim')) return new Response(JSON.stringify({ claimed: true }), { status: 201 });
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ saved: true }));
       if (path.includes('/owner/scan')) return new Response(JSON.stringify({ error: { code: 'scan_failed' } }), { status: 500 });
-      return new Response(JSON.stringify({ profiles: [] }));
+      if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      throw new Error(`Unexpected request ${path}`);
     });
     render(<App />);
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
@@ -91,7 +95,7 @@ describe('Flixr routes', () => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
-      return new Response(JSON.stringify({}));
+      throw new Error(`Unexpected request ${path}`);
     });
     render(<App />);
     expect(await screen.findByRole('heading', { name: /choose your profile/i })).toBeInTheDocument();
@@ -104,7 +108,8 @@ describe('Flixr routes', () => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
-      return new Response(JSON.stringify({ items: [], total: 0, next: null }));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
+      throw new Error(`Unexpected request ${path}`);
     });
     render(<App />);
     await screen.findByRole('heading', { name: /local cinema/i });
@@ -116,13 +121,11 @@ describe('Flixr routes', () => {
 
 	it('preserves the viewer destination while detail history opens and closes', async () => {
 		window.history.replaceState({}, '', '/movies');
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const path = String(input);
-      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
-      if (path.includes('/catalog/films/film-1')) return new Response(JSON.stringify({ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }));
-		if (path.includes('/catalog/items/film-1')) return new Response(JSON.stringify({ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }));
-      return new Response(JSON.stringify({ items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }], total: 1, next: null }));
-    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: /^\/api\/v1\/catalog\/view\?media=(film|all)$/, handle: () => ({ json: { preference: { view: 'grid', sort: 'title' }, items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false }] } }) },
+      { path: /^\/api\/v1\/catalog\/search\?q=(Signal|Relay)&offset=0&limit=48$/, handle: ({ url }) => { const title = url.searchParams.get('q') ?? ''; return { json: { items: [{ id: title.toLowerCase(), title, kind: 'film', local_only: true }] } }; } },
+    ]));
     HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
     HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); };
     render(<App />);
@@ -133,8 +136,15 @@ describe('Flixr routes', () => {
 		await waitFor(() => expect(window.location.pathname).toBe('/movies'));
 		expect(screen.getByRole('button', { name: 'Movies' })).toHaveAttribute('aria-current', 'page');
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const historyLength = window.history.length;
+    fireEvent.change(screen.getByLabelText(/search titles/i), { target: { value: 'S' } });
     fireEvent.change(screen.getByLabelText(/search titles/i), { target: { value: 'Signal' } });
     await waitFor(() => expect(window.location.pathname + window.location.search).toBe('/search?q=Signal'));
+    expect(window.history.length).toBe(historyLength);
+    window.history.pushState({}, '', '/search?q=Relay');
+    fireEvent(window, new PopStateEvent('popstate'));
+    await waitFor(() => expect(screen.getByLabelText(/search titles/i)).toHaveValue('Relay'));
+    expect(await screen.findByText('Relay')).toBeInTheDocument();
     expect(screen.queryByText(/Loading local Flixr/i)).not.toBeInTheDocument();
   });
 });

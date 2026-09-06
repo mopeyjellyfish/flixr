@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
+import { Wordmark } from '../../modules/productChrome/Wordmark';
 
 type OwnerProps = {
   onLogout: () => void;
@@ -121,7 +122,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
 function OwnerHeader({ onBrowse, onLogout }: OwnerProps) {
   return (
     <header>
-      <b>FLIXR</b>
+      <Wordmark />
       <span>Owner operations</span>
       <button onClick={onBrowse}>Household home</button>
       <button onClick={() => void api.logout().finally(onLogout)}>Log out</button>

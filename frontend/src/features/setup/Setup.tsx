@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type Profile } from '../../core/api';
+import { Wordmark } from '../../modules/productChrome/Wordmark';
 
 type ReadinessProps = {
   readiness: { ffprobe: boolean; ffmpeg: boolean };
@@ -96,7 +97,7 @@ export function Setup({ readiness, onCompleted }: SetupProps) {
 
   return (
     <section className="setup-flow">
-      <header className="setup-header"><b>FLIXR</b><span className="quiet-status">● Connected on your network</span></header>
+      <header className="setup-header"><Wordmark /><span className="quiet-status">● Connected on your network</span></header>
       <nav className="setup-progress" aria-label="Setup progress">
         {(['Secure', 'Libraries', 'Profile'] as const).map((label, index) => <div key={label} className={index <= stepIndex ? 'active' : ''} aria-current={index === stepIndex ? 'step' : undefined}><span>{index + 1}</span><strong>{label}</strong></div>)}
       </nav>
