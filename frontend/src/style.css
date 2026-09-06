@@ -432,3 +432,8 @@ body:has(dialog[open]) { overflow: hidden; }
 @keyframes feature-time { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 @media (max-width: 700px) { .featured-hero { height: 34rem; padding-top: 2.5rem; padding-bottom: 4.5rem; }.featured-hero h1 { font-size: 2.65rem; }.featured-art .poster-hero { left: 25%; }.featured-art .poster-hero img { object-position: right top; }.featured-hero .hero-meta { font-size: 0.7rem; }.featured-hero .hero-synopsis { max-width: 35ch; font-size: 0.9rem; }.featured-timer { display: none; } }
 @media (prefers-reduced-motion: reduce) { .featured-timer { display: none; } }
+
+/* Keep cinema layouts proportional on large CSS viewports, including native 4K/8K.
+   Browser/device pixel density alone does not change the layout scale. */
+:root { font-size: clamp(100%, 0.833333333vw, 400%); }
+.rail-controls button, .featured-controls button { width: 2.75rem; min-height: 2.75rem; }

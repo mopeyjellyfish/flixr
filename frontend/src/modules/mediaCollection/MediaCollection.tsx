@@ -6,7 +6,6 @@ import type { CatalogItem, ViewerItem } from '../../core/api';
 
 type Open = (item: ViewerItem, opener: HTMLButtonElement) => void;
 type Layout = 'rail' | 'grid';
-const GAP = 16;
 
 export function MediaCollection({ layout, label, items, onOpen }: { layout: Layout; label: string; items: ViewerItem[]; onOpen: Open }) {
   return layout === 'grid' ? <Grid label={label} items={items} onOpen={onOpen} /> : <Rail label={label} items={items} onOpen={onOpen} />;
@@ -18,48 +17,50 @@ export function focusMediaItem(id: string) {
   return Boolean(target);
 }
 
-function useCollectionWidth(ref: RefObject<HTMLElement | null>, fallback: number) {
-  const [width, setWidth] = useState(fallback);
+function useCollectionSize(ref: RefObject<HTMLElement | null>, fallback: number) {
+  const [size, setSize] = useState({ width: fallback, unit: 16 });
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const measure = () => { const styles = getComputedStyle(node); const padding = Number.parseFloat(styles.paddingLeft || '0') + Number.parseFloat(styles.paddingRight || '0'); setWidth(Math.max(0, node.clientWidth - padding) || fallback); };
+    const measure = () => { const styles = getComputedStyle(node); const padding = Number.parseFloat(styles.paddingLeft || '0') + Number.parseFloat(styles.paddingRight || '0'); setSize({ width: Math.max(0, node.clientWidth - padding) || fallback, unit: Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16 }); };
     measure();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
   }, [fallback, ref]);
-  return width;
+  return size;
 }
 
-function cardWidth(containerWidth: number) { return Math.max(145, Math.min(220, containerWidth * 0.16)); }
+function cardWidth(containerWidth: number, unit: number) { return Math.max(9.0625 * unit, Math.min(13.75 * unit, containerWidth * 0.16)); }
 
 function Grid({ label, items, onOpen }: { label: string; items: ViewerItem[]; onOpen: Open }) {
   const parentRef = useRef<HTMLElement>(null);
-  const width = useCollectionWidth(parentRef, 1000);
-  const minimum = width < 700 ? 145 : 180;
-  const columns = Math.max(2, Math.floor((width + GAP) / (minimum + GAP)));
-  const itemWidth = (width - GAP * (columns - 1)) / columns;
-  const rowHeight = itemWidth * 1.5 + GAP;
+  const { width, unit } = useCollectionSize(parentRef, 1000);
+  const gap = unit;
+  const minimum = (width < 43.75 * unit ? 9.0625 : 11.25) * unit;
+  const columns = Math.max(2, Math.floor((width + gap) / (minimum + gap)));
+  const itemWidth = (width - gap * (columns - 1)) / columns;
+  const rowHeight = itemWidth * 1.5 + gap;
   const rows = Math.ceil(items.length / columns);
   const virtualizer = useVirtualizer({ count: rows, getScrollElement: () => parentRef.current, estimateSize: () => rowHeight, overscan: 1, initialRect: { width, height: 900 } });
   useLayoutEffect(() => virtualizer.measure(), [rowHeight, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const rowItems = visible.length ? visible : Array.from({ length: Math.min(rows, 4) }, (_, index) => ({ index, start: index * rowHeight }));
-  return <section className="media-grid" aria-label={label} ref={parentRef} data-collection data-layout="grid" data-columns={columns}><div className="media-grid-inner" style={{ height: virtualizer.getTotalSize() }}>{rowItems.flatMap((row) => items.slice(row.index * columns, row.index * columns + columns).map((item, column) => <PosterCard key={item.id} item={item} onOpen={onOpen} onKeyDown={moveFocus} style={{ top: row.start, left: column * (itemWidth + GAP), width: itemWidth }} />))}</div></section>;
+  return <section className="media-grid" aria-label={label} ref={parentRef} data-collection data-layout="grid" data-columns={columns}><div className="media-grid-inner" style={{ height: virtualizer.getTotalSize() }}>{rowItems.flatMap((row) => items.slice(row.index * columns, row.index * columns + columns).map((item, column) => <PosterCard key={item.id} item={item} onOpen={onOpen} onKeyDown={moveFocus} style={{ top: row.start, left: column * (itemWidth + gap), width: itemWidth }} />))}</div></section>;
 }
 
 function Rail({ label, items, onOpen }: { label: string; items: ViewerItem[]; onOpen: Open }) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const width = useCollectionWidth(parentRef, 1000);
-  const itemWidth = cardWidth(width);
-  const stride = itemWidth + GAP;
-  const virtualizer = useVirtualizer({ horizontal: true, count: items.length, getScrollElement: () => parentRef.current, estimateSize: () => stride, overscan: 3, initialRect: { width, height: itemWidth * 1.5 + 32 } });
+  const { width, unit } = useCollectionSize(parentRef, 1000);
+  const gap = unit;
+  const itemWidth = cardWidth(width, unit);
+  const stride = itemWidth + gap;
+  const virtualizer = useVirtualizer({ horizontal: true, count: items.length, getScrollElement: () => parentRef.current, estimateSize: () => stride, overscan: 3, initialRect: { width, height: itemWidth * 1.5 + 2 * unit } });
   useLayoutEffect(() => virtualizer.measure(), [stride, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const cards = visible.length ? visible.map((virtual) => ({ index: virtual.index, start: virtual.start })) : items.slice(0, Math.ceil(width / stride) + 3).map((_, index) => ({ index, start: index * stride }));
-  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><div className="rail-controls"><span>{items.length} title{items.length === 1 ? '' : 's'}</span><button aria-label={`Scroll ${label} left`} onClick={() => parentRef.current?.scrollBy({ left: -width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>‹</button><button aria-label={`Scroll ${label} right`} onClick={() => parentRef.current?.scrollBy({ left: width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>›</button></div></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 32 }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} style={{ left: virtual.start, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
+  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><div className="rail-controls"><span>{items.length} title{items.length === 1 ? '' : 's'}</span><button aria-label={`Scroll ${label} left`} onClick={() => parentRef.current?.scrollBy({ left: -width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>‹</button><button aria-label={`Scroll ${label} right`} onClick={() => parentRef.current?.scrollBy({ left: width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>›</button></div></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 2 * unit }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} style={{ left: virtual.start, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
 }
 
 function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>) {

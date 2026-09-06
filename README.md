@@ -1,6 +1,10 @@
-# Flixr
+![FlixR — your media, your network. Demo across desktop, tablet and mobile.](docs/images/flixr-banner.png)
 
-**Your media. Your network.**
+# FlixR
+
+**A local-first home cinema. Free, open source, and built for your own media.**
+
+[Try the demo](#development-demo) · [Run with Docker](#published-docker-image) · [Capabilities](#what-you-can-do) · [Responsive layouts](#responsive-layouts) · [Contribute](#development)
 
 Flixr is an MIT-licensed, LAN-first media server for locally owned films and episodic TV.
 
@@ -10,6 +14,44 @@ Flixr-to-Flixr screen control on your server. Fonts, the web app, SQLite data,
 and downloaded artwork are served locally. No hosted account or metadata provider
 is required to sign in or watch your media.
 
+## What you can do
+
+| Capability | What FlixR provides |
+| --- | --- |
+| Watch locally | Local owner accounts and household profiles; no hosted login service. Cached libraries remain available without a WAN connection. |
+| Browse beautifully | Movie/TV destinations, featured artwork, concise summaries, search, virtualized rows and grids, My List and Continue Watching. |
+| Play your files | Direct playback where supported, bounded FFmpeg remux/transcode for compatible conversions, and per-profile progress. |
+| Use your local screens | Discover and control another FlixR browser on your network. This is FlixR-to-FlixR control, not native Cast or AirPlay. |
+| Manage the server | Setup walkthrough, optional profile PINs, library roots, scan status, optional TMDB enrichment and playback resource limits. |
+| Deploy your way | One Go executable with an embedded React interface, or a small Alpine container with FFmpeg, persistent volumes and environment/file-secret configuration. |
+
+FlixR is in **0.x development**. See [current scope](#current-scope) for the features
+and device integrations still being built. Feature releases increment minor versions;
+fixes increment patch versions. Moving to v1 requires an explicit maintainer decision.
+
+## Responsive layouts
+
+The interface adapts from narrow phones to native 4K and 8K browser viewports.
+Above 1920 CSS pixels, typography, poster dimensions and spacing scale together;
+grids remain virtualized rather than filling a large display with tiny controls.
+Touch targets, keyboard navigation and reduced-motion preferences are supported.
+
+The banner is an illustrated demo showcase. View the original browser captures:
+[mobile, 390 × 844](docs/images/demo-mobile.png) ·
+[tablet, 768 × 1024](docs/images/demo-tablet.png) ·
+[desktop, 1440 × 900](docs/images/demo-desktop.png).
+The demo uses 50 curated movies and 50 TV shows, with artwork and metadata but no media files.
+
+| Browser viewport | Layout scale |
+| --- | --- |
+| 320–1920 CSS pixels wide | Standard text size; responsive navigation and collections |
+| 3840 × 2160 (4K) | 2× base text, poster and spacing scale |
+| 7680 × 4320 (8K) | 4× base text, poster and spacing scale |
+
+These are browser viewport checks, not certification of every phone, TV browser or
+codec. A high-DPI screen may use a smaller CSS viewport; browser zoom and OS scaling
+still apply. See [responsive verification](#responsive-verification) to repeat the checks.
+
 ## Published Docker image
 
 Use `ghcr.io/mopeyjellyfish/flixr` with [compose.release.yml](compose.release.yml).
@@ -18,7 +60,7 @@ The image includes everything needed to run: mount persistent `/config`, disposa
 credential `_FILE` secrets support Compose-managed deployments.
 
 See [Docker setup and configuration](docs/docker.md) and [automated releases](docs/releases.md).
-The first published image becomes available after the release branch merges and CI passes.
+Images publish only after main’s release checks pass. See [available releases](https://github.com/mopeyjellyfish/flixr/releases) before pinning a version.
 
 ## Start with your own media
 
@@ -143,8 +185,9 @@ first two seasons. No video or audio files are downloaded. The default selection
 is curated from well-known titles, **not a live top-rated chart**. Film metadata
 comes from [Wikipedia via prust/wikipedia-movie-data](https://github.com/prust/wikipedia-movie-data);
 TV metadata comes from [TVmaze](https://www.tvmaze.com/api). Credits appear in the
-demo banner. Artwork remains its owners' property and stays in the ignored local
-`.demo/` cache, outside the image and published Flixr source.
+demo banner. Original artwork remains its owners' property. Downloaded assets stay
+in the ignored local `.demo/` cache and are excluded from the runtime image; the
+README banner and screenshots display sample titles for demonstration.
 
 New showcases have **Alex** and **Guest** profiles without PINs, and **Sam** with
 PIN **`2468`**. The demo-only owner password is **`flixr-demo-only`**. Existing owner
@@ -188,7 +231,7 @@ Set bootstrap values with environment variables before you start Flixr:
 | `FLIXR_TLS_KEY` | Set the TLS private-key path. Use with `FLIXR_TLS_CERT`. |
 | `FLIXR_DEMO` | Set to `true` only to explicitly seed the metadata-only demo catalog. |
 
-The owner configures library roots and the optional TMDB token in the web interface. Flixr never returns the stored TMDB token to a client.
+Configure library roots and the optional TMDB token through the web interface or startup environment. See the [complete environment reference](docs/docker.md#environment-and-secrets) for provisioning, playback limits and file secrets. Flixr never returns the stored TMDB token to a client.
 
 ## Development
 
@@ -229,6 +272,20 @@ network, image, and data volume. Screenshots and traces go to
 
 If port 4173 is already occupied, use `FLIXR_TEST_PORT=4180 npm --prefix frontend
 run test:e2e -- --project=chromium`. Tests refuse to reuse an unrelated server.
+
+### Responsive verification
+
+Start `make demo-dev`, then run the reusable check through Playwright CLI:
+
+```sh
+npx --package @playwright/cli playwright-cli --session flixr-responsive open http://localhost:19879
+npx --package @playwright/cli playwright-cli --session flixr-responsive run-code "$(cat scripts/check-responsive.js)"
+```
+
+The check requires the isolated demo and its Alex profile. It exercises rows, grids,
+detail dialogs, profile selection and sign-in from 320px through 8K, then resizes
+back to desktop to catch stale measurements. It checks navigation/page bounds and
+poster scaling without hiding failures behind screenshot-only assertions.
 
 ## Repository layout
 
