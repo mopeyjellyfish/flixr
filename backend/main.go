@@ -20,6 +20,7 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/config"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
+	"github.com/mopeyjellyfish/flixr/backend/screens"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 	"github.com/mopeyjellyfish/flixr/backend/web"
 	"github.com/spf13/afero"
@@ -117,7 +118,8 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	if !h.Claimed() {
 		fmt.Printf("Flixr setup token: %s\n", h.SetupToken())
 	}
-	application := web.NewServerWithPlayback(h, c, p).Handler()
+	screenManager := screens.New(time.Minute)
+	application := web.NewServerWithScreens(h, c, p, screenManager).Handler()
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: application, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	inputOnly := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "/api/v1/playback/input/"
@@ -150,8 +152,8 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// Stop public requests, terminate FFmpeg while its loopback input remains
-	// available, then drain the private listener before SQLite closes.
+	// Close upgraded screen connections before waiting for HTTP and media work.
+	screenManager.Shutdown()
 	serverErr := srv.Shutdown(shutdown)
 	playbackErr := p.Shutdown(shutdown)
 	inputErr := inputServer.Shutdown(shutdown)

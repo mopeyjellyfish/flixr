@@ -1,4 +1,5 @@
 import { ApiError, type CatalogItem, type CatalogPage, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -47,4 +48,8 @@ export const api = {
   playbackHeartbeat: (sessionID: string, positionMs: number) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
   playbackSeek: (sessionID: string, positionMs: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
   playbackStop: (sessionID: string) => request<{ stopped: boolean }>(`/playback/sessions/${encodeURIComponent(sessionID)}/stop`, { method: 'POST' }),
+  screens: () => request<{ screens: ScreenPresence[] }>('/screens'),
+  advertiseScreen: (name: string) => request<{ screen: ScreenPresence; ticket: string }>('/screens/presence', { method: 'POST', body: JSON.stringify({ name }) }),
+  authorizeScreen: (id: string) => request<{ token: string; screen_id: string; expires_at: string }>(`/screens/${encodeURIComponent(id)}/sessions`, { method: 'POST', body: '{}' }),
+  ownerScreens: () => request<{ screens: ScreenPresence[] }>('/owner/screens'),
 };

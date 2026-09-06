@@ -3,6 +3,7 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
+import { screenCoordinator } from '../screenCoordinator/runtime';
 
 function browserCapabilities(): PlaybackCapabilities {
   const probe = document.createElement('video');
@@ -19,7 +20,7 @@ function browserCapabilities(): PlaybackCapabilities {
   };
 }
 
-export function Player({ catalogID, onExit }: { catalogID: string; onExit: () => void }) {
+export function Player({ catalogID, startPositionMS, onExit }: { catalogID: string; startPositionMS?: number; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
@@ -28,6 +29,7 @@ export function Player({ catalogID, onExit }: { catalogID: string; onExit: () =>
   const playback = useRef<PlaybackPlan | null>(null);
   const initializingPosition = useRef(false);
   const finalizing = useRef(false);
+  const autoStart = useRef(startPositionMS !== undefined);
 
   useEffect(() => {
     backButton.current?.focus();
@@ -82,7 +84,15 @@ export function Player({ catalogID, onExit }: { catalogID: string; onExit: () =>
   useEffect(() => {
     let active = true;
     let timer = 0;
-    api.playbackPlan(catalogID, browserCapabilities()).then((plan) => {
+    api.playbackPlan(catalogID, browserCapabilities()).then(async (initial) => {
+      if (!active) { void api.playbackStop(initial.session_id); return; }
+      let plan = initial;
+      playback.current = initial;
+      if (startPositionMS !== undefined) {
+        plan = initial.plan.kind === 'direct'
+          ? { ...initial, resume_ms: startPositionMS }
+          : await api.playbackSeek(initial.session_id, startPositionMS);
+      }
       if (!active) return;
       void attach(plan);
       const leaseRemaining = Math.max(3_000, plan.expires_at * 1_000 - Date.now());
@@ -110,7 +120,32 @@ export function Player({ catalogID, onExit }: { catalogID: string; onExit: () =>
         void api.playbackHeartbeat(plan.session_id, currentPosition()).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
-  }, [attach, catalogID, currentPosition, heartbeat]);
+  }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
+
+  const seekTo = useCallback(async (target: number) => {
+    const plan = playback.current;
+    const element = video.current;
+    if (!plan || !element) return;
+    if (plan.plan.kind === 'direct') { element.currentTime = target / 1000; return; }
+    const version = sourceVersion.current;
+    try {
+      const updated = await api.playbackSeek(plan.session_id, target);
+      if (version !== sourceVersion.current || !video.current) return;
+      if (updated.media_url !== plan.media_url || updated.session_id !== plan.session_id) {
+        autoStart.current = !element.paused;
+        void attach(updated);
+      } else {
+        initializingPosition.current = true;
+        element.currentTime = Math.max(0, target - updated.stream_offset_ms) / 1000;
+      }
+    } catch (error: unknown) {
+      if (version === sourceVersion.current) dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+    }
+  }, [attach]);
+  useEffect(() => screenCoordinator.onCommand((command) => {
+    if (command.type === 'pause') video.current?.pause();
+    if (command.type === 'seek') void seekTo(command.position_ms);
+  }), [seekTo]);
 
   const play = async () => {
     try {
@@ -172,6 +207,11 @@ export function Player({ catalogID, onExit }: { catalogID: string; onExit: () =>
               const resumeSeconds = Math.max(0, plan.resume_ms - plan.stream_offset_ms) / 1000;
               if (resumeSeconds > 0) initializingPosition.current = true;
               video.current.currentTime = resumeSeconds;
+              if (autoStart.current) {
+                autoStart.current = false;
+                // Browser autoplay policy may require the receiver's local Play button.
+                void video.current.play().catch(() => dispatch({ type: 'pause' }));
+              }
             }}
             onCanPlay={() => dispatch({ type: 'pause' })}
             onPlaying={() => dispatch({ type: 'play' })}

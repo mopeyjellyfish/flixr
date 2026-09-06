@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
+	"github.com/mopeyjellyfish/flixr/backend/screens"
 )
 
 type Readiness struct {
@@ -25,6 +27,7 @@ type Server struct {
 	house     *household.Manager
 	catalog   *catalog.Catalog
 	playback  *playback.Manager
+	screens   *screens.Manager
 	mux       *http.ServeMux
 	lookPath  func(string) (string, error)
 	readyMu   sync.RWMutex
@@ -36,7 +39,11 @@ func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
 }
 
 func NewServerWithPlayback(h *household.Manager, c *catalog.Catalog, manager *playback.Manager) *Server {
-	s := &Server{house: h, catalog: c, playback: manager, mux: http.NewServeMux(), lookPath: exec.LookPath}
+	return NewServerWithScreens(h, c, manager, screens.New(time.Minute))
+}
+
+func NewServerWithScreens(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager) *Server {
+	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath}
 	s.checkReadiness()
 	s.routes()
 	return s
@@ -82,6 +89,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("GET /api/v1/owner/playback/status", s.playbackStatus)
+	s.mux.HandleFunc("GET /api/v1/screens", s.listScreens)
+	s.mux.HandleFunc("POST /api/v1/screens/presence", s.advertiseScreen)
+	s.mux.HandleFunc("POST /api/v1/screens/{id}/sessions", s.authorizeScreen)
+	s.mux.HandleFunc("GET /api/v1/screens/receiver", s.screenReceiver)
+	s.mux.HandleFunc("GET /api/v1/screens/control", s.screenControl)
+	s.mux.HandleFunc("GET /api/v1/owner/screens", s.ownerScreens)
 	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) { fail(w, http.StatusNotFound, "not_found") })
 	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) { fail(w, http.StatusNotFound, "not_found") })
 	s.mux.Handle("/", frontendHandler())

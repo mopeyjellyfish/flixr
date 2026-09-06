@@ -120,6 +120,9 @@ select:focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
 .owner-grid h2 { margin-top: 0; }
 dialog { width: min(42rem, calc(100vw - 2rem)); max-width: min(42rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); margin: auto; overflow: auto; background: var(--surface); color: var(--text); border: 1px solid #35435a; border-radius: 1.25rem; padding: 1.5rem; box-shadow: 0 1.5rem 4rem #0008; }
 dialog::backdrop { background: #05070cdd; }
+.screen-readiness dialog h2 { margin-bottom: 1rem; }
+.screen-readiness dialog button { display: block; margin-top: 0.75rem; }
+.screen-readiness .actions { flex-wrap: wrap; justify-content: flex-start; margin-block: 0.75rem; }
 .detail h2 { font: 800 clamp(2rem, 5vw, 4rem)/1.05 Manrope, Arial, sans-serif; }
 .actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
 .player { min-height: 100dvh; padding: clamp(1rem, 2.5vw, 2.5rem) clamp(1rem, 4vw, 5rem); background: radial-gradient(circle at 50% 20%, #102044 0, #080d18 32%, var(--canvas) 68%); }

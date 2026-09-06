@@ -1,6 +1,7 @@
 /** Production acceptance path: this suite uses the built flixr binary and never mocks its API. */
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { acceptScreens } from './screen-acceptance';
 
 const viewports = [
   { name: 'tv', width: 1920, height: 1080 },
@@ -9,8 +10,8 @@ const viewports = [
   { name: 'phone', width: 390, height: 844 },
 ];
 
-test('built binary completes setup, scan, profile, browse, and detail flow', async ({ page }, testInfo) => {
-  test.setTimeout(90_000);
+test('built binary completes setup, scan, profile, browse, and detail flow', async ({ page, browser }, testInfo) => {
+  test.setTimeout(150_000);
   const token = process.env.FLIXR_SETUP_TOKEN;
   const filmsRoot = process.env.FLIXR_FILMS_ROOT;
   const tvRoot = process.env.FLIXR_TV_ROOT;
@@ -99,6 +100,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   expect(axe.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
+  await acceptScreens(page, browser, testInfo);
   expect(errors).toEqual([]);
 });
 

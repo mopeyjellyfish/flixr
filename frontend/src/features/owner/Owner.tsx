@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
+import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
 
@@ -18,6 +19,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [tmdbToken, setTMDBToken] = useState('');
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
+  const [screens, setScreens] = useState<ScreenPresence[]>([]);
   const [name, setName] = useState('');
   const [pin, setPin] = useState('');
   const [notice, setNotice] = useState('');
@@ -30,6 +32,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.tmdbSettings().then((settings) => setTMDBConfigured(settings.configured)).catch(() => setNotice('TMDB settings are unavailable.'));
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
+    api.ownerScreens().then((result) => setScreens(result.screens ?? [])).catch(() => setNotice('Connected screens are unavailable.'));
   };
 
   const recheck = () => api.recheck().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -114,6 +117,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
         <ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} />
         <ProfileManager version={profilesVersion} />
         {playbackSettings && <PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} />}
+        <ConnectedScreens screens={screens} />
       </section>
     </main>
   );
@@ -185,6 +189,10 @@ function PlaybackPanel({ settings, status, onChange, onSubmit }: { settings: Pla
     <label>Concurrent generations<input type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
     <button className="primary">Save playback limits</button>
   </form>;
+}
+
+function ConnectedScreens({ screens }: { screens: ScreenPresence[] }) {
+  return <section><h2>Connected screens</h2>{screens.length ? <ul>{screens.map((screen) => <li key={screen.id}>{screen.name} · {screen.state}</li>)}</ul> : <p>No Flixr screens are connected.</p>}</section>;
 }
 
 function ProfileForm({ name, pin, onNameChange, onPinChange, onSubmit }: { name: string; pin: string; onNameChange: (value: string) => void; onPinChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
