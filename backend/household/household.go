@@ -366,14 +366,22 @@ func (m *Manager) Profile(session string) (Profile, bool) {
 	return p.Profile, ok
 }
 func (m *Manager) Progress(session, catalogID string, position int64) error {
-	id := m.subject(session)
-	if id == "" || id == "owner" {
+	return m.ProgressForProfile(m.subject(session), catalogID, position)
+}
+
+// ProgressForProfile persists progress when a profile-bound playback lease
+// expires without an HTTP session cookie.
+func (m *Manager) ProgressForProfile(profileID, catalogID string, position int64) error {
+	m.mu.Lock()
+	_, ok := m.profiles[profileID]
+	m.mu.Unlock()
+	if !ok || profileID == "" || catalogID == "" || position < 0 {
 		return ErrCredentials
 	}
 	if m.db == nil {
 		return nil
 	}
-	_, err := m.db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms) VALUES(?,?,?) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms", id, catalogID, position)
+	_, err := m.db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms) VALUES(?,?,?) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms", profileID, catalogID, position)
 	return err
 }
 func (m *Manager) Position(session, catalogID string) (int64, error) {

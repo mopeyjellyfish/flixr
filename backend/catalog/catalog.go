@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
+	"github.com/spf13/afero"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -30,10 +30,11 @@ var (
 
 // MediaProperties is the path-free inspection result persisted with a catalog item.
 type MediaProperties struct {
-	Container  string          `json:"container,omitempty"`
-	VideoCodec string          `json:"video_codec,omitempty"`
-	Audio      []AudioTrack    `json:"audio,omitempty"`
-	Subtitles  []SubtitleTrack `json:"subtitles,omitempty"`
+	Container    string          `json:"container,omitempty"`
+	VideoProfile string          `json:"video_profile,omitempty"`
+	VideoCodec   string          `json:"video_codec,omitempty"`
+	Audio        []AudioTrack    `json:"audio,omitempty"`
+	Subtitles    []SubtitleTrack `json:"subtitles,omitempty"`
 }
 
 type AudioTrack struct {
@@ -104,6 +105,7 @@ type ScanStatus struct {
 type Catalog struct {
 	mu       sync.RWMutex
 	db       *sqlite.DB
+	fs       afero.Fs
 	film, tv string
 	items    map[string]Item
 	series   map[string]Series
@@ -116,20 +118,28 @@ type Catalog struct {
 	status   ScanStatus
 }
 
-func New() *Catalog { return &Catalog{items: map[string]Item{}, prober: newFFprobe()} }
+func New() *Catalog {
+	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, prober: newFFprobe(), fs: afero.NewOsFs()}
+}
 
-// Open uses the production ffprobe prober. Tests can inject a prober with OpenWithProber.
-func Open(db *sqlite.DB) (*Catalog, error) { return OpenWithProber(db, newFFprobe()) }
+// Open uses the production ffprobe prober and OS-backed Afero filesystem.
+func Open(db *sqlite.DB) (*Catalog, error) {
+	return OpenWithFilesystem(db, newFFprobe(), afero.NewOsFs())
+}
 
 func OpenWithProber(db *sqlite.DB, prober Prober) (*Catalog, error) {
-	if prober == nil {
-		return nil, errors.New("catalog prober is nil")
+	return OpenWithFilesystem(db, prober, afero.NewOsFs())
+}
+
+func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, error) {
+	if prober == nil || fs == nil {
+		return nil, errors.New("catalog prober and filesystem are required")
 	}
-	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, prober: prober, provider: NewTMDB(nil)}
+	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, prober: prober, provider: NewTMDB(nil), fs: fs}
 	if db == nil {
 		return c, nil
 	}
-	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop FROM catalog_items`)
+	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, video_profile, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop FROM catalog_items`)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func OpenWithProber(db *sqlite.DB, prober Prober) (*Catalog, error) {
 		var x Item
 		var local int
 		var audio, subtitles string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(audio), &x.Audio); err != nil {
@@ -245,7 +255,7 @@ func (c *Catalog) SetRoots(film, tv string) error {
 		if err != nil {
 			return err
 		}
-		info, err := os.Stat(a)
+		info, err := c.fs.Stat(a)
 		if err != nil || !info.IsDir() {
 			return fmt.Errorf("root %q: %w", p, ErrOutsideRoot)
 		}
@@ -404,23 +414,19 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		if r.path == "" {
 			continue
 		}
-		err := filepath.WalkDir(r.path, func(path string, d fs.DirEntry, walkErr error) error {
+		err := afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				return nil
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if d.IsDir() || d.Type()&os.ModeSymlink != 0 || !media(path) {
+			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !media(path) {
 				return nil
 			}
 			rel, err := filepath.Rel(r.path, path)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return ErrOutsideRoot
-			}
-			info, err := d.Info()
-			if err != nil {
-				return nil
 			}
 			files = append(files, scanFile{root: r.path, kind: r.kind, rel: filepath.ToSlash(rel), size: info.Size(), mtime: info.ModTime().UnixNano()})
 			return nil
@@ -513,6 +519,12 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	properties, err := c.prober.Probe(ctx, file)
 	if err != nil {
 		return Item{}, err
+	}
+	switch strings.ToLower(filepath.Ext(f.rel)) {
+	case ".mkv":
+		properties.Container = "matroska"
+	case ".webm":
+		properties.Container = "webm"
 	}
 	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime}
 	episodeFields(&x)
@@ -667,7 +679,7 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 					return err
 				}
 			}
-			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix()); err != nil {
+			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,video_profile=excluded.video_profile,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, x.VideoProfile, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix()); err != nil {
 				return err
 			}
 		}
@@ -762,7 +774,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	if sqlLimit <= 0 {
 		sqlLimit = -1
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,audio_json,subtitle_json FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
@@ -772,7 +784,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 		var x Item
 		var local int
 		var audio, subtitles string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &audio, &subtitles); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles); err != nil {
 			return nil, fmt.Errorf("scan catalog item: %w", err)
 		}
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil {

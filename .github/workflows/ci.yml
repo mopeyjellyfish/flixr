@@ -14,6 +14,17 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
 
+  media-integration:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.x' }
+      - name: Install FFmpeg media dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: FLIXR_REQUIRE_MEDIA_INTEGRATION=1 go test -tags=media_integration ./...
+
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }
@@ -26,10 +37,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run test:bundle
 
   browser:
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, media-integration]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,6 +70,7 @@ jobs:
           npm --prefix ../frontend run build:embed
           media_root="$GITHUB_WORKSPACE/backend/testdata/media"
           test -f "$media_root/films/Blue Horizon 2026.mp4"
+          test -f "$media_root/films/Compatibility Check 2026.avi"
           test -f "$media_root/tv/Signal/Season 01/Signal S01E01.mkv"
           test -f "$media_root/tv/Signal/Season 01/Signal S01E02.mkv"
           go build -o ../bin/flixr .

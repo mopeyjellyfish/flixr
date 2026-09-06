@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type Readiness, type Scan } from '../../core/api';
+import { ApiError, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 
 type OwnerProps = {
@@ -15,6 +15,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [tv, setTV] = useState('');
   const [tmdbConfigured, setTMDBConfigured] = useState(false);
   const [tmdbToken, setTMDBToken] = useState('');
+  const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
+  const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
   const [name, setName] = useState('');
   const [pin, setPin] = useState('');
   const [notice, setNotice] = useState('');
@@ -25,6 +27,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.scanStatus().then((result) => setScan(result.scan.status ? result.scan : undefined)).catch(() => undefined);
     api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch(() => setNotice('Library roots are unavailable.'));
     api.tmdbSettings().then((settings) => setTMDBConfigured(settings.configured)).catch(() => setNotice('TMDB settings are unavailable.'));
+    api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
+    api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
   };
 
   const recheck = () => api.recheck().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -65,6 +69,17 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to remove TMDB credential.');
     }
   };
+  const savePlayback = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!playbackSettings) return;
+    try {
+      const result = await api.savePlaybackSettings(playbackSettings);
+      setNotice(result.restart_required ? 'Playback settings saved. Restart Flixr to use the new segment directory.' : 'Playback settings saved.');
+      setPlaybackStatus(await api.playbackStatus());
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : 'Unable to save playback settings.');
+    }
+  };
   const startScan = async () => {
     try {
       setScan((await api.scan()).scan);
@@ -97,6 +112,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
         <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
         <ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} />
         <ProfileManager version={profilesVersion} />
+        {playbackSettings && <PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} />}
       </section>
     </main>
   );
@@ -156,6 +172,18 @@ function TMDBForm({ configured, token, onTokenChange, onSave, onRemove }: { conf
       </div>
     </form>
   );
+}
+
+function PlaybackPanel({ settings, status, onChange, onSubmit }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void }) {
+  return <form onSubmit={onSubmit}>
+    <h2>Playback resources</h2>
+    <p>{status?.generations?.length ? `${status.generations.length} compatibility generation${status.generations.length === 1 ? '' : 's'} active.` : 'No compatibility generations are active.'}</p>
+    <label>Segment directory<input value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
+    <label>Per-generation bytes<input type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
+    <label>Global bytes<input type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
+    <label>Concurrent generations<input type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
+    <button className="primary">Save playback limits</button>
+  </form>;
 }
 
 function ProfileForm({ name, pin, onNameChange, onPinChange, onSubmit }: { name: string; pin: string; onNameChange: (value: string) => void; onPinChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {

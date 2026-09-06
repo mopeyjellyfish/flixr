@@ -35,27 +35,52 @@ async function check(page: Page, errors: string[]) {
 
 for (const viewport of viewports) {
   test(`mocked delivery-unit states: ${viewport.name}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     await page.setViewportSize(viewport);
     const errors: string[] = [];
     page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
     page.on('pageerror', (error) => errors.push(error.message));
 
     let claimed = false;
-    await mock(page, (path) => {
+    let scanStarts = 0;
+    let profileCreates = 0;
+    let profileSelections = 0;
+    await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed, readiness: { ffprobe: false, ffmpeg: false } } };
       if (path.endsWith('/setup/claim')) { claimed = true; return { json: { claimed: true } }; }
-      if (path.endsWith('/owner/roots')) return { json: { films: '', tv: '' } };
-      if (path.endsWith('/settings/tmdb')) return { json: { configured: false } };
-      if (path.endsWith('/scan/status')) return { json: { scan: { status: '', scanned: 0, unmatched: 0, failed: 0 } } };
+      if (path.endsWith('/owner/roots')) return { json: { saved: true } };
+      if (path.endsWith('/owner/scan')) { scanStarts += 1; return { json: { scan: { status: 'running', scanned: 0, unmatched: 0, failed: 0 } } }; }
+      if (path.endsWith('/profiles') && method === 'POST') { profileCreates += 1; return { json: { id: 'first-run-viewer', name: 'First-run viewer', protected: false } }; }
+      if (path.endsWith('/profiles/first-run-viewer/select')) { profileSelections += 1; return { json: { selected: true } }; }
+      if (path.endsWith('/catalog/home')) return { json: { items: [film], total: 1, next: null } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return { json: {} };
     });
     await open(page, '/');
+    await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
+    await expect(page.getByText(/direct play can continue/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /secure this server/i })).toBeVisible();
+    await check(page, errors);
     await page.getByLabel(/setup token/i).fill('first-run-token');
     await page.getByLabel(/owner password/i).fill('safe owner password');
-    await page.getByRole('button', { name: /claim flixr/i }).click();
-    await expect(page.getByText('No scan has started.')).toBeVisible();
-
+    await page.getByRole('button', { name: /secure this server/i }).click();
+    await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
+    await expect(page.getByLabel(/tmdb/i)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /save libraries/i })).toBeVisible();
+    await check(page, errors);
+    await page.getByLabel(/films library/i).fill('/media/films');
+    await page.getByRole('button', { name: /save libraries/i }).click();
+    await expect(page.getByRole('heading', { name: /profile/i })).toBeVisible();
+    await expect(page.getByRole('status')).toContainText(/direct play still works/i);
+    expect(scanStarts).toBe(0);
+    await expect(page.getByRole('button', { name: /create profile/i })).toBeVisible();
+    await check(page, errors);
+    await page.getByLabel(/^name$/i).fill('First-run viewer');
+    await page.getByRole('button', { name: /create profile/i }).click();
+    await expect(page.getByRole('heading', { name: 'Cobalt Sky' })).toBeVisible();
+    expect(profileCreates).toBe(1);
+    expect(profileSelections).toBe(1);
+    await check(page, errors);
     let pinAttempts = 0;
     await mock(page, (path) => {
       if (path.endsWith('/setup/status')) return { json: ready };
@@ -104,6 +129,8 @@ for (const viewport of viewports) {
       if (path.endsWith('/setup/status')) return { json: { claimed: true, readiness: { ffprobe: false, ffmpeg: true } } };
       if (path.endsWith('/owner/roots')) return { json: { films: '/media/films', tv: '/media/tv' } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
+      if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
+      if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
       if (path.endsWith('/scan/status')) return { json: { scan: { status: 'partial', scanned: 2, unmatched: 1, failed: 1 } } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return { json: {} };
@@ -134,3 +161,108 @@ for (const viewport of viewports) {
     await check(page, errors);
   });
 }
+
+test('mocked playback planning and capacity error states', async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', (error) => errors.push(error.message));
+  await mock(page, (path) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/playback/plans')) return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/api/v1/playback/sessions/session-1/heartbeat', seek_url: '/api/v1/playback/sessions/session-1/seek', stop_url: '/api/v1/playback/sessions/session-1/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+    return { json: {} };
+  });
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto('/play/film-1');
+    await expect(page.getByRole('heading', { name: /now playing/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /back to library/i })).toBeFocused();
+    await expect(page.locator('video')).toBeVisible();
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath(`player-${viewport.name}.png`), fullPage: true });
+    await page.getByRole('button', { name: /back to library/i }).click();
+    await expect(page).toHaveURL(/\/home$/);
+  }
+  expect(errors).toEqual([]);
+
+  await mock(page, (path) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/playback/plans')) return { status: 503, json: { error: { code: 'playback_capacity' } } };
+    return { json: {} };
+  });
+  await page.goto('/play/film-2');
+  await expect(page.getByRole('alert')).toContainText(/playback limit/i);
+});
+
+test('mocked playback heartbeat, buffering, cross-client resume, expiry, recovery, stop, and interruption states', async ({ page, context }) => {
+  let heartbeats = 0;
+  let stops = 0;
+  let expired = false;
+  let interrupted = false;
+  let plans = 0;
+  const errors: string[] = [];
+  const observe = (client: Page) => {
+    client.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+    client.on('pageerror', (error) => errors.push(error.message));
+  };
+  const handler = (path: string) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: `session-${plans}`, media_url: 'data:video/mp4;base64,', heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/api/v1/playback/sessions/session-${plans}/seek`, stop_url: `/api/v1/playback/sessions/session-${plans}/stop`, resume_ms: plans > 1 ? 12_000 : 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+    }
+    if (path.endsWith('/heartbeat')) {
+      heartbeats += 1;
+      if (expired) return { status: 403, json: { error: { code: 'playback_session_invalid' } } };
+      if (interrupted) return { status: 500, json: { error: { code: 'request_failed' } } };
+      return { json: { expires_at: 9999999999 } };
+    }
+    if (path.endsWith('/stop')) {
+      stops += 1;
+      return { json: { stopped: true } };
+    }
+    return { json: {} };
+  };
+  observe(page);
+  await mock(page, handler);
+
+  await page.goto('/play/film-1');
+  await expect(page.locator('video')).toBeVisible();
+  await page.locator('video').dispatchEvent('waiting');
+  await expect(page.getByRole('status')).toContainText(/buffering/i);
+  const seekedTo = await page.locator('video').evaluate((video) => {
+    const media = video as HTMLVideoElement;
+    media.currentTime = 5;
+    media.dispatchEvent(new Event('seeked'));
+    return media.currentTime;
+  });
+  expect(seekedTo).toBe(5);
+  await page.locator('video').dispatchEvent('pause');
+  await expect.poll(() => heartbeats).toBeGreaterThan(0);
+  await page.getByRole('button', { name: /back to library/i }).click();
+  await expect.poll(() => stops).toBeGreaterThan(0);
+
+  const secondClient = await context.newPage();
+  observe(secondClient);
+  await mock(secondClient, handler);
+  await secondClient.goto('/play/film-1');
+  await expect(secondClient.locator('video')).toBeVisible();
+  const resumedAt = await secondClient.locator('video').evaluate((video) => {
+    const media = video as HTMLVideoElement;
+    media.dispatchEvent(new Event('loadedmetadata'));
+    return media.currentTime;
+  });
+  expect(resumedAt).toBe(12);
+  expired = true;
+  await secondClient.locator('video').dispatchEvent('pause');
+  await expect(secondClient.getByRole('alert')).toContainText(/session expired/i);
+
+  expired = false;
+  await secondClient.goto('/play/film-1');
+  await expect(secondClient.locator('video')).toBeVisible();
+  interrupted = true;
+  await secondClient.locator('video').dispatchEvent('pause');
+  await expect(secondClient.getByRole('alert')).toContainText(/complete that request/i);
+  expect(errors.every((message) => message.includes('403') || message.includes('500'))).toBeTruthy();
+});

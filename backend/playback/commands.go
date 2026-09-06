@@ -1,0 +1,67 @@
+package playback
+
+import (
+	"fmt"
+	"math"
+	"net"
+	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const hlsSegmentDuration = 4 * time.Second
+
+func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
+	parsed, err := url.Parse(inputURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", nil, fmt.Errorf("invalid loopback input URL")
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return "", nil, fmt.Errorf("input URL is not loopback")
+	}
+	if kind != Remux && kind != Transcode {
+		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", kind)
+	}
+	if outputDir == "" || !filepath.IsAbs(outputDir) {
+		return "", nil, fmt.Errorf("output directory must be absolute")
+	}
+	if segmentWindow <= 0 {
+		return "", nil, fmt.Errorf("segment window must be positive")
+	}
+	listSize := int(math.Ceil(float64(segmentWindow) / float64(hlsSegmentDuration)))
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-y"}
+	if start > 0 {
+		args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
+	}
+	args = append(args, "-re", "-i", inputURL, "-map", "0:v:0", "-map", "0:a:0?")
+	if kind == Remux {
+		args = append(args, "-c", "copy")
+	} else {
+		args = append(args,
+			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-pix_fmt", "yuv420p",
+			"-force_key_frames", "expr:gte(t,n_forced*4)", "-sc_threshold", "0",
+			"-c:a", "aac", "-ac", "2", "-b:a", "128k",
+		)
+	}
+	args = append(args,
+		"-f", "hls",
+		"-hls_segment_type", "fmp4",
+		"-hls_time", strconv.FormatFloat(hlsSegmentDuration.Seconds(), 'f', -1, 64),
+		"-hls_list_size", strconv.Itoa(listSize),
+		"-hls_delete_threshold", "2",
+		"-hls_flags", "delete_segments+independent_segments+temp_file",
+		"-hls_fmp4_init_filename", "init.mp4",
+		"-hls_segment_filename", filepath.Join(outputDir, "segment-%06d.m4s"),
+		filepath.Join(outputDir, "index.m3u8"),
+	)
+	for _, arg := range args {
+		if strings.ContainsRune(arg, '\x00') {
+			return "", nil, fmt.Errorf("command argument contains NUL")
+		}
+	}
+	return "ffmpeg", args, nil
+}

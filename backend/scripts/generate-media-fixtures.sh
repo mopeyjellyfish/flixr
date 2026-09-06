@@ -25,3 +25,9 @@ make_fixture() {
 make_fixture blue "$films/Blue Horizon 2026.mp4"
 make_fixture navy "$tv/Signal S01E01.mkv"
 make_fixture black "$tv/Signal S01E02.mkv"
+
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i 'testsrc2=size=320x180:rate=24:duration=2' \
+  -f lavfi -i 'sine=frequency=660:sample_rate=48000:duration=2' \
+  -c:v mpeg4 -q:v 5 \
+  -c:a libmp3lame -b:a 64k "$films/Compatibility Check 2026.avi"

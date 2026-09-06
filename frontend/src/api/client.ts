@@ -1,4 +1,4 @@
-import { ApiError, type CatalogItem, type CatalogPage, type FilmDetail, type OwnerRoots, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings } from '../core/api';
+import { ApiError, type CatalogItem, type CatalogPage, type FilmDetail, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings } from '../core/api';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -33,9 +33,16 @@ export const api = {
   scan: () => request<{ scan: Scan }>('/owner/scan', { method: 'POST' }),
   scanStatus: () => request<{ scan: Scan }>('/owner/scan/status'),
   recheck: () => request<SetupStatus>('/owner/readiness/recheck', { method: 'POST' }),
+  playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
+  savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),
+  playbackStatus: () => request<PlaybackStatus>('/owner/playback/status'),
   home: (offset = 0) => request<CatalogPage>(`/catalog/home?offset=${offset}&limit=48`),
   search: (query: string, offset = 0) => request<CatalogPage>(`/catalog/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=48`),
   item: (id: string) => request<CatalogItem>(`/catalog/items/${id}`),
   film: (id: string) => request<FilmDetail>(`/catalog/films/${id}`),
   series: (id: string) => request<SeriesDetail>(`/catalog/series/${id}`),
+  playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, capabilities }) }),
+  playbackHeartbeat: (sessionID: string, positionMs: number) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
+  playbackSeek: (sessionID: string, positionMs: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
+  playbackStop: (sessionID: string) => request<{ stopped: boolean }>(`/playback/sessions/${encodeURIComponent(sessionID)}/stop`, { method: 'POST' }),
 };

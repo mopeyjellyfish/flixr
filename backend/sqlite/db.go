@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
-	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/spf13/afero"
 	_ "modernc.org/sqlite"
 )
 
@@ -31,7 +31,7 @@ type DB struct {
 }
 
 func Open(dir string) (*DB, error) {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := afero.NewOsFs().MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
 	dsn := databaseDSN(filepath.Join(dir, "flixr.db"))
