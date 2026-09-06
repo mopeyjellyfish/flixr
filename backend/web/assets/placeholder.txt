@@ -1,0 +1,1 @@
+Flixr frontend assets are copied into this directory for production builds.

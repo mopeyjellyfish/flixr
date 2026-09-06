@@ -1,0 +1,489 @@
+// Package web exposes Flixr's versioned JSON HTTP API and frontend.
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/household"
+)
+
+type Readiness struct {
+	FFprobe bool `json:"ffprobe"`
+	FFmpeg  bool `json:"ffmpeg"`
+}
+type Server struct {
+	house     *household.Manager
+	catalog   *catalog.Catalog
+	mux       *http.ServeMux
+	lookPath  func(string) (string, error)
+	readyMu   sync.RWMutex
+	readiness Readiness
+}
+
+func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
+	s := &Server{house: h, catalog: c, mux: http.NewServeMux(), lookPath: exec.LookPath}
+	s.checkReadiness()
+	s.routes()
+	return s
+}
+func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/v1/setup/status", s.status)
+	s.mux.HandleFunc("POST /api/v1/setup/claim", s.claim)
+	s.mux.HandleFunc("POST /api/v1/owner/login", s.login)
+	s.mux.HandleFunc("POST /api/v1/logout", s.logout)
+	s.mux.HandleFunc("POST /api/v1/profiles", s.createProfile)
+	s.mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
+	s.mux.HandleFunc("PATCH /api/v1/profiles/{id}", s.updateProfile)
+	s.mux.HandleFunc("POST /api/v1/profiles/{id}/select", s.selectProfile)
+	s.mux.HandleFunc("GET /api/v1/catalog/home", s.home)
+	s.mux.HandleFunc("GET /api/v1/catalog/search", s.search)
+	s.mux.HandleFunc("GET /api/v1/catalog/films/{id}", s.film)
+	s.mux.HandleFunc("GET /api/v1/catalog/series/{id}", s.series)
+	s.mux.HandleFunc("GET /api/v1/catalog/items/{id}", s.item)
+	s.mux.HandleFunc("GET /api/v1/catalog/artwork/{id}/{kind}", s.artwork)
+	s.mux.HandleFunc("PUT /api/v1/progress/{id}", s.progress)
+	s.mux.HandleFunc("GET /api/v1/progress/{id}", s.progress)
+	s.mux.HandleFunc("GET /api/v1/owner/roots", s.roots)
+	s.mux.HandleFunc("POST /api/v1/owner/roots", s.roots)
+	s.mux.HandleFunc("POST /api/v1/owner/scan", s.scan)
+	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
+	s.mux.HandleFunc("GET /api/v1/owner/settings/tmdb", s.tmdbSettings)
+	s.mux.HandleFunc("PUT /api/v1/owner/settings/tmdb", s.tmdbSettings)
+	s.mux.HandleFunc("POST /api/v1/owner/readiness/recheck", s.recheckReadiness)
+	s.mux.HandleFunc("/api/v1/", func(w http.ResponseWriter, _ *http.Request) { fail(w, http.StatusNotFound, "not_found") })
+	s.mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) { fail(w, http.StatusNotFound, "not_found") })
+	s.mux.Handle("/", frontendHandler())
+}
+func write(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func fail(w http.ResponseWriter, status int, code string) {
+	write(w, status, map[string]any{"error": map[string]string{"code": code}})
+}
+func decode(r *http.Request, v any) bool {
+	d := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	d.DisallowUnknownFields()
+	if d.Decode(v) != nil {
+		return false
+	}
+	return d.Decode(&struct{}{}) == io.EOF
+}
+func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
+	s.readyMu.RLock()
+	ready := s.readiness
+	s.readyMu.RUnlock()
+	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready})
+}
+func (s *Server) checkReadiness() {
+	_, p := s.lookPath("ffprobe")
+	_, f := s.lookPath("ffmpeg")
+	s.readyMu.Lock()
+	s.readiness = Readiness{p == nil, f == nil}
+	s.readyMu.Unlock()
+}
+func (s *Server) recheckReadiness(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	s.checkReadiness()
+	s.status(w, r)
+}
+func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	if origin := r.Header.Get("Origin"); origin == "" || origin == scheme(r)+r.Host {
+		return true
+	}
+	fail(w, 403, "bad_origin")
+	return false
+}
+func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var v struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if !decode(r, &v) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	x, e := s.house.Claim(v.Token, v.Password)
+	if e != nil {
+		if errors.Is(e, household.ErrHashSaturated) {
+			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrClaimed) {
+			fail(w, 409, "already_claimed")
+		} else {
+			fail(w, 401, "invalid_token")
+		}
+		return
+	}
+	s.cookie(w, r, x)
+	write(w, 201, map[string]bool{"claimed": true})
+}
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var v struct {
+		Password string `json:"password"`
+	}
+	if !decode(r, &v) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	x, e := s.house.Login(v.Password)
+	if e != nil {
+		if errors.Is(e, household.ErrHashSaturated) {
+			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrRateLimited) {
+			fail(w, 429, "login_rate_limited")
+		} else {
+			fail(w, 401, "invalid_credentials")
+		}
+		return
+	}
+	s.cookie(w, r, x)
+	write(w, 200, map[string]bool{"logged_in": true})
+}
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	if err := s.house.Logout(s.session(r)); err != nil {
+		fail(w, 500, "logout_failed")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "flixr_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
+	write(w, 200, map[string]bool{"logged_out": true})
+}
+func (s *Server) cookie(w http.ResponseWriter, r *http.Request, x string) {
+	http.SetCookie(w, &http.Cookie{Name: "flixr_session", Value: x, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 86400})
+}
+func (s *Server) session(r *http.Request) string {
+	c, e := r.Cookie("flixr_session")
+	if e != nil {
+		return ""
+	}
+	return c.Value
+}
+func (s *Server) owner(w http.ResponseWriter, r *http.Request) bool {
+	if !s.sameOrigin(w, r) {
+		return false
+	}
+	if !s.house.Owner(s.session(r)) {
+		fail(w, 403, "owner_required")
+		return false
+	}
+	return true
+}
+func (s *Server) profile(w http.ResponseWriter, r *http.Request) bool {
+	if !s.sameOrigin(w, r) {
+		return false
+	}
+	if _, ok := s.house.Profile(s.session(r)); !ok {
+		fail(w, 403, "profile_required")
+		return false
+	}
+	return true
+}
+func scheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https://"
+	}
+	return "http://"
+}
+func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	var v struct {
+		Name string `json:"name"`
+		PIN  string `json:"pin"`
+	}
+	if !decode(r, &v) || strings.TrimSpace(v.Name) == "" {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	p, e := s.house.CreateProfile(v.Name, v.PIN)
+	if e != nil {
+		if errors.Is(e, household.ErrHashSaturated) {
+			fail(w, 429, "credential_busy")
+		} else {
+			fail(w, 500, "profile_failed")
+		}
+		return
+	}
+	write(w, 201, p)
+}
+func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
+	write(w, 200, map[string]any{"profiles": s.house.Profiles()})
+}
+func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	var v struct {
+		Name      string `json:"name"`
+		PIN       string `json:"pin"`
+		Unprotect bool   `json:"unprotect"`
+	}
+	if !decode(r, &v) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	p, e := s.house.UpdateProfile(r.PathValue("id"), v.Name, v.PIN, v.Unprotect)
+	if e != nil {
+		if errors.Is(e, household.ErrHashSaturated) {
+			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrProfileNotFound) {
+			fail(w, 404, "profile_not_found")
+		} else {
+			fail(w, 500, "profile_failed")
+		}
+		return
+	}
+	write(w, 200, p)
+}
+func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	var v struct {
+		PIN string `json:"pin"`
+	}
+	if !decode(r, &v) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	x, e := s.house.Select(r.PathValue("id"), v.PIN)
+	if e != nil {
+		if errors.Is(e, household.ErrHashSaturated) {
+			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrRateLimited) {
+			fail(w, 429, "pin_rate_limited")
+		} else {
+			fail(w, 401, "invalid_pin")
+		}
+		return
+	}
+	s.cookie(w, r, x)
+	write(w, 200, map[string]bool{"selected": true})
+}
+func pagination(r *http.Request) (int, int, bool) {
+	o, l := 0, 50
+	if x := r.URL.Query().Get("offset"); x != "" {
+		var e error
+		o, e = strconv.Atoi(x)
+		if e != nil || o < 0 {
+			return 0, 0, false
+		}
+	}
+	if x := r.URL.Query().Get("limit"); x != "" {
+		var e error
+		l, e = strconv.Atoi(x)
+		if e != nil || l < 1 || l > 100 {
+			return 0, 0, false
+		}
+	}
+
+	return o, l, true
+}
+
+func nextPage(offset, limit, total int) any {
+	if offset+limit >= total {
+		return nil
+	}
+	return offset + limit
+}
+func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	o, l, ok := pagination(r)
+	if !ok {
+		fail(w, 400, "invalid_pagination")
+		return
+	}
+	items, total, err := s.catalog.Browse("", o, l)
+	if err != nil {
+		fail(w, 500, "catalog_query_failed")
+		return
+	}
+	write(w, 200, map[string]any{"items": items, "total": total, "next": nextPage(o, l, total)})
+}
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	o, l, ok := pagination(r)
+	if !ok {
+		fail(w, 400, "invalid_pagination")
+		return
+	}
+	items, total, err := s.catalog.Browse(r.URL.Query().Get("q"), o, l)
+	if err != nil {
+		fail(w, 500, "catalog_query_failed")
+		return
+	}
+	write(w, 200, map[string]any{"items": items, "total": total, "next": nextPage(o, l, total)})
+}
+func (s *Server) film(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	v, ok := s.catalog.Item(r.PathValue("id"))
+	if !ok || v.Kind != "film" {
+		fail(w, 404, "catalog_not_found")
+		return
+	}
+	write(w, http.StatusOK, v)
+}
+func (s *Server) series(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	v, ok := s.catalog.Series(r.PathValue("id"))
+	if !ok {
+		fail(w, 404, "catalog_not_found")
+		return
+	}
+	write(w, http.StatusOK, v)
+}
+func (s *Server) item(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	v, ok := s.catalog.Item(r.PathValue("id"))
+	if !ok {
+		fail(w, 404, "catalog_not_found")
+		return
+	}
+	write(w, 200, v)
+}
+func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	data, contentType, err := s.catalog.Artwork(r.PathValue("id"), r.PathValue("kind"))
+	if err != nil {
+		fail(w, http.StatusNotFound, "catalog_artwork_not_found")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		p, e := s.house.Position(s.session(r), r.PathValue("id"))
+		if e != nil {
+			fail(w, 500, "progress_failed")
+			return
+		}
+		write(w, 200, map[string]int64{"position_ms": p})
+		return
+	}
+	var v struct {
+		Position int64 `json:"position_ms"`
+	}
+	if !decode(r, &v) || v.Position < 0 {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	if e := s.house.Progress(s.session(r), r.PathValue("id"), v.Position); e != nil {
+		fail(w, 500, "progress_failed")
+		return
+	}
+	write(w, 200, map[string]bool{"saved": true})
+}
+func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		films, tv := s.catalog.Roots()
+		write(w, http.StatusOK, map[string]string{"films": films, "tv": tv})
+		return
+	}
+	var v struct {
+		Films string `json:"films"`
+		TV    string `json:"tv"`
+	}
+	if !decode(r, &v) || s.catalog.SetRoots(v.Films, v.TV) != nil {
+		fail(w, 400, "invalid_roots")
+		return
+	}
+	write(w, 200, map[string]bool{"saved": true})
+}
+func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	s.readyMu.RLock()
+	ffprobe := s.readiness.FFprobe
+	s.readyMu.RUnlock()
+	if !ffprobe {
+		fail(w, http.StatusServiceUnavailable, "ffprobe_unavailable")
+		return
+	}
+	if err := s.catalog.StartScan(context.Background(), 2); err != nil {
+		if errors.Is(err, catalog.ErrScanActive) {
+			fail(w, 409, "scan_active")
+		} else {
+			fail(w, 500, "scan_failed")
+		}
+		return
+	}
+	write(w, http.StatusAccepted, map[string]any{"scan": s.catalog.ScanStatus()})
+}
+
+func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"scan": s.catalog.ScanStatus()})
+}
+
+func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+		return
+	}
+	var v struct {
+		Token string `json:"token"`
+	}
+	if !decode(r, &v) {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := s.catalog.SetTMDBToken(strings.TrimSpace(v.Token)); err != nil {
+		fail(w, http.StatusInternalServerError, "settings_failed")
+		return
+	}
+	write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+}
