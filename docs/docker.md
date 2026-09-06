@@ -24,7 +24,7 @@ are omitted. Use `/media/films` and `/media/tv` for a host folder with those chi
 Only one root per media kind is currently supported; several disks can be mounted
 under subdirectories of that root.
 
-Set `FLIXR_VERSION=v1.0.0` (replace with an available release) to pin a release.
+Set `FLIXR_VERSION=v0.1.0` (replace with an available release) to pin a release.
 `latest` follows successful releases. For reproducible deployments, use the image's
 registry digest in the Compose `image` field.
 

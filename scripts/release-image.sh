@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 mode="${1:-}"
 version="${2:-}"
 [[ "$mode" == prepare || "$mode" == promote ]] || { echo 'Expected prepare or promote' >&2; exit 1; }
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable semantic version' >&2; exit 1; }
+[[ "$version" =~ ^0\.[0-9]+\.[0-9]+$ ]] || { echo 'Only 0.x releases are authorized; v1 requires an explicit policy change' >&2; exit 1; }
 [[ "${GITHUB_REF:-}" == refs/heads/main && "${GITHUB_EVENT_NAME:-}" == push ]] || { echo 'Publishing requires a main push' >&2; exit 1; }
 [[ "${GITHUB_REPOSITORY:-}" == mopeyjellyfish/flixr ]] || { echo 'Unexpected release repository' >&2; exit 1; }
 [[ "${GITHUB_SHA:-}" == "$(git rev-parse HEAD)" ]] || { echo 'Release checkout differs from tested commit' >&2; exit 1; }

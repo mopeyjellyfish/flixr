@@ -166,4 +166,6 @@ jobs:
       - name: Version, publish verified images, and generate release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release
+        run: |
+          bash scripts/release-baseline.sh
+          npm run release

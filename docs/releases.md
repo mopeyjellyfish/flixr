@@ -8,12 +8,21 @@ receive package-write permissions.
 
 ## Versioning
 
-`semantic-release` analyzes commits since the last `v*` tag and generates release
-notes. `fix`/`perf` increment patch, `feat` increments minor, and `!` or a
-`BREAKING CHANGE:` footer increments major. Docs/tests/chore-only merges do not
-create a release. With no previous release tag, the standard first release is
-**v1.0.0**; this version does not imply full Plex/Jellyfin parity. The frontend
-package version is a private build package, not the server's release version.
+The first published release is **v0.1.0**. Flixr stays below v1 until the maintainer
+explicitly authorizes a policy change. `semantic-release` analyzes Conventional
+Commits: `fix`/`perf` increment patch and `feat` increments minor. `!` and
+`BREAKING CHANGE:` markers do not trigger a major release or a breaking-changes
+section in generated notes. Docs/tests/chore-only merges do not create a release.
+The image publisher rejects every version outside `0.x` as a second safeguard.
+
+On the first main release, `scripts/release-baseline.sh` creates a **v0.0.0 Git
+baseline tag** at the repository's initial commit. This works with semantic-release's
+native version calculation: it publishes no v0.0.0 image or GitHub release. The first
+feature delivery becomes v0.1.0. The baseline is pushed alongside the first actual
+release tag; subsequent runs retain it. A local bare-repository dry-run test verifies
+0.1.0, 0.1.1 and 0.2.0, including breaking markers.
+
+The frontend package version is a private build package, not the server's release version.
 The authoritative runtime version is `docker run --rm IMAGE --version`.
 
 Use Conventional Commit PR titles, checked by CI, when squash-merging. Preserve
@@ -50,7 +59,7 @@ The maintainer watching the first merge should:
 
 - Confirm every CI gate and the release job succeeds.
 - Inspect both platform manifests, version/commit labels, SBOM and release notes.
-- Confirm an unauthenticated `docker pull ghcr.io/mopeyjellyfish/flixr:v1.0.0` after
+- Confirm an unauthenticated `docker pull ghcr.io/mopeyjellyfish/flixr:v0.1.0` after
   setting package visibility, then follow `docs/docker.md` with a fresh config volume.
 - Test owner claim, scan, direct playback and compatibility playback; restart and
   confirm local accounts, roots and history persist. Review logs during this first session.
