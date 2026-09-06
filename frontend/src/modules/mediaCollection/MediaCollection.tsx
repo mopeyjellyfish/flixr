@@ -43,6 +43,7 @@ function Grid({ label, items, onOpen }: { label: string; items: ViewerItem[]; on
   const rowHeight = itemWidth * 1.5 + GAP;
   const rows = Math.ceil(items.length / columns);
   const virtualizer = useVirtualizer({ count: rows, getScrollElement: () => parentRef.current, estimateSize: () => rowHeight, overscan: 1, initialRect: { width, height: 900 } });
+  useLayoutEffect(() => virtualizer.measure(), [rowHeight, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const rowItems = visible.length ? visible : Array.from({ length: Math.min(rows, 4) }, (_, index) => ({ index, start: index * rowHeight }));
   return <section className="media-grid" aria-label={label} ref={parentRef} data-collection data-layout="grid" data-columns={columns}><div className="media-grid-inner" style={{ height: virtualizer.getTotalSize() }}>{rowItems.flatMap((row) => items.slice(row.index * columns, row.index * columns + columns).map((item, column) => <PosterCard key={item.id} item={item} onOpen={onOpen} onKeyDown={moveFocus} style={{ top: row.start, left: column * (itemWidth + GAP), width: itemWidth }} />))}</div></section>;
@@ -54,6 +55,7 @@ function Rail({ label, items, onOpen }: { label: string; items: ViewerItem[]; on
   const itemWidth = cardWidth(width);
   const stride = itemWidth + GAP;
   const virtualizer = useVirtualizer({ horizontal: true, count: items.length, getScrollElement: () => parentRef.current, estimateSize: () => stride, overscan: 3, initialRect: { width, height: itemWidth * 1.5 + 32 } });
+  useLayoutEffect(() => virtualizer.measure(), [stride, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const cards = visible.length ? visible.map((virtual) => ({ index: virtual.index, start: virtual.start })) : items.slice(0, Math.ceil(width / stride) + 3).map((_, index) => ({ index, start: index * stride }));
   return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><span>{items.length} title{items.length === 1 ? '' : 's'}</span></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 32 }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} style={{ transform: `translateX(${virtual.start}px)`, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;

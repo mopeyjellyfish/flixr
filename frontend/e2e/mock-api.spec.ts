@@ -227,6 +227,56 @@ test('mocked viewer journey: filtered grids, sort, demo detail, and My List', as
 
 
 
+test('poster collections keep 16px measured gaps after viewport resize', async ({ page }) => {
+  const items = Array.from({ length: 80 }, (_, index) => ({ id: `geometry-${index}`, title: `Geometry title ${index}`, kind: 'film', local_only: true, listed: false }));
+  let view: 'rows' | 'grid' = 'rows';
+  await mock(page, (path, method, _query, body) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+    if (path.endsWith('/select')) return { json: {} };
+    if (path.endsWith('/preferences/film')) {
+      if (method === 'PUT' && (body?.view === 'rows' || body?.view === 'grid')) view = body.view;
+      return { json: { view, sort: 'title' } };
+    }
+    if (path.endsWith('/catalog/view')) return view === 'grid'
+      ? { json: { preference: { view, sort: 'title' }, items } }
+      : { json: { preference: { view, sort: 'title' }, sections: [{ name: 'Geometry', items }] } };
+    return undefined;
+  });
+  await open(page, '/');
+  await page.getByRole('button', { name: 'Viewer' }).click();
+  await page.getByRole('button', { name: 'Movies' }).click();
+
+  const assertRailGap = async () => {
+    await expect.poll(async () => {
+      const first = await page.getByTestId('card-geometry-0').boundingBox();
+      const second = await page.getByTestId('card-geometry-1').boundingBox();
+      return first && second ? second.x - (first.x + first.width) : null;
+    }).toBeCloseTo(16, 0);
+  };
+  await assertRailGap();
+  for (const viewport of [{ width: 1920, height: 1080 }, { width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await assertRailGap();
+  }
+
+  await page.getByLabel('View').selectOption('grid');
+  const grid = page.getByRole('region', { name: 'Titles' });
+  const assertGridGap = async () => {
+    await expect.poll(async () => {
+      const columns = Number(await grid.getAttribute('data-columns'));
+      const first = await page.getByTestId('card-geometry-0').boundingBox();
+      const nextRow = await page.getByTestId(`card-geometry-${columns}`).boundingBox();
+      return first && nextRow ? nextRow.y - (first.y + first.height) : null;
+    }).toBeCloseTo(16, 0);
+  };
+  await assertGridGap();
+  for (const viewport of [{ width: 1920, height: 1080 }, { width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await assertGridGap();
+  }
+});
+
 test('large poster grids keep a bounded browser DOM while scrolling to the final row', async ({ page }) => {
   const items = Array.from({ length: 1_000 }, (_, index) => ({ id: `grid-${index}`, title: `Grid title ${index}`, kind: 'film', local_only: true, listed: false }));
   await mock(page, (path) => {
