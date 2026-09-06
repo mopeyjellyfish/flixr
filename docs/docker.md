@@ -4,8 +4,9 @@ The published image is `ghcr.io/mopeyjellyfish/flixr`. It contains the web inter
 Go executable, FFmpeg/ffprobe and CA certificates. No Node, Go compiler or source
 checkout is needed at runtime. Images target Linux AMD64 and ARM64.
 
-The first image becomes available after the release branch is merged and CI succeeds.
-Until then, build locally with `docker build -t flixr:local .`.
+The GHCR image currently requires registry access. If pulling it returns an access
+error, use the source-build setup below. Package visibility and anonymous-pull
+verification are tracked in [#91](https://github.com/mopeyjellyfish/flixr/issues/91).
 
 ## Start
 
@@ -27,6 +28,29 @@ under subdirectories of that root.
 Set `FLIXR_VERSION=v0.1.0` (replace with an available release) to pin a release.
 `latest` follows successful releases. For reproducible deployments, use the image's
 registry digest in the Compose `image` field.
+
+## Build locally
+
+From a source checkout, create a `.env` file with your media folder and start the
+local Compose configuration:
+
+```dotenv
+FLIXR_MEDIA_DIR=/absolute/path/to/your/media
+```
+
+```sh
+docker compose -f compose.local.yml up --build -d --wait
+docker compose -f compose.local.yml logs flixr
+```
+
+Open http://localhost:8787 and follow the setup steps above. This builds the image
+locally and needs internet access on the first build. Later starts can reuse the
+image without `--build`. The local configuration enables trusted-LAN access by
+default and uses a persistent `/data` volume; it is separate from the published
+configuration's `/config` and `/cache` volumes. Keep using the same Compose file
+and media path for subsequent commands.
+
+For native builds, the demo and checks, see [development](development.md).
 
 ## Filesystem contract
 
