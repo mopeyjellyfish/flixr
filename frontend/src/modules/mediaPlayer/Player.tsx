@@ -3,6 +3,7 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
+import { screenCoordinator } from '../screenCoordinator/runtime';
 
 function browserCapabilities(): PlaybackCapabilities {
   const probe = document.createElement('video');
@@ -111,6 +112,11 @@ export function Player({ catalogID, onExit }: { catalogID: string; onExit: () =>
       }
     };
   }, [attach, catalogID, currentPosition, heartbeat]);
+  useEffect(() => screenCoordinator.onCommand((command) => {
+    if (command.type === 'pause') video.current?.pause();
+    if (command.type === 'seek' && video.current) video.current.currentTime = Math.max(0, command.position_ms - (playback.current?.stream_offset_ms ?? 0)) / 1000;
+    if (command.type === 'play') void video.current?.play();
+  }), []);
 
   const play = async () => {
     try {

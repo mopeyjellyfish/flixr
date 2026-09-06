@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { SetupStatus } from '../core/api';
 import { Setup, OwnerLogin } from '../features/setup/Setup';
 import { ProfileChooser } from '../features/profiles/Profiles';
+import { screenCoordinator } from '../modules/screenCoordinator/runtime';
 
 const Owner = lazy(async () => ({ default: (await import('../features/owner/Owner')).Owner }));
 const Browse = lazy(async () => ({ default: (await import('../features/browse/Browse')).Browse }));
@@ -33,6 +34,10 @@ export function App() {
     if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
     setRoute(nextRoute);
   }, []);
+  useEffect(() => screenCoordinator.onCommand((command) => {
+    if (command.type === 'play') navigate(`/play/${encodeURIComponent(command.catalog_id)}`);
+    if (command.type === 'handoff') navigate(lastBrowsePath);
+  }), [lastBrowsePath, navigate]);
   const load = useCallback(() => api.setupStatus().then((value) => {
     setStatus(value);
     const requested = routeFor();
