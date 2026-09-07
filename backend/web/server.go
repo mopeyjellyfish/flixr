@@ -26,16 +26,18 @@ type Readiness struct {
 }
 type Build struct{ Version, Revision string }
 type Server struct {
-	house             *household.Manager
-	catalog           *catalog.Catalog
-	playback          *playback.Manager
-	screens           *screens.Manager
-	mux               *http.ServeMux
-	lookPath          func(string) (string, error)
-	readyMu           sync.RWMutex
-	readiness         Readiness
-	diagnostics       *diagnostics.Log
+	house *household.Manager
+	catalog *catalog.Catalog
+	playback *playback.Manager
+	screens *screens.Manager
+	mux *http.ServeMux
+	lookPath func(string) (string, error)
+	readyMu sync.RWMutex
+	readiness Readiness
+	diagnostics *diagnostics.Log
 	version, revision string
+	settingsLocks map[string]bool
+	settingsValues map[string]string
 }
 
 func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
@@ -47,10 +49,29 @@ func NewServerWithPlayback(h *household.Manager, c *catalog.Catalog, manager *pl
 }
 
 func NewServerWithScreens(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, builds ...Build) *Server {
-	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: "dev", revision: "unknown"}
-	if len(builds) > 0 {
-		s.version, s.revision = builds[0].Version, builds[0].Revision
+	build := Build{Version: "dev", Revision: "unknown"}; if len(builds) > 0 { build = builds[0] }
+	return newServer(h, c, playbackManager, screenManager, nil, build)
+}
+
+// NewServerWithConfiguration makes explicit environment values visible and
+// immutable to owner settings. Existing constructors retain test-friendly
+// defaults with no environment locks.
+func NewServerWithConfiguration(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, locks map[string]bool) *Server {
+	return newServer(h, c, playbackManager, screens.New(time.Minute), locks, Build{Version: "dev", Revision: "unknown"})
+}
+
+func NewServerWithConfigurationValues(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, locks map[string]bool, values map[string]string, builds ...Build) *Server {
+	build := Build{Version: "dev", Revision: "unknown"}; if len(builds) > 0 { build = builds[0] }
+	s := newServer(h, c, playbackManager, screenManager, locks, build)
+	s.settingsValues = values
+	return s
+}
+
+func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, locks map[string]bool, build Build) *Server {
+	if locks == nil {
+		locks = map[string]bool{}
 	}
+	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}}
 	s.checkReadiness()
 	s.routes()
 	return s
@@ -88,6 +109,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/metadata/{kind}/{id}/candidates", s.metadataCandidates)
 	s.mux.HandleFunc("PUT /api/v1/owner/metadata/{kind}/{id}/match", s.metadataMatch)
 	s.mux.HandleFunc("DELETE /api/v1/owner/metadata/{kind}/{id}/match", s.metadataUnmatch)
+	s.mux.HandleFunc("GET /api/v1/owner/settings", s.settingsInventory)
+	s.mux.HandleFunc("GET /api/v1/owner/settings/export", s.settingsExport)
+	s.mux.HandleFunc("POST /api/v1/owner/settings/import/preview", s.settingsImportPreview)
+	s.mux.HandleFunc("POST /api/v1/owner/settings/import", s.settingsImport)
 	s.mux.HandleFunc("POST /api/v1/owner/readiness/recheck", s.recheckReadiness)
 	s.mux.HandleFunc("POST /api/v1/playback/plans", s.playbackPlan)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/media", s.playbackMedia)
@@ -483,6 +508,10 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		Films string `json:"films"`
 		TV    string `json:"tv"`
 	}
+	if s.settingsLocks["library.films_root"] || s.settingsLocks["library.tv_root"] {
+		fail(w, http.StatusConflict, "environment_locked")
+		return
+	}
 	if !decode(r, &v) || s.catalog.SetRoots(v.Films, v.TV) != nil {
 		fail(w, 400, "invalid_roots")
 		return
@@ -528,6 +557,10 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	var v struct {
 		Token string `json:"token"`
+	}
+	if s.settingsLocks["metadata.tmdb_token"] {
+		fail(w, http.StatusConflict, "environment_locked")
+		return
 	}
 	if !decode(r, &v) {
 		fail(w, http.StatusBadRequest, "invalid_request")

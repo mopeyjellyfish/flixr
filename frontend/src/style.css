@@ -149,6 +149,9 @@ a:focus-visible, summary:focus-visible { outline: 3px solid var(--text); outline
 .owner-section details { margin-top: 2rem; }
 .owner-section summary { cursor: pointer; min-height: 44px; padding: 0.7rem 0; }
 .owner-notice { padding: 1rem; border-left: 3px solid var(--interaction); background: var(--surface); }
+.settings-list { display: grid; gap: .65rem; margin: 1rem 0; }
+.setting-row { display: grid; gap: .2rem; padding: .8rem; border: 1px solid var(--hairline); border-radius: .55rem; }
+.setting-row span, .setting-row small { color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 1000px) { .owner-columns { grid-template-columns: 1fr; gap: 1rem; } }
 @media (max-width: 700px) { .owner-layout { grid-template-columns: 1fr; gap: 1.5rem; } .owner-nav { position: static; grid-template-columns: repeat(2, 1fr); } .owner-intro { margin: 2rem 0; } }
 dialog { width: min(42rem, calc(100vw - 2rem)); max-width: min(42rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); margin: auto; overflow: auto; background: var(--surface); color: var(--text); border: 1px solid #35435a; border-radius: 1.25rem; padding: 1.5rem; box-shadow: 0 1.5rem 4rem #0008; }

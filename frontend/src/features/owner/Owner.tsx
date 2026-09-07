@@ -7,6 +7,7 @@ import { ApiError, type MetadataCandidate, type MetadataTarget, type PlaybackSet
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
+import { SettingsPanel } from './SettingsPanel';
 
 type OwnerProps = {
   onLogout: () => void;
@@ -30,6 +31,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [notice, setNotice] = useState('');
   const [profilesVersion, setProfilesVersion] = useState(0);
   const [ownerRequired, setOwnerRequired] = useState(false);
+  const [locked, setLocked] = useState<Set<string>>(new Set());
 
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -40,6 +42,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
     api.ownerScreens().then((result) => setScreens(result.screens ?? [])).catch(() => setNotice('Connected screens are unavailable.'));
+    api.settingsInventory().then((result) => setLocked(new Set((result.settings ?? []).filter((setting) => !setting.mutable).map((setting) => setting.key)))).catch(() => undefined);
   };
 
   const recheck = () => api.recheck().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -130,12 +133,12 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       <div className="owner-intro"><p className="eyebrow">YOUR SERVER</p><h1>Server settings</h1><p>Manage your libraries, household, and playback from this device.</p></div>
       {notice && <p className="owner-notice" role="status">{notice}</p>}
       <div className="owner-layout">
-        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a><a href="#support">Support</a></nav>
+        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a><a href="#configuration">Configuration</a><a href="#support">Support</a></nav>
         <div className="owner-sections">
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} /><ScanPanel scan={scan} onStart={startScan} /></div>
+            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked.has('library.films_root') || locked.has('library.tv_root')} /><ScanPanel scan={scan} onStart={startScan} /></div>
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -145,13 +148,14 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
             <LoadingButton onAction={refreshActivity} pendingLabel="Refreshing…" successLabel="Refresh activity">Refresh activity</LoadingButton>
             <ConnectedScreens screens={screens} />
-            {playbackSettings && <details><summary>Playback resource limits</summary><PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} /></details>}
+            {playbackSettings && <details><summary>Playback resource limits</summary><PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} locked={['playback.segment_dir', 'playback.generation_bytes', 'playback.global_bytes', 'playback.max_generations'].some((key) => locked.has(key))} /></details>}
           </section>
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
-            <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
+            <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} />
           </section>
+          <SettingsPanel onNotice={setNotice} />
           <section id="support" className="owner-section" aria-labelledby="support-title">
             <h2 id="support-title">Support diagnostics</h2><p>Download a local ZIP with versions, runtime health, and recent failure IDs. It never includes media names, paths, passwords, or tokens.</p>
             <a className="button-link primary" href="/api/v1/owner/diagnostics" download>Download diagnostics</a>
@@ -186,13 +190,13 @@ function ReadinessControls({ readiness, onRecheck }: { readiness: Readiness; onR
   );
 }
 
-function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
+function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit, locked }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void; locked: boolean }) {
   return (
     <PendingForm onSubmit={onSubmit}>
       <h2>Library roots</h2>
-      <label>Films root<input value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
-      <label>TV root<input value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
-      <button className="primary">Save roots</button>
+      {locked && <p>Managed by the server environment.</p>}<label>Films root<input disabled={locked} value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
+      <label>TV root<input disabled={locked} value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
+      <button className="primary" disabled={locked}>Save roots</button>
     </PendingForm>
   );
 }
@@ -208,29 +212,29 @@ function ScanPanel({ scan, onStart }: { scan?: Scan; onStart: () => Promise<void
   );
 }
 
-function TMDBForm({ configured, token, onTokenChange, onSave, onRemove }: { configured: boolean; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void> }) {
+function TMDBForm({ configured, token, onTokenChange, onSave, onRemove, locked }: { configured: boolean; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void>; locked: boolean }) {
   return (
     <PendingForm onSubmit={onSave}>
       <h2>TMDB metadata</h2>
       <p>{configured ? 'Credential configured. Enter a replacement token to change it.' : 'No credential configured.'}</p>
-      <label>TMDB access token<input type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
+      {locked && <p>Managed by the server environment.</p>}<label>TMDB access token<input disabled={locked} type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
       <div className="actions">
-        <button className="primary">Save TMDB credential</button>
-        {configured && <button type="button" onClick={() => void onRemove()}>Remove credential</button>}
+        <button className="primary" disabled={locked}>Save TMDB credential</button>
+        {configured && <button disabled={locked} type="button" onClick={() => void onRemove()}>Remove credential</button>}
       </div>
     </PendingForm>
   );
 }
 
-function PlaybackPanel({ settings, status, onChange, onSubmit }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void }) {
+function PlaybackPanel({ settings, status, onChange, onSubmit, locked }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void; locked: boolean }) {
   return <PendingForm onSubmit={onSubmit}>
     <h2>Playback resources</h2>
     <p>{status?.generations?.length ? `${status.generations.length} compatibility generation${status.generations.length === 1 ? '' : 's'} active.` : 'No compatibility generations are active.'}</p>
-    <label>Segment directory<input value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
-    <label>Per-generation bytes<input type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
-    <label>Global bytes<input type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
-    <label>Concurrent generations<input type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
-    <button className="primary">Save playback limits</button>
+    {locked && <p>Managed by the server environment.</p>}<label>Segment directory<input disabled={locked} value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
+    <label>Per-generation bytes<input disabled={locked} type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
+    <label>Global bytes<input disabled={locked} type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
+    <label>Concurrent generations<input disabled={locked} type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
+    <button className="primary" disabled={locked}>Save playback limits</button>
   </PendingForm>;
 }
 

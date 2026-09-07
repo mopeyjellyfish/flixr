@@ -303,6 +303,12 @@ func (s *Server) playbackSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	for _, key := range []string{"playback.segment_dir", "playback.generation_bytes", "playback.global_bytes", "playback.max_generations"} {
+		if s.settingsLocks[key] {
+			fail(w, http.StatusConflict, "environment_locked")
+			return
+		}
+	}
 	settings := s.playback.Settings()
 	settings.SegmentDir = body.SegmentDir
 	settings.GenerationBytes = body.GenerationBytes
