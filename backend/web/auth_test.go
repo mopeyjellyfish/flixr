@@ -62,3 +62,12 @@ func TestTLSClaimUsesSecureSessionCookie(t *testing.T) {
 		t.Fatal("TLS claim cookie missing security attributes")
 	}
 }
+
+func TestOwnerRecoveryHasNoHTTPRoute(t *testing.T) {
+	h := web.NewServer(newHousehold(t), catalog.New()).Handler()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/owner/recover", bytes.NewBufferString(`{"password":"replacement"}`)))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("recovery route status=%d", w.Code)
+	}
+}
