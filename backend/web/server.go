@@ -91,6 +91,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/profiles", s.createProfile)
 	s.mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
 	s.mux.HandleFunc("PATCH /api/v1/profiles/{id}", s.updateProfile)
+	s.mux.HandleFunc("DELETE /api/v1/profiles/{id}", s.deleteProfile)
+	s.mux.HandleFunc("GET /api/v1/owner/sessions", s.sessions)
+	s.mux.HandleFunc("DELETE /api/v1/owner/sessions/{id}", s.revokeSession)
 	s.mux.HandleFunc("POST /api/v1/profiles/{id}/select", s.selectProfile)
 	s.mux.HandleFunc("GET /api/v1/catalog/home", s.home)
 	s.mux.HandleFunc("GET /api/v1/catalog/search", s.search)
@@ -337,6 +340,45 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, 200, p)
+}
+func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	if err := s.house.DeleteProfile(r.PathValue("id")); err != nil {
+		if errors.Is(err, household.ErrProfileNotFound) {
+			fail(w, 404, "profile_not_found")
+		} else {
+			fail(w, 500, "profile_failed")
+		}
+		return
+	}
+	write(w, 200, map[string]bool{"deleted": true})
+}
+func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	sessions, err := s.house.ActiveSessions()
+	if err != nil {
+		fail(w, 500, "session_failed")
+		return
+	}
+	write(w, 200, map[string]any{"sessions": sessions})
+}
+func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	if err := s.house.RevokeSession(r.PathValue("id")); err != nil {
+		if errors.Is(err, household.ErrSessionNotFound) {
+			fail(w, 404, "session_not_found")
+		} else {
+			fail(w, 500, "session_failed")
+		}
+		return
+	}
+	write(w, 200, map[string]bool{"revoked": true})
 }
 func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {

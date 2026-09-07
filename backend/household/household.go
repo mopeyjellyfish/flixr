@@ -26,13 +26,18 @@ var (
 	ErrRateLimited     = errors.New("pin attempts rate limited")
 	ErrHashSaturated   = errors.New("credential hashing saturated")
 	ErrCredentials     = errors.New("invalid credentials")
-	ErrRecovery        = errors.New("owner recovery unavailable")
+	ErrSessionNotFound = errors.New("session not found")
 )
 
 type Profile struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Protected bool   `json:"protected"`
+}
+type Session struct {
+	ID        string `json:"id"`
+	Subject   string `json:"subject"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 type Manager struct {
 	mu               sync.Mutex
@@ -175,59 +180,6 @@ func (m *Manager) Login(password string) (string, error) {
 	m.ownerAttempts = 0
 	return m.issueLocked("owner")
 }
-
-// RecoverOwner replaces the claimed owner's password from host-local recovery.
-// It is intentionally unavailable without durable storage: a recovery must
-// survive process interruption and revoke persisted owner sessions atomically.
-func (m *Manager) RecoverOwner(password string) error {
-	if password == "" || m.db == nil {
-		return ErrRecovery
-	}
-	m.mu.Lock()
-	claimed := len(m.ownerHash) > 0
-	m.mu.Unlock()
-	if !claimed {
-		return ErrRecovery
-	}
-	s, err := salt()
-	if err != nil {
-		return fmt.Errorf("generate owner recovery salt: %w", err)
-	}
-	h, err := m.derive(password, s)
-	if err != nil {
-		return err
-	}
-	tx, err := m.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin owner recovery: %w", err)
-	}
-	defer tx.Rollback()
-	result, err := tx.Exec("UPDATE owner SET password_hash=?,salt=? WHERE id=1", h, s)
-	if err != nil {
-		return fmt.Errorf("replace owner credential: %w", err)
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("replace owner credential: %w", err)
-	}
-	if updated != 1 {
-		return fmt.Errorf("replace owner credential: %w", ErrRecovery)
-	}
-	if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject='owner' AND revoked=0"); err != nil {
-		return fmt.Errorf("revoke owner sessions: %w", err)
-	}
-	if _, err := tx.Exec("INSERT INTO audit_events(action,recorded_at) VALUES('owner_recovered',?)", time.Now().Unix()); err != nil {
-		return fmt.Errorf("audit owner recovery: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit owner recovery: %w", err)
-	}
-	m.mu.Lock()
-	m.ownerHash, m.salt = h, s
-	m.ownerAttempts, m.ownerLockedUntil = 0, time.Time{}
-	m.mu.Unlock()
-	return nil
-}
 func tokenHash(token string) []byte { s := sha256.Sum256([]byte(token)); return s[:] }
 func (m *Manager) issue(subject string) (string, error) {
 	m.mu.Lock()
@@ -275,6 +227,73 @@ func (m *Manager) Logout(session string) error {
 		_, err := m.db.Exec("UPDATE sessions SET revoked=1 WHERE token_hash=?", tokenHash(session))
 		return err
 	}
+	return nil
+}
+func (m *Manager) ActiveSessions() ([]Session, error) {
+	if m.db == nil {
+		return nil, nil
+	}
+	rows, err := m.db.Query("SELECT token_hash,subject,expires_at FROM sessions WHERE revoked=0 AND expires_at>? ORDER BY expires_at DESC", time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		var hash []byte
+		var s Session
+		if err := rows.Scan(&hash, &s.Subject, &s.ExpiresAt); err != nil {
+			return nil, err
+		}
+		s.ID = base64.RawURLEncoding.EncodeToString(hash)
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+func (m *Manager) RevokeSession(id string) error {
+	hash, err := base64.RawURLEncoding.DecodeString(id)
+	if err != nil || len(hash) != sha256.Size {
+		return ErrSessionNotFound
+	}
+	if m.db == nil {
+		return ErrSessionNotFound
+	}
+	result, err := m.db.Exec("UPDATE sessions SET revoked=1 WHERE token_hash=? AND revoked=0", hash)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+func (m *Manager) DeleteProfile(id string) error {
+	m.mu.Lock()
+	_, ok := m.profiles[id]
+	m.mu.Unlock()
+	if !ok {
+		return ErrProfileNotFound
+	}
+	if m.db != nil {
+		tx, err := m.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", id); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	delete(m.profiles, id)
+	m.mu.Unlock()
 	return nil
 }
 func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
@@ -340,7 +359,12 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 		p.Protected = true
 	}
 	if m.db != nil {
-		result, err := m.db.Exec("UPDATE profiles SET name=?,pin_hash=?,salt=? WHERE id=?", p.Name, p.hash, p.salt, id)
+		tx, err := m.db.Begin()
+		if err != nil {
+			return Profile{}, err
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec("UPDATE profiles SET name=?,pin_hash=?,salt=? WHERE id=?", p.Name, p.hash, p.salt, id)
 		if err != nil {
 			return Profile{}, err
 		}
@@ -350,6 +374,14 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 		}
 		if updated == 0 {
 			return Profile{}, ErrProfileNotFound
+		}
+		if pin != "" || unprotect {
+			if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
+				return Profile{}, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return Profile{}, err
 		}
 	}
 	m.mu.Lock()
