@@ -26,7 +26,7 @@ WORKDIR /work
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 RUN npm --prefix frontend ci --ignore-scripts
 COPY frontend/scripts/measure-artwork-local.mjs ./frontend/scripts/measure-artwork-local.mjs
-COPY scripts/measure-artwork-acceptance.sh scripts/generate-artwork-measurement-demo.mjs ./scripts/
+COPY scripts/measure-artwork-acceptance.sh scripts/generate-artwork-measurement-demo.mjs scripts/run-artwork-measurement-container.sh ./scripts/
 COPY ["backend/testdata/media/corpus/Long Duration Seek 2026.mkv", "./fixture/Long Duration Seek 2026.mkv"]
 COPY --from=backend-build /out/flixr /usr/local/bin/flixr
 ARG SOURCE_SHA=unknown
