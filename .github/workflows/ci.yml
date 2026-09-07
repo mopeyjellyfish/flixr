@@ -61,8 +61,14 @@ jobs:
       - name: Scan runtime packages
         run: |
           docker save flixr:ci -o "$RUNNER_TEMP/flixr-image.tar"
-          docker run --rm --mount "type=bind,source=$RUNNER_TEMP/flixr-image.tar,target=/image.tar,readonly" \
-            aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+          trivy_image=aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          for attempt in 1 2 3; do
+            docker pull "$trivy_image" && break
+            test "$attempt" = 3 && exit 1
+            sleep "$attempt"
+          done
+          docker run --pull=never --rm --mount "type=bind,source=$RUNNER_TEMP/flixr-image.tar,target=/image.tar,readonly" \
+            "$trivy_image" \
             image --input /image.tar --scanners vuln --severity HIGH,CRITICAL --exit-code 1
 
   browser:
