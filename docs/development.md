@@ -139,6 +139,19 @@ owner state after restart. The command removes only its own temporary containers
 network, image, and data volume. Screenshots and traces go to
 `output/playwright/offline/`.
 
+### Artwork cache maintenance
+
+Downloaded originals live under the persistent data directory and are never removed
+by artwork maintenance. Requests from catalog cards include a bounded display width;
+the server keeps JPEG derivatives separately, deduplicates identical concurrent
+requests, and limits resize work to two jobs. Failed, unsupported, or pressured
+derivative creation serves the original cached image instead. Derivatives are
+atomic temporary-file writes, expire after seven days when the cache has more than
+64 files, and are evicted oldest-first above 128 MiB; stale temporary files are
+removed on the next derivative write. This does not touch SQLite, settings,
+history, media roots, or playback segments. SQLite remains WAL-backed; use normal
+backups and do not run a blocking `VACUUM` while playback is active.
+
 If port 4173 is already occupied, use `FLIXR_TEST_PORT=4180 npm --prefix frontend
 run test:e2e -- --project=chromium`. Tests refuse to reuse an unrelated server.
 
@@ -162,4 +175,3 @@ poster scaling without hiding failures behind screenshot-only assertions.
 - `frontend/` — React, TypeScript, Vite, Tailwind CSS, unit tests, and Playwright tests.
 - `docs/features/flixr-core/` — accepted pitch, delivery plan, and validation evidence.
 - `DESIGN.md` — accepted Cobalt Signal interface direction.
-

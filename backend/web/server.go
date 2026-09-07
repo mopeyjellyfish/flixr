@@ -415,7 +415,8 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return
 	}
-	data, contentType, err := s.catalog.Artwork(r.PathValue("id"), r.PathValue("kind"))
+	width, _ := strconv.Atoi(r.URL.Query().Get("w"))
+	data, contentType, err := s.catalog.ArtworkSized(r.PathValue("id"), r.PathValue("kind"), width)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_artwork_not_found")
 		return
