@@ -51,10 +51,10 @@ func (c *Catalog) MetadataFields(kind, id string) ([]MetadataField, error) {
 }
 
 func (c *Catalog) EditMetadata(kind, id string, edit MetadataEdit) (Item, error) {
-	return c.editMetadata(context.Background(), kind, id, edit, false)
+	return c.editMetadata(context.Background(), kind, id, edit, false, nil)
 }
 
-func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit MetadataEdit, providerWrite bool) (Item, error) {
+func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit MetadataEdit, providerWrite bool, expected *Item) (Item, error) {
 	if len(edit.Fields) == 0 {
 		return Item{}, errors.New("metadata fields are required")
 	}
@@ -72,6 +72,9 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 	item, ok := c.metadataTarget(kind, id)
 	if !ok {
 		return Item{}, ErrMetadataNotFound
+	}
+	if expected != nil && (item.ProviderID != expected.ProviderID || item.Language != expected.Language || item.Region != expected.Region || item.OwnerMatch != expected.OwnerMatch || item.OwnerUnmatch != expected.OwnerUnmatch) {
+		return Item{}, ErrMetadataStale
 	}
 	if c.db == nil {
 		return Item{}, errors.New("metadata persistence unavailable")
@@ -194,37 +197,37 @@ func (c *Catalog) applyLockedFields(kind, id string, item *Item) {
 }
 
 func (c *Catalog) RefreshPreview(ctx context.Context, kind, id string) ([]MetadataField, error) {
-	edit, _, err := c.refreshEdit(ctx, kind, id)
+	edit, _, _, err := c.refreshEdit(ctx, kind, id)
 	if err != nil {
 		return nil, err
 	}
 	return c.PreviewMetadata(kind, id, edit)
 }
 
-func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdit, map[string]Artwork, error) {
+func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdit, map[string]Artwork, Item, error) {
 	c.mu.RLock()
 	item, ok := c.metadataTarget(kind, id)
 	provider, token := c.provider, c.token
 	c.mu.RUnlock()
 	if !ok {
-		return MetadataEdit{}, nil, ErrMetadataNotFound
+		return MetadataEdit{}, nil, Item{}, ErrMetadataNotFound
 	}
 	p, ok := provider.(CandidateProvider)
 	if !ok || token == "" || item.ProviderID == "" {
-		return MetadataEdit{}, nil, ErrProviderUnavailable
+		return MetadataEdit{}, nil, Item{}, ErrProviderUnavailable
 	}
 	enrichment, err := p.ByID(ctx, token, kind, item.ProviderID, item.Language, item.Region)
 	if err != nil {
-		return MetadataEdit{}, nil, fmt.Errorf("refresh metadata: %w", err)
+		return MetadataEdit{}, nil, Item{}, fmt.Errorf("refresh metadata: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return MetadataEdit{}, nil, err
+		return MetadataEdit{}, nil, Item{}, err
 	}
 	artwork := c.stageMatchArtwork(ctx, enrichment)
 	if err := ctx.Err(); err != nil {
-		return MetadataEdit{}, nil, err
+		return MetadataEdit{}, nil, Item{}, err
 	}
-	return refreshEdit(id, enrichment, artwork), artwork, nil
+	return refreshEdit(id, enrichment, artwork), artwork, item, nil
 }
 
 func refreshEdit(id string, enrichment Enrichment, artwork map[string]Artwork) MetadataEdit {
@@ -241,7 +244,7 @@ func refreshEdit(id string, enrichment Enrichment, artwork map[string]Artwork) M
 }
 
 func (c *Catalog) Refresh(ctx context.Context, kind, id string) (Item, error) {
-	edit, artwork, err := c.refreshEdit(ctx, kind, id)
+	edit, artwork, expected, err := c.refreshEdit(ctx, kind, id)
 	if err != nil {
 		return Item{}, err
 	}
@@ -252,15 +255,17 @@ func (c *Catalog) Refresh(ctx context.Context, kind, id string) (Item, error) {
 	if err != nil {
 		return Item{}, err
 	}
-	updated, err := c.editMetadata(ctx, kind, id, MetadataEdit{Fields: fields}, true)
+	if err := c.cacheRefreshArtwork(kind, id, fields, artwork, expected); err != nil {
+		return Item{}, err
+	}
+	updated, err := c.editMetadata(ctx, kind, id, MetadataEdit{Fields: fields}, true, &expected)
 	if err != nil {
 		return Item{}, err
 	}
-	c.publishRefreshArtwork(kind, id, fields, artwork)
 	return c.metadataResult(kind, id, updated), nil
 }
 
-func (c *Catalog) publishRefreshArtwork(kind, id string, preview []MetadataField, artwork map[string]Artwork) {
+func (c *Catalog) cacheRefreshArtwork(kind, id string, preview []MetadataField, artwork map[string]Artwork, expected Item) error {
 	allowed := map[string]bool{}
 	for _, field := range preview {
 		if field.Source == "provider" && (field.Field == "poster" || field.Field == "backdrop") {
@@ -268,44 +273,28 @@ func (c *Catalog) publishRefreshArtwork(kind, id string, preview []MetadataField
 		}
 	}
 	if len(allowed) == 0 {
-		return
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	item, ok := c.metadataTarget(kind, id)
+	if !ok {
+		return ErrMetadataNotFound
+	}
+	if item.ProviderID != expected.ProviderID || item.Language != expected.Language || item.Region != expected.Region || item.OwnerMatch != expected.OwnerMatch || item.OwnerUnmatch != expected.OwnerUnmatch {
+		return ErrMetadataStale
 	}
 	for imageKind, art := range artwork {
 		if !allowed[imageKind] {
 			continue
 		}
-		c.publishRefreshArtworkField(kind, id, imageKind, art)
+		var locked int
+		if c.db == nil || c.db.QueryRow(`SELECT locked FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field=?`, kind, id, imageKind).Scan(&locked) == nil && locked != 0 {
+			continue
+		}
+		if _, err := c.cacheArtwork(id, imageKind, art); err != nil {
+			return err
+		}
 	}
-}
-
-func (c *Catalog) publishRefreshArtworkField(kind, id, imageKind string, art Artwork) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.metadataTarget(kind, id)
-	if !ok {
-		return
-	}
-	var locked int
-	if c.db == nil || c.db.QueryRow(`SELECT locked FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field=?`, kind, id, imageKind).Scan(&locked) == nil && locked != 0 {
-		return
-	}
-	url, err := c.cacheArtwork(id, imageKind, art)
-	if err != nil || url == "" {
-		return
-	}
-	if imageKind == "poster" {
-		item.Poster = url
-	} else {
-		item.Backdrop = url
-	}
-	if c.updateArtworkReferences(kind, item) != nil {
-		return
-	}
-	if kind == "film" {
-		c.items[id] = item
-	} else {
-		series := c.series[id]
-		series.Poster, series.Backdrop = item.Poster, item.Backdrop
-		c.series[id] = series
-	}
+	return nil
 }

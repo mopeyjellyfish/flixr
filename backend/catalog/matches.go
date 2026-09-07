@@ -11,6 +11,7 @@ var (
 	ErrMetadataNotFound    = errors.New("catalog metadata target not found")
 	ErrProviderUnavailable = errors.New("metadata provider is unavailable")
 	ErrMetadataBusy        = errors.New("metadata repair is unavailable during a scan")
+	ErrMetadataStale       = errors.New("metadata changed while refresh was in progress")
 )
 
 // Candidate is a provider result an owner may explicitly attach to local media.

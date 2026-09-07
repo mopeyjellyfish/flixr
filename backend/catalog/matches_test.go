@@ -15,6 +15,8 @@ type ownerMatchProvider struct {
 	outage     bool
 	poster     string
 	enrichment catalog.Enrichment
+	started    chan<- struct{}
+	gate       <-chan struct{}
 }
 
 func (p ownerMatchProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
@@ -27,6 +29,12 @@ func (p ownerMatchProvider) Candidates(context.Context, string, string, string, 
 	return []catalog.Candidate{{Provider: "tmdb", ID: "42", Title: "The Right Film", Year: 2024, Confidence: 1}}, nil
 }
 func (p ownerMatchProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	if p.started != nil {
+		p.started <- struct{}{}
+	}
+	if p.gate != nil {
+		<-p.gate
+	}
 	if p.outage {
 		return catalog.Enrichment{}, errors.New("offline")
 	}

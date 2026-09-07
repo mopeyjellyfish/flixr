@@ -145,6 +145,10 @@ func (s *Server) metadataError(w http.ResponseWriter, err error) {
 		fail(w, http.StatusConflict, "metadata_busy")
 		return
 	}
+	if errors.Is(err, catalog.ErrMetadataStale) {
+		fail(w, http.StatusConflict, "metadata_busy")
+		return
+	}
 	// Provider failures leave the local title untouched; the owner can retry from the queue.
 	fail(w, http.StatusServiceUnavailable, "metadata_unavailable")
 }

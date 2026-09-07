@@ -163,6 +163,36 @@ func TestMetadataPersistenceFailureDoesNotChangeMemory(t *testing.T) {
 	}
 }
 
+func TestRefreshDoesNotOverwriteNewerOwnerMatch(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	c.SetProvider(ownerMatchProvider{})
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	item := c.MetadataTargets()[0]
+	if _, err := c.Match(context.Background(), "film", item.ID, "42", "en", "GB"); err != nil {
+		t.Fatal(err)
+	}
+	started, gate := make(chan struct{}, 1), make(chan struct{})
+	c.SetProvider(ownerMatchProvider{started: started, gate: gate, enrichment: catalog.Enrichment{ProviderID: "42", Title: "stale", Year: 2025}})
+	result := make(chan error, 1)
+	go func() { _, err := c.Refresh(context.Background(), "film", item.ID); result <- err }()
+	<-started
+	if _, err := c.Unmatch("film", item.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	if err := <-result; !errors.Is(err, catalog.ErrMetadataStale) {
+		t.Fatalf("stale refresh = %v", err)
+	}
+	if got := c.MetadataTargets()[0]; got.ProviderID != "" || !got.OwnerUnmatch {
+		t.Fatalf("stale refresh overwrote owner choice: %#v", got)
+	}
+}
+
 func fieldValue(fields []catalog.MetadataField, name string) string {
 	for _, field := range fields {
 		if field.Field == name {
