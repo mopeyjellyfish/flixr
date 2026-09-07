@@ -3,8 +3,36 @@ package household
 import (
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 	"github.com/stretchr/testify/require"
+	"sync"
 	"testing"
 )
+
+func TestOldPINCannotCompleteAfterRotation(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	m, err := Open(db)
+	require.NoError(t, err)
+	p, err := m.CreateProfile("Ada", "old")
+	require.NoError(t, err)
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	m.deriveFn = func(secret string, salt []byte) ([]byte, error) {
+		if secret == "old" {
+			once.Do(func() { close(started); <-release })
+		}
+		return hash(secret, salt), nil
+	}
+	result := make(chan error, 1)
+	go func() { _, err := m.Select(p.ID, "old"); result <- err }()
+	<-started
+	_, err = m.UpdateProfile(p.ID, "", "new", false)
+	require.NoError(t, err)
+	close(release)
+	require.ErrorIs(t, <-result, ErrPIN)
+	_, err = m.Select(p.ID, "new")
+	require.NoError(t, err)
+}
 
 func TestDeleteProfileRevokesSessionAndCascadesProgress(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
@@ -85,4 +113,32 @@ func TestDeleteProfileFailureKeepsProfileAndSession(t *testing.T) {
 	if _, ok := m.Profile(token); !ok {
 		t.Fatal("failed deletion revoked session")
 	}
+}
+
+func TestDeletedProfileStaysGoneAfterRestartWithoutAffectingAnotherHistory(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(dir)
+	require.NoError(t, err)
+	m, err := Open(db)
+	require.NoError(t, err)
+	one, _ := m.CreateProfile("One", "")
+	two, _ := m.CreateProfile("Two", "")
+	_, err = db.Exec("INSERT INTO catalog_items(id,kind,title,relative_path) VALUES('film','film','Film','film.mp4')")
+	require.NoError(t, err)
+	require.NoError(t, m.ProgressForProfile(two.ID, "film", 42))
+	require.NoError(t, m.DeleteProfile(one.ID))
+	require.NoError(t, db.Close())
+	db, err = sqlite.Open(dir)
+	require.NoError(t, err)
+	defer db.Close()
+	m, err = Open(db)
+	require.NoError(t, err)
+	if len(m.Profiles()) != 1 || m.Profiles()[0].ID != two.ID {
+		t.Fatal("profile deletion did not persist")
+	}
+	token, err := m.Select(two.ID, "")
+	require.NoError(t, err)
+	position, err := m.Position(token, "film")
+	require.NoError(t, err)
+	require.EqualValues(t, 42, position)
 }

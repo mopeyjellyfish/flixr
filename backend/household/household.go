@@ -52,6 +52,7 @@ type Manager struct {
 	sessions         map[string]string
 	// hashGate bounds memory-hard Argon2 work and rejects excess requests instead of queuing them.
 	hashGate chan struct{}
+	deriveFn func(string, []byte) ([]byte, error)
 }
 type profile struct {
 	Profile
@@ -114,6 +115,9 @@ func hash(secret string, salt []byte) []byte {
 	return argon2.IDKey([]byte(secret), salt, 2, 64*1024, 2, 32)
 }
 func (m *Manager) derive(secret string, salt []byte) ([]byte, error) {
+	if m.deriveFn != nil {
+		return m.deriveFn(secret, salt)
+	}
 	select {
 	case m.hashGate <- struct{}{}:
 		defer func() { <-m.hashGate }()
