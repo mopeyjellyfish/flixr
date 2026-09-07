@@ -109,6 +109,32 @@ func (s *Server) metadataEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, http.StatusOK, item)
 }
+func (s *Server) metadataRefreshPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	fields, err := s.catalog.RefreshPreview(ctx, r.PathValue("kind"), r.PathValue("id"))
+	if err != nil {
+		s.metadataError(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"fields": fields})
+}
+func (s *Server) metadataRefresh(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	item, err := s.catalog.Refresh(ctx, r.PathValue("kind"), r.PathValue("id"))
+	if err != nil {
+		s.metadataError(w, err)
+		return
+	}
+	write(w, http.StatusOK, item)
+}
 
 func (s *Server) metadataError(w http.ResponseWriter, err error) {
 	if errors.Is(err, catalog.ErrMetadataNotFound) {

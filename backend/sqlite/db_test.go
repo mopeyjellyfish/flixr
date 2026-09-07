@@ -57,3 +57,28 @@ func TestConnectionPolicyAppliesToEveryPoolConnectionAndSurvivesReopen(t *testin
 		t.Fatal(err)
 	}
 }
+
+func TestExistingDatabaseReceivesCatalogMetadataFieldsMigration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DROP TABLE catalog_metadata_fields"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DELETE FROM schema_migrations WHERE version=12"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("INSERT INTO catalog_metadata_fields(catalog_kind,catalog_id,field,value,source,locked) VALUES('film','f','tags','family','local',1)"); err != nil {
+		t.Fatalf("migrated metadata table: %v", err)
+	}
+}

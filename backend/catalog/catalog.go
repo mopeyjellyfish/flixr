@@ -751,6 +751,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 			item.LocalOnly = false
 			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
+				c.applyLockedFields("film", previous.ID, &item)
+			}
 			next[id] = item
 		}
 	}
@@ -790,6 +793,11 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				value.LocalOnly = false
 				value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
 			}
+		}
+		if previous, ok := previousSeries[id]; ok {
+			item := Item{ID: value.ID, Title: value.Title, Synopsis: value.Synopsis, Year: value.Year, Poster: value.Poster, Backdrop: value.Backdrop}
+			c.applyLockedFields("series", previous.ID, &item)
+			value.Title, value.Synopsis, value.Year, value.Poster, value.Backdrop = item.Title, item.Synopsis, item.Year, item.Poster, item.Backdrop
 		}
 		series[id] = value
 	}
@@ -845,6 +853,15 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 		for _, x := range next {
 			if x.SeriesID != "" {
 				series[x.SeriesID] = seriesTitle(x.path, x.Title)
+			}
+		}
+		for _, x := range next {
+			for _, old := range previous {
+				if old.ID != x.ID && old.rootKind == x.rootKind && old.path == x.path {
+					if _, err = tx.Exec(`UPDATE catalog_metadata_fields SET catalog_id=? WHERE catalog_kind='film' AND catalog_id=?`, x.ID, old.ID); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		for seriesID, seriesTitle := range series {

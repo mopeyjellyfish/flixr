@@ -36,6 +36,7 @@ type Artwork struct {
 }
 type Enrichment struct {
 	ProviderID                 string
+	Title                      string
 	Year                       int
 	Synopsis, Poster, Backdrop string
 }
@@ -136,7 +137,11 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 		if match.ProviderID != "" {
 			return Enrichment{}, nil
 		}
-		match = Enrichment{ProviderID: fmt.Sprint(x.ID), Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}
+		name := x.Title
+		if kind == "series" {
+			name = x.Name
+		}
+		match = Enrichment{ProviderID: fmt.Sprint(x.ID), Title: name, Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}
 	}
 	return match, nil
 }
@@ -210,6 +215,8 @@ func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, regi
 	}
 	var x struct {
 		ID           int    `json:"id"`
+		Title        string `json:"title"`
+		Name         string `json:"name"`
 		Overview     string `json:"overview"`
 		ReleaseDate  string `json:"release_date"`
 		FirstAirDate string `json:"first_air_date"`
@@ -230,7 +237,11 @@ func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, regi
 	if len(date) >= 4 {
 		year, _ = strconv.Atoi(date[:4])
 	}
-	return Enrichment{ProviderID: fmt.Sprint(x.ID), Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}, nil
+	name := x.Title
+	if kind == "series" {
+		name = x.Name
+	}
+	return Enrichment{ProviderID: fmt.Sprint(x.ID), Title: name, Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}, nil
 }
 
 type tmdbSearch struct {
