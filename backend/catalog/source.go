@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -12,18 +13,18 @@ func (x Item) SourceKey() string {
 }
 
 func (c *Catalog) loadSourceProof() error {
-	rows, err := c.db.Query(`SELECT i.id,f.full_digest,f.change_token FROM catalog_items i JOIN catalog_physical_files f ON f.id=i.primary_file_id`)
+	rows, err := c.db.Query(`SELECT i.id,f.full_digest,f.change_token,f.source_series_id FROM catalog_items i JOIN catalog_physical_files f ON f.id=i.primary_file_id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, digest, token string
-		if err := rows.Scan(&id, &digest, &token); err != nil {
+		var id, digest, token, sourceSeries string
+		if err := rows.Scan(&id, &digest, &token, &sourceSeries); err != nil {
 			return err
 		}
 		x := c.items[id]
-		x.digest, x.changeToken = digest, token
+		x.digest, x.changeToken, x.sourceSeriesID = digest, token, sourceSeries
 		c.items[id] = x
 	}
 	return rows.Err()
@@ -76,7 +77,107 @@ func (c *Catalog) playbackSource(id string) (Item, bool) {
 	if err == nil {
 		source := c.items[sourceID]
 		x.path, x.rootKind, x.digest, x.changeToken, x.size, x.mtime, x.probeRevision = source.path, source.rootKind, source.digest, source.changeToken, source.size, source.mtime, source.probeRevision
+		x.fingerprint = source.fingerprint
 		x.MediaProperties = source.MediaProperties
 	}
 	return x, ok
+}
+
+// Legacy rows have no durable full digest yet. Establish proof only for the
+// still-unchanged, confined file before admitting its first playback. This avoids
+// forcing a library-wide rescan after upgrade and never grants a wildcard lease.
+func (c *Catalog) hydrateLegacySource(ctx context.Context, id string) error {
+	c.mu.RLock()
+	x, ok := c.playbackSource(id)
+	root := c.film
+	if x.rootKind == "episode" {
+		root = c.tv
+	}
+	x.sourceRoot = root
+	c.mu.RUnlock()
+	if !ok || !x.Playable || x.probeRevision == 0 || x.digest != "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	confined, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer confined.Close()
+	file, err := confined.Open(x.path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() != x.size || info.ModTime().UnixNano() != x.mtime {
+		return ErrNotPlayable
+	}
+	fingerprint, err := contentFingerprint(file)
+	if err != nil {
+		return err
+	}
+	if fingerprint != x.fingerprint {
+		return ErrNotPlayable
+	}
+	digest, err := digestFile(ctx, file)
+	if err != nil {
+		return err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	token := fileChangeToken(after)
+	if after.Size() != info.Size() || after.ModTime() != info.ModTime() || token != fileChangeToken(info) {
+		return ErrNotPlayable
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.scanning {
+		return ErrMetadataBusy
+	}
+	current, ok := c.playbackSource(id)
+	current.sourceRoot = c.film
+	if current.rootKind == "episode" {
+		current.sourceRoot = c.tv
+	}
+	if !ok {
+		return ErrNotPlayable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if current.SourceKey() != x.SourceKey() {
+		proven := x
+		proven.digest, proven.changeToken = digest, token
+		if current.SourceKey() == proven.SourceKey() {
+			return nil
+		}
+		return ErrNotPlayable
+	}
+	tx, err := c.db.Writer().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var physicalID, sourceID string
+	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE root_kind=? AND relative_path=? AND present=1`, x.rootKind, x.path).Scan(&physicalID, &sourceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET full_digest=?,change_token=? WHERE id=?`, digest, token, physicalID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	source := c.items[sourceID]
+	source.digest, source.changeToken = digest, token
+	c.items[sourceID] = source
+	return nil
 }

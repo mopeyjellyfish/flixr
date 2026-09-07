@@ -144,6 +144,7 @@ type Item struct {
 	digest          string
 	changeToken     string
 	sourceRoot      string
+	sourceSeriesID  string
 	fingerprint     string
 	size            int64
 	mtime           int64
@@ -764,6 +765,7 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, AddedAt: time.Now().Unix(), Playable: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, digest: digest, changeToken: f.changeToken, size: f.size, mtime: f.mtime, probeRevision: mediaProbeRevision}
 	episodeFields(&x)
 	seriesFields(&x)
+	x.sourceSeriesID = x.SeriesID
 	return x, nil
 }
 
@@ -1028,7 +1030,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			}
 			selected := logical.Playable && logical.rootKind == source.rootKind && logical.path == source.path
 			physicalID := id("physical", source.rootKind+"\x00"+source.path+"\x00"+source.digest+"\x00"+source.changeToken)
-			if _, err = tx.Exec(`INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,full_digest,change_token,last_seen,present,selected) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET catalog_id=excluded.catalog_id,fingerprint=excluded.fingerprint,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,full_digest=excluded.full_digest,change_token=excluded.change_token,last_seen=excluded.last_seen,present=1,selected=excluded.selected`, physicalID, source.ID, source.rootKind, source.path, source.fingerprint, source.size, source.mtime, source.digest, source.changeToken, time.Now().UnixNano(), 1, boolInt(selected)); err != nil {
+			if _, err = tx.Exec(`INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,full_digest,change_token,source_series_id,last_seen,present,selected) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET catalog_id=excluded.catalog_id,fingerprint=excluded.fingerprint,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,full_digest=excluded.full_digest,change_token=excluded.change_token,source_series_id=excluded.source_series_id,last_seen=excluded.last_seen,present=1,selected=excluded.selected`, physicalID, source.ID, source.rootKind, source.path, source.fingerprint, source.size, source.mtime, source.digest, source.changeToken, source.sourceSeriesID, time.Now().UnixNano(), 1, boolInt(selected)); err != nil {
 				return err
 			}
 			if selected {
@@ -1079,6 +1081,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 	c.mu.Lock()
 	c.items = next
 	c.series = seriesState
+	c.refreshSeriesAvailability()
 	if c.db != nil {
 		rows, err := c.db.Query("SELECT id,series_id,playable FROM catalog_items")
 		if err == nil {

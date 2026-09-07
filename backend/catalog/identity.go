@@ -56,15 +56,15 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 	if c.db == nil {
 		return nil, nil
 	}
-	rows, err := c.db.Query(`SELECT catalog_id,root_kind,relative_path,fingerprint,full_digest,change_token,size_bytes,mtime_unix FROM catalog_physical_files ORDER BY present,last_seen,id`)
+	rows, err := c.db.Query(`SELECT catalog_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix FROM catalog_physical_files ORDER BY present,last_seen,id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var catalogID, root, path, fp, digest, token string
+		var catalogID, root, path, fp, digest, token, sourceSeries string
 		var size, mtime int64
-		if err := rows.Scan(&catalogID, &root, &path, &fp, &digest, &token, &size, &mtime); err != nil {
+		if err := rows.Scan(&catalogID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime); err != nil {
 			return nil, err
 		}
 		c.mu.RLock()
@@ -74,6 +74,7 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 			continue
 		}
 		item.path, item.rootKind, item.fingerprint, item.digest, item.changeToken, item.size, item.mtime = path, root, fp, digest, token, size, mtime
+		item.sourceSeriesID = sourceSeries
 		previous[scanKey{root, path}] = item
 		proof = append(proof, item)
 	}
@@ -84,7 +85,7 @@ func contradictoryIdentity(old, next Item) bool {
 	if old.Kind != next.Kind {
 		return true
 	}
-	if old.Kind == "episode" && (old.Season != next.Season || old.Episode != next.Episode || old.SeriesID != next.SeriesID) {
+	if old.Kind == "episode" && (old.Season != next.Season || old.Episode != next.Episode || old.sourceSeriesID != next.sourceSeriesID) {
 		return true
 	}
 	a, b := providerIdentity(old.Provider, old.Kind, old.ProviderID), providerIdentity(next.Provider, next.Kind, next.ProviderID)
@@ -127,7 +128,7 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 			}
 		}
 		if samePath && !contradictoryIdentity(old, item) {
-			item.ID, item.AddedAt = old.ID, old.AddedAt
+			item.ID, item.AddedAt, item.SeriesID = old.ID, old.AddedAt, old.SeriesID
 			// An unavailable primary becomes playable again after successful inspection.
 			item.Playable = true
 		} else {
@@ -162,7 +163,7 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 				// A proven move can rename the containing series directory. A
 				// second present source or an existing different series stays isolated.
 				if item.Kind == "episode" && !discovered[scanKey{candidate.rootKind, candidate.path}] && !knownSeries[item.SeriesID] {
-					evidence.SeriesID = candidate.SeriesID
+					evidence.sourceSeriesID = candidate.sourceSeriesID
 				}
 				if candidate.digest != "" && candidate.digest == item.digest && !contradictoryIdentity(candidate, evidence) {
 					proven = append(proven, candidate)

@@ -239,9 +239,12 @@ Personal ratings are profile-scoped local records. They are never provider metad
 Catalog IDs identify logical titles. Migration 019 preserves existing IDs and
 adds private physical-source records, including a full SHA-256 digest. First
 indexing and changed bytes require a full read; unchanged files reuse persisted
-proof and probe results. macOS and Linux also compare file identity and change
-time to detect equal-size replacements that preserve modification time. Other
-platforms use size and modification time for cache validation.
+proof and probe results. An unchanged pre-019 source receives its full digest on
+first playback admission, without requiring a library-wide rescan; cancellation
+or changed file evidence prevents admission. macOS and Linux also compare file
+identity and change time to detect equal-size replacements that preserve
+modification time. Other platforms use size and modification time for cache
+validation.
 
 Renames and moves retain an unambiguous title only with matching full-content
 proof. Sampled fingerprints and provider IDs alone never merge titles. A legacy

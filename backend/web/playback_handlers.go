@@ -53,7 +53,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.catalog.PlaybackItem(body.CatalogID)
+	item, err := s.catalog.PlaybackItemContext(r.Context(), body.CatalogID)
 	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (item.Kind != "film" && item.Kind != "episode")) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return

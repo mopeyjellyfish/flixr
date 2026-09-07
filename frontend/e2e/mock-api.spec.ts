@@ -153,6 +153,7 @@ for (const viewport of viewports) {
       ] } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
       if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [{ ...film, provider_id: '42' }] } };
+      if (path.endsWith('/owner/identity/repairs') && method === 'GET') return { json: { conflicts: [], merges: [] } };
       if (path.endsWith('/metadata/film/film-1/fields') && method === 'GET') return { json: { fields: [{ field: 'tags', value: 'family', source: 'local', locked: true }] } };
       if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };

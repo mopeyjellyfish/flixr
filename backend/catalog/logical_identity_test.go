@@ -628,6 +628,12 @@ func TestIdentityHistoryMappingIsImmutableAndReversible(t *testing.T) {
 }
 
 func TestMergeIntoUnavailableAnchorUsesSourceUntilUnmerge(t *testing.T) {
+	t.Run("modern", func(t *testing.T) { testMergeIntoUnavailableAnchorUsesSourceUntilUnmerge(t, false) })
+	t.Run("legacy", func(t *testing.T) { testMergeIntoUnavailableAnchorUsesSourceUntilUnmerge(t, true) })
+}
+
+func testMergeIntoUnavailableAnchorUsesSourceUntilUnmerge(t *testing.T, legacy bool) {
+	t.Helper()
 	films, data := t.TempDir(), t.TempDir()
 	for name, content := range map[string]string{"A.mp4": "first", "B.mp4": "second"} {
 		if err := os.WriteFile(filepath.Join(films, name), []byte(content), 0600); err != nil {
@@ -651,6 +657,18 @@ func TestMergeIntoUnavailableAnchorUsesSourceUntilUnmerge(t *testing.T) {
 	}
 	if err := c.Scan(t.Context(), 1); err != nil {
 		t.Fatal(err)
+	}
+	if legacy {
+		if _, err := db.Exec("UPDATE catalog_physical_files SET full_digest='',change_token=''"); err != nil {
+			t.Fatal(err)
+		}
+		c, err = catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+			t.Fatal("legacy source admission reprobed media")
+			return catalog.MediaProperties{}, nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	merge, err := c.MergeIdentity("film", items[0].ID, items[1].ID)
 	if err != nil {
@@ -1100,5 +1118,195 @@ func TestMissingReplacementUsesLastObservedAnchorNotNewestFileMtime(t *testing.T
 	var restored string
 	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE present=1").Scan(&restored); err != nil || restored != replacementID {
 		t.Fatalf("reappearance chose historical mtime anchor %s instead of %s: %v", restored, replacementID, err)
+	}
+}
+
+func TestMissingSeriesIsUnavailableWithoutLosingItsIdentity(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	dir := filepath.Join(tv, "Show")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "S01E01.mp4")
+	if err := os.WriteFile(path, []byte("episode"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots("", tv); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	before := c.MetadataTargets()[0]
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	series, ok := c.Series(before.ID)
+	if !ok || series.Playable || len(series.Seasons) != 1 {
+		t.Fatalf("missing series %#v exists=%v", series, ok)
+	}
+}
+
+func TestIdentitySeriesUnmergeNewEpisode(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	for _, name := range []string{"First Show", "Second Show"} {
+		if err := os.Mkdir(filepath.Join(tv, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tv, name, "S01E01.mp4"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots("", tv); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var survivor, source, sourcePath string
+	rows, err := db.Query("SELECT id,relative_path,series_id FROM catalog_items ORDER BY relative_path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id, path, series string
+		if err := rows.Scan(&id, &path, &series); err != nil {
+			t.Fatal(err)
+		}
+		if survivor == "" {
+			survivor = series
+		} else {
+			source = series
+			sourcePath = filepath.Dir(path)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	merge, err := c.MergeIdentity("series", survivor, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tv, sourcePath, "S01E02.mp4"), []byte("new episode source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UnmergeIdentity(merge.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow("SELECT series_id FROM catalog_items WHERE relative_path=?", filepath.ToSlash(filepath.Join(sourcePath, "S01E02.mp4"))).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != source {
+		t.Fatalf("new source episode remains assigned to survivor %s, want original source %s", got, source)
+	}
+}
+func TestIdentitySeriesMergeSafeEpisodeReplacement(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	for _, name := range []string{"First Show", "Second Show"} {
+		if err := os.Mkdir(filepath.Join(tv, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tv, name, "S01E01.mp4"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots("", tv); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var survivor, source, sourcePath, sourceEpisode string
+	rows, err := db.Query("SELECT id,relative_path,series_id FROM catalog_items ORDER BY relative_path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id, path, series string
+		if err := rows.Scan(&id, &path, &series); err != nil {
+			t.Fatal(err)
+		}
+		if survivor == "" {
+			survivor = series
+		} else {
+			source = series
+			sourcePath = path
+			sourceEpisode = id
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if _, err := c.MergeIdentity("series", survivor, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tv, sourcePath), []byte("replacement of same episode"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE relative_path=? AND present=1", sourcePath).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != sourceEpisode {
+		t.Fatalf("safe replacement creates new anchor %s, want %s", got, sourceEpisode)
+	}
+}
+
+func TestIdentityRenamedSeriesSafeReplacement(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(tv, "Original Show"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tv, "Original Show", "S01E01.mp4"), []byte("episode original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots("", tv); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var original string
+	if err := db.QueryRow("SELECT id FROM catalog_items").Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(tv, "Original Show"), filepath.Join(tv, "Renamed Show")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tv, "Renamed Show", "S01E01.mp4"), []byte("replacement episode"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE present=1").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != original {
+		t.Fatalf("replacement after directory rename creates anchor %s, want %s", got, original)
 	}
 }

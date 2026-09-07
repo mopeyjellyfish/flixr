@@ -11,6 +11,7 @@ CREATE TABLE catalog_physical_files (
  fingerprint TEXT NOT NULL,
  full_digest TEXT NOT NULL DEFAULT '',
  change_token TEXT NOT NULL DEFAULT '',
+ source_series_id TEXT NOT NULL DEFAULT '',
  size_bytes INTEGER NOT NULL DEFAULT 0,
  mtime_unix INTEGER NOT NULL DEFAULT 0,
  last_seen INTEGER NOT NULL DEFAULT 0,
@@ -24,8 +25,8 @@ CREATE INDEX catalog_physical_files_fingerprint ON catalog_physical_files(root_k
 ALTER TABLE catalog_items ADD COLUMN primary_file_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE catalog_items ADD COLUMN available INTEGER NOT NULL DEFAULT 1 CHECK(available IN (0,1));
 
-INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,present,selected)
- SELECT id || ':legacy',id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,1,1
+INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,source_series_id,present,selected)
+ SELECT id || ':legacy',id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,series_id,1,1
  FROM catalog_items;
 UPDATE catalog_items SET primary_file_id=id || ':legacy' WHERE primary_file_id='';
 

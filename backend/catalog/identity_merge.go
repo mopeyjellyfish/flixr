@@ -186,6 +186,9 @@ func (c *Catalog) UnmergeIdentity(mergeID string) (IdentityMerge, error) {
 			return v, err
 		}
 	}
+	if err := applyIdentityMappings(tx); err != nil {
+		return v, err
+	}
 	if err := tx.Commit(); err != nil {
 		return v, err
 	}
@@ -195,10 +198,16 @@ func (c *Catalog) UnmergeIdentity(mergeID string) (IdentityMerge, error) {
 }
 
 func applyIdentityMappings(tx *sql.Tx) error {
-	_, err := tx.Exec(`UPDATE catalog_items SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series'),''); UPDATE catalog_items SET playable=CASE WHEN merged_into<>'' THEN 0 WHEN available=1 THEN 1 ELSE EXISTS(SELECT 1 FROM catalog_identity_merges m JOIN catalog_items source ON source.id=m.source_catalog_id WHERE m.survivor_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series' AND source.available=1) END; UPDATE catalog_series SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_series.id AND m.state='active' AND m.kind='series'),''); UPDATE catalog_items SET series_id=(SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.series_id AND m.state='active' AND m.kind='series') WHERE series_id IN (SELECT source_catalog_id FROM catalog_identity_merges WHERE state='active' AND kind='series')`)
+	// New episodes discovered while a series repair is active need the same
+	// original ownership snapshot as episodes present at the initial merge.
+	if _, err := tx.Exec(`INSERT INTO catalog_identity_episode_snapshots(merge_id,catalog_id,series_id,season_id) SELECT m.id,i.id,i.series_id,i.season_id FROM catalog_items i JOIN catalog_identity_merges m ON m.source_catalog_id=i.series_id AND m.kind='series' AND m.state='active' WHERE 1 ON CONFLICT(merge_id,catalog_id) DO NOTHING`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE catalog_items SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series'),''); UPDATE catalog_items SET playable=CASE WHEN merged_into<>'' THEN 0 WHEN available=1 THEN 1 ELSE EXISTS(SELECT 1 FROM catalog_identity_merges m JOIN catalog_items source ON source.id=m.source_catalog_id WHERE m.survivor_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series' AND source.available=1) END; UPDATE catalog_series SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_series.id AND m.state='active' AND m.kind='series'),''); UPDATE catalog_items SET series_id=(SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.series_id AND m.state='active' AND m.kind='series') WHERE series_id IN (SELECT source_catalog_id FROM catalog_identity_merges WHERE state='active' AND kind='series'); UPDATE catalog_series SET playable=EXISTS(SELECT 1 FROM catalog_items i WHERE i.series_id=catalog_series.id AND i.playable=1) WHERE demo=0`)
 	return err
 }
 func (c *Catalog) applyIdentityMemory(kind, survivor, source string, merged bool) {
+	defer c.refreshSeriesAvailability()
 	if kind != "series" {
 		for _, id := range []string{survivor, source} {
 			item := c.items[id]
@@ -238,4 +247,26 @@ func (c *Catalog) identityAffectedDecisions(kind, survivor, source string) []str
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Called under mu after a successful identity transaction.
+func (c *Catalog) refreshSeriesAvailability() {
+	if c.db == nil {
+		return
+	}
+	rows, err := c.db.Query(`SELECT id,playable FROM catalog_series`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var playable bool
+		if rows.Scan(&id, &playable) != nil {
+			return
+		}
+		item := c.series[id]
+		item.Playable = playable
+		c.series[id] = item
+	}
 }

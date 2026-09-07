@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -297,6 +298,13 @@ func publicItems(items []viewerItem) []ViewerItem {
 }
 
 func (c *Catalog) PlaybackItem(id string) (Item, error) {
+	return c.PlaybackItemContext(context.Background(), id)
+}
+
+func (c *Catalog) PlaybackItemContext(ctx context.Context, id string) (Item, error) {
+	if err := c.hydrateLegacySource(ctx, id); err != nil {
+		return Item{}, err
+	}
 	c.mu.RLock()
 	item, ok := c.playbackSource(id)
 	c.mu.RUnlock()
