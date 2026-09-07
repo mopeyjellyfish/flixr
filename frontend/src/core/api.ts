@@ -28,6 +28,9 @@ export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' |
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
+export type EpisodeSequence =
+  | { state: 'next'; episode: Episode }
+  | { state: 'end_of_series' | 'not_episodic' | 'context_unavailable'; episode?: never };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
@@ -35,6 +38,9 @@ export type TMDBSettings = { configured: boolean };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
 export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
 export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };
+export type IdentityConflict = { id: number; kind: string; reason: string; state: string; left: CatalogItem; right: CatalogItem };
+export type IdentityMerge = { id: string; kind: string; state: string; survivor: CatalogItem; source: CatalogItem; decisions: string[] };
+export type IdentityRepairs = { conflicts: IdentityConflict[]; merges: IdentityMerge[] };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
 export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
@@ -49,7 +55,7 @@ export type ApiErrorCode =
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable' | 'metadata_busy'
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
@@ -88,6 +94,8 @@ export function messageFor(code: string): string {
     scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
     metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     metadata_busy: 'Wait for the current scan to finish, then retry metadata repair.',
+    metadata_not_found: 'That title is no longer available for identity repair.',
+    identity_conflict: 'This title is already part of an identity repair. Refresh the repair list and try again.',
     playback_unsupported: 'This title is not compatible with this browser.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
     playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
@@ -101,3 +109,6 @@ export function messageFor(code: string): string {
     playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }
+export type ViewingEvent = { id: string; catalog_id: string; title: string; kind: string; type: 'completed' | 'summary'; provenance: 'local' | 'import'; source_time: number | null; recorded_at: number };
+export type HistoryPage = { events: ViewingEvent[]; next?: string };
+export type Rating = { catalog_id: string; value: number; provenance: 'local' | 'import'; updated_at: number };

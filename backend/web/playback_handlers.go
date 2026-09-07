@@ -53,7 +53,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.catalog.PlaybackItem(body.CatalogID)
+	item, err := s.catalog.PlaybackItemContext(r.Context(), body.CatalogID)
 	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (item.Kind != "film" && item.Kind != "episode")) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -74,6 +74,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		playbackFailure(w, err)
 		return
 	}
+	plan.SourceKey = item.SourceKey()
 	profile, _ := s.house.Profile(s.session(r))
 	viewerID, ok := s.house.SessionIdentity(s.session(r))
 	if !ok {
@@ -107,6 +108,13 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusCreated, playbackResponse(session))
+}
+
+func completionEvent(catalogID string, item catalog.Item, completed bool) *household.ViewingEvent {
+	if !completed || item.ID == "" {
+		return nil
+	}
+	return &household.ViewingEvent{CatalogID: catalogID, Title: item.Title, Kind: item.Kind, Type: household.EventCompleted, Provenance: household.ProvenanceLocal}
 }
 
 func playbackResponse(session playback.Session) map[string]any {
@@ -173,7 +181,7 @@ func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "playback_not_direct")
 		return
 	}
-	file, err := s.catalog.Open(session.CatalogID)
+	file, err := s.catalog.OpenSource(session.CatalogID, session.Plan.SourceKey)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -185,6 +193,32 @@ func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, session.CatalogID, info.ModTime(), file)
+}
+
+func (s *Server) playbackNext(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.playbackSession(w, r, false)
+	if !ok {
+		return
+	}
+	includeSpecials := false
+	switch r.URL.Query().Get("include_specials") {
+	case "", "false":
+	case "true":
+		includeSpecials = true
+	default:
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	next, err := s.catalog.EpisodeAfter(session.ProfileID, session.CatalogID, includeSpecials)
+	if errors.Is(err, catalog.ErrCatalogNotFound) {
+		write(w, http.StatusOK, catalog.EpisodeSequence{State: catalog.EpisodeSequenceContextUnavailable})
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	write(w, http.StatusOK, next)
 }
 
 func (s *Server) playbackManifest(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +274,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
-	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
@@ -254,7 +288,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	write(w, http.StatusOK, map[string]any{"expires_at": updated.ExpiresAt.Unix()})
+	write(w, http.StatusOK, map[string]any{"accepted": accepted, "expires_at": updated.ExpiresAt.Unix()})
 }
 
 func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +306,7 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
-	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
@@ -314,12 +348,12 @@ func (s *Server) playbackInput(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "playback_input_forbidden")
 		return
 	}
-	catalogID, ok := s.playback.InputCatalog(r.PathValue("token"))
+	catalogID, sourceKey, ok := s.playback.InputSource(r.PathValue("token"))
 	if !ok {
 		fail(w, http.StatusForbidden, "playback_input_invalid")
 		return
 	}
-	file, err := s.catalog.Open(catalogID)
+	file, err := s.catalog.OpenSource(catalogID, sourceKey)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return

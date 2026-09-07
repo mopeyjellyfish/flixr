@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRealFilmScanDeletionCascadesProfileListMembership(t *testing.T) {
+func TestMissingFilmRetainsProfileListAcrossReappearance(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	require.NoError(t, err)
 	defer db.Close()
@@ -35,12 +35,42 @@ func TestRealFilmScanDeletionCascadesProfileListMembership(t *testing.T) {
 	profile, err := house.CreateProfile("Ada", "")
 	require.NoError(t, err)
 	require.NoError(t, library.SetListed(profile.ID, "film", items[0].ID, true))
+	assertListed := func(playable bool) {
+		t.Helper()
+		view, err := library.Viewer(profile.ID, "film")
+		require.NoError(t, err)
+		for _, section := range view.Sections {
+			if section.Name != "My List" {
+				continue
+			}
+			require.Len(t, section.Items, 1)
+			assert.Equal(t, items[0].ID, section.Items[0].ID)
+			assert.True(t, section.Items[0].Listed)
+			assert.Equal(t, playable, section.Items[0].Playable)
+			return
+		}
+		t.Fatal("viewer has no My List section")
+	}
+	assertListed(true)
 
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, library.Scan(t.Context(), 1))
 	var membership int
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM profile_film_list WHERE profile_id=? AND catalog_id=?`, profile.ID, items[0].ID).Scan(&membership))
-	assert.Zero(t, membership)
+	require.Equal(t, 1, membership, "an unavailable physical file must retain the logical title's list membership")
+	unavailable, ok := library.Item(items[0].ID)
+	require.True(t, ok)
+	assert.False(t, unavailable.Playable)
+	assertListed(false)
+
+	require.NoError(t, os.WriteFile(path, []byte("film"), 0o600))
+	require.NoError(t, library.Scan(t.Context(), 1))
+	restored, ok := library.Item(items[0].ID)
+	require.True(t, ok)
+	assert.True(t, restored.Playable)
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM profile_film_list WHERE profile_id=? AND catalog_id=?`, profile.ID, items[0].ID).Scan(&membership))
+	assert.Equal(t, 1, membership)
+	assertListed(true)
 }
 
 func TestSetListedDoesNotHideDatabaseFailureAsMissingCatalog(t *testing.T) {

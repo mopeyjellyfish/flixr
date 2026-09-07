@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ButtonHTMLAttributes } from 'react';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { useBlurUpImage } from '../../vendor/interior/blur-up-image';
 import { Wordmark } from '../productChrome/Wordmark';
 
@@ -13,11 +13,12 @@ export function BusyButton({ busy, children, className = '', disabled, ...props 
 }
 
 export function Artwork({ src, className = '', priority = false, width }: { src: string; className?: string; priority?: boolean; width?: number }) {
+  const reduced = useReducedMotion();
   const pixels = width && Math.ceil(width * Math.min(window.devicePixelRatio || 1, 2));
   const derivative = pixels ? ([160, 240, 320, 480, 640, 960, 1280, 1600].find((size) => pixels <= size) ?? 1600) : undefined;
   const responsiveSrc = derivative && src.startsWith('/api/v1/catalog/artwork/') ? `${src}?w=${derivative}` : src;
   const { ref, status, instant } = useBlurUpImage({ src: responsiveSrc });
-  return <span className={`artwork ${className}`} data-state={status} aria-hidden="true"><motion.img ref={ref} src={responsiveSrc} alt="" draggable={false} decoding="async" loading={priority ? 'eager' : 'lazy'} fetchPriority={priority ? 'high' : 'auto'} initial={false} animate={{ opacity: status === 'ready' ? 1 : 0 }} transition={{ duration: instant ? 0 : 0.35 }} />{status === 'error' && <span className="artwork-unavailable">Artwork unavailable</span>}</span>;
+  return <span className={`artwork ${className}`} data-state={status} aria-hidden="true"><motion.img ref={ref} src={responsiveSrc} alt="" draggable={false} decoding="async" loading={priority ? 'eager' : 'lazy'} fetchPriority={priority ? 'high' : 'auto'} initial={false} animate={{ opacity: status === 'ready' ? 1 : 0 }} transition={{ duration: reduced === true || instant ? 0 : 0.35 }} />{status === 'error' && <span className="artwork-unavailable">Artwork unavailable</span>}</span>;
 }
 
 export function CatalogSkeleton() {

@@ -533,3 +533,33 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		}
 	})
 }
+
+func TestSourceVersionSeparatesGenerationsAndInputAuthority(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	first, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "original"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "replacement"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID == second.GenerationID {
+		t.Fatal("replacement shared original generation")
+	}
+	manager.mu.Lock()
+	tokens := make(map[string]string)
+	for token, authority := range manager.inputs {
+		tokens[token] = authority.sourceKey
+	}
+	manager.mu.Unlock()
+	if len(tokens) != 2 {
+		t.Fatalf("input authorities %v", tokens)
+	}
+	for token, want := range tokens {
+		id, key, ok := manager.InputSource(token)
+		if !ok || id != "film" || key != want {
+			t.Fatalf("input %s %s %v", id, key, ok)
+		}
+	}
+}

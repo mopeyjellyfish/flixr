@@ -1,7 +1,7 @@
 import type Hls from 'hls.js';
-import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
+import { ApiError, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
@@ -33,8 +33,19 @@ function browserCapabilities(): PlaybackCapabilities {
   };
 }
 
-export function Player({ catalogID, startPositionMS, active = true, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onExit: () => void }) {
+type AutoplayState =
+  | { kind: 'idle' }
+  | { kind: 'resolving' }
+  | { kind: 'countdown'; episode: Episode; seconds: number }
+  | { kind: 'paused'; episode?: Episode }
+  | { kind: 'end'; contextUnavailable: boolean }
+  | { kind: 'advancing'; episode: Episode };
+
+const autoplaySeconds = 10;
+
+export function Player({ catalogID, startPositionMS, active = true, onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onAdvance?: (catalogID: string) => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
+  const [autoplay, setAutoplay] = useState<AutoplayState>({ kind: 'idle' });
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
   const hls = useRef<Hls | null>(null);
@@ -47,6 +58,10 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
   const consecutiveRecoveries = useRef(0);
   const recovery = useRef(new PlaybackRecovery());
   const recoverRef = useRef<(error: unknown) => void>(() => undefined);
+  const endedPlayback = useRef(false);
+  const completionAck = useRef<Promise<boolean> | null>(null);
+  const autoplayVersion = useRef(0);
+  const autoplayRequest = useRef<AbortController | null>(null);
   const autoStart = useRef(startPositionMS !== undefined);
 
   useEffect(() => {
@@ -147,15 +162,26 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
   const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
-    if (!plan || finalizing.current || recovering.current) return;
+    if (!plan || finalizing.current || recovering.current || (endedPlayback.current && !ended)) return false;
     const version = sourceVersion.current;
     const positionMs = currentPosition();
     try {
-      await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
+      const acknowledgement = await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
+      if (ended && !acknowledgement.accepted) {
+        dispatch({ type: 'error', message: 'Episode completion could not be saved. Return to your library and try again.' });
+        return false;
+      }
       consecutiveRecoveries.current = 0;
+      return true;
     } catch (error: unknown) {
-      if (version !== sourceVersion.current || finalizing.current) return;
-      void recover(error instanceof ApiError ? error : new PlaybackNetworkError());
+      if (version !== sourceVersion.current || finalizing.current) return false;
+      if (ended || !isRetryablePlaybackFailure(error)) {
+        playback.current = null;
+        dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
+      } else {
+        void recover(error instanceof ApiError ? error : new PlaybackNetworkError());
+      }
+      return false;
     }
   }, [currentPosition, recover]);
 
@@ -163,6 +189,13 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     let active = true;
     let timer = 0;
     const recoveryController = recovery.current;
+    autoplayVersion.current += 1;
+    autoplayRequest.current?.abort();
+    autoplayRequest.current = null;
+    finalizing.current = false;
+    endedPlayback.current = false;
+    completionAck.current = null;
+    setAutoplay({ kind: 'idle' });
     recoveryController.run(
       () => api.playbackPlan(catalogID, browserCapabilities()),
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
@@ -195,7 +228,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     });
     const pageHide = () => {
       const plan = playback.current;
-      if (!plan || finalizing.current) return;
+      if (!plan || finalizing.current || endedPlayback.current) return;
       const body = new Blob([JSON.stringify({ position_ms: currentPosition(), observation: ++observation.current })], { type: 'application/json' });
       navigator.sendBeacon(plan.heartbeat_url, body);
     };
@@ -203,6 +236,9 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     return () => {
       active = false;
       recoveryController.cancel();
+      autoplayVersion.current += 1;
+      autoplayRequest.current?.abort();
+      autoplayRequest.current = null;
       sourceVersion.current += 1;
       window.clearInterval(timer);
       window.removeEventListener('pagehide', pageHide);
@@ -210,13 +246,73 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
       hls.current = null;
       const plan = playback.current;
       if (plan && !finalizing.current) {
-        void settleWithin(
-          api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current),
-          finalHeartbeatWaitMS,
-        ).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
+        const save = endedPlayback.current
+          ? completionAck.current?.then(() => undefined).catch(() => undefined) ?? Promise.resolve()
+          : api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
+        void settleWithin(save, finalHeartbeatWaitMS)
+          .then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
   }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
+
+  const cancelAutoplay = useCallback(() => {
+    autoplayVersion.current += 1;
+    autoplayRequest.current?.abort();
+    autoplayRequest.current = null;
+    setAutoplay((current) => {
+      if (current.kind === 'countdown') return { kind: 'paused', episode: current.episode };
+      if (current.kind === 'resolving') return { kind: 'paused' };
+      if (current.kind === 'advancing') return { kind: 'paused', episode: current.episode };
+      return current;
+    });
+  }, []);
+
+  const advanceTo = useCallback(async (episode: Episode) => {
+    const version = ++autoplayVersion.current;
+    autoplayRequest.current?.abort();
+    autoplayRequest.current = null;
+    setAutoplay({ kind: 'advancing', episode });
+    const plan = playback.current;
+    if (plan) {
+      finalizing.current = true;
+      try {
+        await api.playbackStop(plan.session_id);
+      } catch (error: unknown) {
+        finalizing.current = false;
+        dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not stop the completed episode.' });
+        return;
+      }
+      playback.current = null;
+    }
+    if (version !== autoplayVersion.current) {
+      finalizing.current = false;
+      return;
+    }
+    autoStart.current = true;
+    onAdvance?.(episode.id);
+  }, [onAdvance]);
+
+  useEffect(() => {
+    if (autoplay.kind !== 'countdown') return;
+    if (document.hidden) {
+      cancelAutoplay();
+      return;
+    }
+    if (autoplay.seconds <= 0) {
+      void advanceTo(autoplay.episode);
+      return;
+    }
+    const timer = window.setTimeout(() => setAutoplay((current) => current.kind === 'countdown' ? { ...current, seconds: current.seconds - 1 } : current), 1_000);
+    return () => window.clearTimeout(timer);
+  }, [advanceTo, autoplay, cancelAutoplay]);
+
+  useEffect(() => {
+    const visibility = () => {
+      if (document.hidden) cancelAutoplay();
+    };
+    document.addEventListener('visibilitychange', visibility);
+    return () => document.removeEventListener('visibilitychange', visibility);
+  }, [cancelAutoplay]);
 
   const seekTo = useCallback(async (target: number) => {
     const plan = playback.current;
@@ -245,9 +341,12 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     }
   }, [attach, recover]);
   useEffect(() => screenCoordinator.onCommand((command) => {
-    if (command.type === 'pause') video.current?.pause();
+    if (command.type === 'pause') {
+      video.current?.pause();
+      cancelAutoplay();
+    }
     if (command.type === 'seek') void seekTo(command.position_ms);
-  }), [seekTo]);
+  }), [cancelAutoplay, seekTo]);
 
   const play = async () => {
     try {
@@ -258,22 +357,59 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     }
   };
 
+  const pause = () => {
+    video.current?.pause();
+    cancelAutoplay();
+  };
+
   const finish = async () => {
     if (finalizing.current) return;
     finalizing.current = true;
     recovery.current.cancel();
     sourceVersion.current += 1;
+    autoplayVersion.current += 1;
+    autoplayRequest.current?.abort();
+    autoplayRequest.current = null;
     const plan = playback.current;
     if (plan) {
-      // Wait briefly for durable progress, then release the session without
-      // making navigation depend on either request completing.
-      await settleWithin(
-        api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current),
-        finalHeartbeatWaitMS,
-      );
+      const save = endedPlayback.current
+        ? completionAck.current?.then(() => undefined).catch(() => undefined) ?? Promise.resolve()
+        : api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
+      await settleWithin(save, finalHeartbeatWaitMS);
       void api.playbackStop(plan.session_id).catch(() => undefined);
     }
     onExit();
+  };
+
+  const complete = async () => {
+    const plan = playback.current;
+    if (!plan || finalizing.current || endedPlayback.current) return;
+    endedPlayback.current = true;
+    const version = ++autoplayVersion.current;
+    autoplayRequest.current?.abort();
+    const controller = new AbortController();
+    autoplayRequest.current = controller;
+    setAutoplay({ kind: 'resolving' });
+    const acknowledgement = heartbeat(true);
+    completionAck.current = acknowledgement;
+    const accepted = await acknowledgement;
+    if (completionAck.current === acknowledgement) completionAck.current = null;
+    if (!accepted || controller.signal.aborted || version !== autoplayVersion.current) return;
+    try {
+      const next = await api.playbackNext(plan.session_id, false, controller.signal);
+      if (controller.signal.aborted || version !== autoplayVersion.current || playback.current?.session_id !== plan.session_id) return;
+      autoplayRequest.current = null;
+      if (next.state === 'not_episodic') {
+        void finish();
+      } else if (next.state === 'next') {
+        setAutoplay({ kind: 'countdown', episode: next.episode, seconds: autoplaySeconds });
+      } else {
+        setAutoplay({ kind: 'end', contextUnavailable: next.state === 'context_unavailable' });
+      }
+    } catch (error: unknown) {
+      if (controller.signal.aborted || version !== autoplayVersion.current) return;
+      dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not check for the next episode.' });
+    }
   };
 
   const seeked = async () => {
@@ -335,10 +471,11 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
               if (video.current?.error?.code === 2 || (plan !== null && plan.plan.kind !== 'direct')) void recover(new PlaybackNetworkError());
               else dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' });
             }}
-            onEnded={() => { dispatch({ type: 'pause' }); void heartbeat(true); }}
+            onEnded={() => { dispatch({ type: 'pause' }); void complete(); }}
             onPlaying={() => dispatch({ type: 'play' })}
             onPause={() => {
               dispatch({ type: 'pause' });
+              if (!endedPlayback.current) cancelAutoplay();
               void heartbeat();
             }}
             onWaiting={() => dispatch({ type: 'buffering' })}
@@ -351,12 +488,18 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
             }}
             onTimeUpdate={() => dispatch({ type: 'progress', positionMs: currentPosition() })}
           />
+          {autoplay.kind !== 'idle' && autoplay.kind !== 'advancing' && <section className="player-autoplay" role="dialog" aria-modal="true" aria-labelledby="autoplay-title">
+            {autoplay.kind === 'resolving' && <><h2 id="autoplay-title">Episode complete</h2><p role="status">Finding the next episode in this version…</p><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
+            {autoplay.kind === 'countdown' && <><h2 id="autoplay-title">Next episode</h2><p className="player-autoplay-episode">S{autoplay.episode.season} E{autoplay.episode.episode} · {autoplay.episode.title}</p><p role="status">Playing in {autoplay.seconds} seconds.</p><div className="player-autoplay-actions"><button className="primary" onClick={() => { void advanceTo(autoplay.episode); }}>Play now</button><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></div></>}
+            {autoplay.kind === 'paused' && <><h2 id="autoplay-title">Autoplay paused</h2><p>The next episode will not start automatically.</p><div className="player-autoplay-actions">{autoplay.episode && <button className="primary" onClick={() => { void advanceTo(autoplay.episode!); }}>Play next episode</button>}<button onClick={() => { void finish(); }}>Return to your library</button></div></>}
+            {autoplay.kind === 'end' && <><h2 id="autoplay-title">{autoplay.contextUnavailable ? 'No next episode in this version' : 'End of series'}</h2><p>{autoplay.contextUnavailable ? 'Flixr will not switch to another library or cut automatically.' : 'You have watched every later available episode in this series.'}</p><button className="primary" onClick={() => { void finish(); }}>Return to your library</button></>}
+          </section>}
         </div>
         <div className="player-toolbar">
           <p role="status" className="player-status"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
           <div className="player-actions">
             <button className="primary" onClick={() => void play()}>Play</button>
-            <button onClick={() => video.current?.pause()}>Pause</button>
+            <button onClick={pause}>Pause</button>
           </div>
         </div>
         <p className="player-hint">Progress stays with this profile across your local devices.</p>

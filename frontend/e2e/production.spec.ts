@@ -138,9 +138,20 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   });
   expect((await seekResponse).ok()).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
-  await page.getByRole('button', { name: /back to library/i }).click();
-
-  await page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i }).click();
+  const firstEpisodeURL = page.url();
+  await expect(page.getByRole('heading', { name: 'Next episode' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('dialog')).toContainText(/S1 E2 · Signal/i);
+  await page.screenshot({ path: testInfo.outputPath('production-next-episode-countdown-desktop.png'), fullPage: true });
+  await expect.poll(() => page.url(), { timeout: 20_000 }).not.toBe(firstEpisodeURL);
+  await expectPlaybackStartedAutomatically(page);
+  await expect(page.getByRole('heading', { name: 'End of series' })).toBeVisible({ timeout: 20_000 });
+  await page.screenshot({ path: testInfo.outputPath('production-end-of-series-desktop.png'), fullPage: true });
+  const refreshedHome = page.waitForResponse((response) => response.url().includes('/api/v1/catalog/view') && response.request().method() === 'GET');
+  await page.getByRole('button', { name: /return to your library/i }).click();
+  expect((await refreshedHome).ok()).toBeTruthy();
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i })).toHaveCount(0);
+  await page.getByRole('region', { name: 'New' }).getByRole('button', { name: /series signal/i }).click();
   await expect(page.getByRole('dialog')).toContainText(/Signal.*Season 1 · Episode 1/i);
   await expect(page).toHaveURL(/\/detail\//);
   await page.reload();
@@ -178,5 +189,12 @@ async function expectPlayback(page: import('@playwright/test').Page) {
   await expect(video).toBeVisible();
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
+}
+
+async function expectPlaybackStartedAutomatically(page: import('@playwright/test').Page) {
+  const video = page.locator('video');
+  await expect(video).toBeVisible();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
 }

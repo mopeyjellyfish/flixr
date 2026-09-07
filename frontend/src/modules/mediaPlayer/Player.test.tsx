@@ -26,6 +26,7 @@ beforeEach(() => {
   hls.waitForImport = false;
   hls.releaseImport = undefined;
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
@@ -420,14 +421,19 @@ it('ignores late media heartbeats while the final stop request is pending', asyn
   expect(calls.filter(path => path.endsWith('/stop'))).toHaveLength(1);
 });
 
-it('orders seek, ended, pagehide and final observations without the device clock', async () => {
+it('orders seek and ended observations without the device clock and suppresses later writes', async () => {
   const observations: number[] = [];
   let beaconBody: Blob | undefined;
   Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: (_url: string, body: Blob) => { beaconBody = body; return true; } });
   const plan = { plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream/master.m3u8', heartbeat_url: '/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const path = String(input);
-    if (path.endsWith('/heartbeat') || path.endsWith('/seek')) observations.push(JSON.parse(String(init?.body)).observation);
+    if (path.endsWith('/heartbeat')) {
+      observations.push(JSON.parse(String(init?.body)).observation);
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/seek')) observations.push(JSON.parse(String(init?.body)).observation);
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'end_of_series' }));
     return new Response(JSON.stringify(plan));
   });
   const { unmount } = render(<Player catalogID="film-1" onExit={() => undefined} />);
@@ -440,7 +446,245 @@ it('orders seek, ended, pagehide and final observations without the device clock
   fireEvent.ended(video);
   await waitFor(() => expect(observations).toHaveLength(2));
   fireEvent(window, new Event('pagehide'));
-  const beaconText = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(beaconBody!); });
+  expect(beaconBody).toBeUndefined();
   unmount();
-  expect([...observations.slice(0, 2), JSON.parse(beaconText).observation, observations[2]]).toEqual([1, 2, 3, 4]);
+  expect(observations).toEqual([1, 2]);
+});
+
+it('counts down to the server-selected next episode after durable completion', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  const advance = vi.fn();
+  render(<Player catalogID="episode-1" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  expect(await screen.findByRole('heading', { name: /next episode/i })).toBeVisible();
+  expect(screen.getByText(/second signal/i)).toBeVisible();
+  expect(calls.findIndex((path) => path.includes('/next?'))).toBeGreaterThan(calls.findIndex((path) => path.endsWith('/heartbeat')));
+  for (let second = 0; second < 11; second += 1) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  }
+  expect(advance).toHaveBeenCalledOnce();
+  expect(advance).toHaveBeenCalledWith('episode-2');
+});
+
+it('does not resolve the next episode when durable completion is rejected', async () => {
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: false, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="episode-1" onAdvance={() => undefined} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/completion could not be saved/i);
+  expect(calls.some((path) => path.includes('/next?'))).toBe(false);
+});
+
+it('suppresses ordinary heartbeats once durable completion starts', async () => {
+  let releaseEnded: (() => void) | undefined;
+  const heartbeatBodies: Array<{ ended?: boolean }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) {
+      heartbeatBodies.push(JSON.parse(String(init?.body)) as { ended?: boolean });
+      await new Promise<void>((resolve) => { releaseEnded = resolve; });
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'end_of_series' }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(releaseEnded).toBeTypeOf('function'));
+  fireEvent.ended(video);
+  fireEvent.pause(video);
+  expect(heartbeatBodies).toEqual([{ ended: true, position_ms: 0, observation: 1 }]);
+  await act(async () => { releaseEnded?.(); });
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+});
+
+it('waits for durable completion before cancellation stops the session', async () => {
+  let releaseEnded: (() => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) {
+      await new Promise<void>((resolve) => { releaseEnded = resolve; });
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="episode-1" onExit={exit} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(releaseEnded).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: /cancel autoplay/i }));
+  expect(calls.some((path) => path.endsWith('/stop'))).toBe(false);
+  expect(exit).not.toHaveBeenCalled();
+  await act(async () => { releaseEnded?.(); });
+  await waitFor(() => expect(calls.some((path) => path.endsWith('/stop'))).toBe(true));
+  expect(exit).toHaveBeenCalledOnce();
+});
+
+it('starts a fresh playback generation after autoplay navigation', async () => {
+  const calls: string[] = [];
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) {
+      const id = JSON.parse(String(init?.body)).catalog_id as string;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: `session-${id}`, media_url: `/${id}.mp4`, heartbeat_url: `/heartbeat-${id}`, seek_url: `/seek-${id}`, stop_url: `/stop-${id}`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  let rerenderPlayer: (id: string) => void = () => undefined;
+  const view = render(<Player catalogID="episode-1" onAdvance={(id) => rerenderPlayer(id)} onExit={() => undefined} />);
+  rerenderPlayer = (id) => view.rerender(<Player catalogID={id} onAdvance={(nextID) => rerenderPlayer(nextID)} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await screen.findByRole('heading', { name: /next episode/i });
+  fireEvent.click(screen.getByRole('button', { name: /play now/i }));
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-2.mp4'));
+  fireEvent.loadedMetadata(video);
+  await waitFor(() => expect(play).toHaveBeenCalledOnce());
+  const planCalls = calls.flatMap((path, index) => path.endsWith('/playback/plans') ? [index] : []);
+  expect(planCalls).toHaveLength(2);
+  expect(calls.findIndex((path) => path.endsWith('/session-episode-1/stop'))).toBeLessThan(planCalls[1]);
+});
+
+it('pause cancels a pending countdown and prevents a late advance', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  const advance = vi.fn();
+  render(<Player catalogID="episode-1" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await screen.findByRole('heading', { name: /next episode/i });
+  fireEvent.click(screen.getByRole('button', { name: /^pause$/i }));
+  expect(await screen.findByRole('heading', { name: /autoplay paused/i })).toBeVisible();
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(advance).not.toHaveBeenCalled();
+});
+
+it('pause prevents a late advance while the completed session is stopping', async () => {
+  let releaseStop: (() => void) | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    if (path.endsWith('/stop')) await new Promise<void>((resolve) => { releaseStop = resolve; });
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  const advance = vi.fn();
+  render(<Player catalogID="episode-1" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await screen.findByRole('heading', { name: /next episode/i });
+  fireEvent.click(screen.getByRole('button', { name: /play now/i }));
+  await waitFor(() => expect(releaseStop).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: /^pause$/i }));
+  await act(async () => { releaseStop?.(); });
+  expect(await screen.findByRole('heading', { name: /autoplay paused/i })).toBeVisible();
+  expect(advance).not.toHaveBeenCalled();
+});
+
+it('ignores a next-episode response that completes after autoplay is cancelled', async () => {
+  let resolveNext: ((response: Response) => void) | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Promise<Response>((resolve) => { resolveNext = resolve; });
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  const advance = vi.fn();
+  const exit = vi.fn();
+  render(<Player catalogID="episode-1" onAdvance={advance} onExit={exit} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(resolveNext).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: /cancel autoplay/i }));
+  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  await act(async () => { resolveNext?.(new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }))); });
+  expect(advance).not.toHaveBeenCalled();
+});
+
+it('shows an explicit end state when the current sequence has no next episode', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'end_of_series' }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+  expect(screen.getByRole('button', { name: /return to your library/i })).toBeVisible();
+});
+
+it('shows an actionable error when next-episode resolution fails', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ error: { code: 'catalog_query_failed' } }), { status: 500 });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/catalog could not be read/i);
+});
+
+it('does not advance when stopping the completed session fails', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+  });
+  const advance = vi.fn();
+  render(<Player catalogID="episode-1" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await screen.findByRole('heading', { name: /next episode/i });
+  fireEvent.click(screen.getByRole('button', { name: /play now/i }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(/session expired/i);
+  expect(advance).not.toHaveBeenCalled();
 });
