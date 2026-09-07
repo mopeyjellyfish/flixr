@@ -63,9 +63,10 @@ it('sends a final heartbeat before stopping an explicit player exit', async () =
 it('beacons progress on pagehide for the active plan', async () => {
   Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: vi.fn(() => true) });
   const beacon = vi.spyOn(navigator, 'sendBeacon');
-  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
-  render(<Player catalogID="film-1" onExit={() => undefined} />);
-  await screen.findByRole('button', { name: /back to library/i });
+	const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
+	render(<Player catalogID="film-1" onExit={() => undefined} />);
+	await screen.findByRole('button', { name: /back to library/i });
+	await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
   await waitFor(() => fireEvent(window, new Event('pagehide')));
   expect(beacon).toHaveBeenCalledWith('/heartbeat', expect.any(Blob));
 });

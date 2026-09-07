@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -86,6 +87,9 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			Width         int               `json:"width"`
 			Height        int               `json:"height"`
 			BitRate       string            `json:"bit_rate"`
+			AvgFrameRate  string            `json:"avg_frame_rate"`
+			BitsPerSample int               `json:"bits_per_sample"`
+			BitsPerRaw    int               `json:"bits_per_raw_sample"`
 			ColorTransfer string            `json:"color_transfer"`
 			Tags          map[string]string `json:"tags"`
 			Disposition   struct {
@@ -106,6 +110,8 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 				media.VideoCodec = stream.CodecName
 				media.VideoProfile = stream.Profile
 				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), stream.ColorTransfer
+				media.FrameRateMilli = frameRateMilli(stream.AvgFrameRate)
+				media.BitDepth = nonNegative(max(stream.BitsPerSample, stream.BitsPerRaw))
 				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
 					media.Bitrate = bitrate
 				}
@@ -117,6 +123,19 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		}
 	}
 	return media, nil
+}
+
+func frameRateMilli(value string) int {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 {
+		return 0
+	}
+	numerator, numeratorErr := strconv.ParseInt(parts[0], 10, 64)
+	denominator, denominatorErr := strconv.ParseInt(parts[1], 10, 64)
+	if numeratorErr != nil || denominatorErr != nil || numerator < 0 || denominator <= 0 || numerator > int64(math.MaxInt)/1000 {
+		return 0
+	}
+	return int(numerator * 1000 / denominator)
 }
 
 func durationMilliseconds(value string) int64 {

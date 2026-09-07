@@ -13,6 +13,13 @@ export type CatalogItem = {
   container?: string;
   video_codec?: string;
   video_profile?: string;
+	width?: number;
+	height?: number;
+	bitrate?: number;
+	frame_rate_milli?: number;
+	bit_depth?: number;
+	hdr?: string;
+	audio?: Array<{ codec: string; channels?: number }>;
   audio_codec?: string;
   duration_ms?: number;
   year?: number;
@@ -52,7 +59,7 @@ export type ApiErrorCode =
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
-export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
+export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string };
   session_id: string;

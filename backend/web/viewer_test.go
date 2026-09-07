@@ -126,7 +126,7 @@ func TestViewerAPIsPersistProfileRowsListsAndPreferences(t *testing.T) {
 	assert.JSONEq(t, `{"listed":false}`, removed.Body.String())
 	assert.Equal(t, http.StatusOK, request(http.MethodDelete, "/api/v1/catalog/list/film/"+filmID, oneSession, "").Code)
 
-	playback := request(http.MethodPost, "/api/v1/playback/plans", oneSession, `{"catalog_id":"`+filmID+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`)
+	playback := request(http.MethodPost, "/api/v1/playback/plans", oneSession, `{"catalog_id":"`+filmID+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`)
 	assert.Equal(t, http.StatusConflict, playback.Code)
 	assert.JSONEq(t, `{"error":{"code":"playback_not_playable"}}`, playback.Body.String())
 }

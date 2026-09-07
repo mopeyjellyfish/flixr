@@ -52,7 +52,7 @@ func TestPlaybackPlanAndDirectRangeAreProfileBound(t *testing.T) {
 	}
 	handler := web.NewServer(h, c).Handler()
 	plan := func(token, id string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"`+id+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`))
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"`+id+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`))
 		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)

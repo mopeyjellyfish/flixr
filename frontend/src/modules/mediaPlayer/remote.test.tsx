@@ -9,8 +9,9 @@ it('sends an absolute remote seek before the compatibility stream offset to the 
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
   const listen = vi.spyOn(screenCoordinator, 'onCommand');
-  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const path = String(input);
+	const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+		const path = String(input);
+		if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ id: 'film' }));
     if (path.endsWith('/plans') || path.endsWith('/seek')) return new Response(JSON.stringify({
       plan: { kind: 'remux' }, session_id: 'remote', media_url: path.endsWith('/seek') ? '/new.m3u8' : '/old.m3u8',
       heartbeat_url: '/heartbeat', resume_ms: path.endsWith('/seek') ? JSON.parse(String(init?.body)).position_ms : 20_000,
@@ -29,8 +30,9 @@ it('sends an absolute remote seek before the compatibility stream offset to the 
 it('applies the remote start position and attempts playback after metadata is ready', async () => {
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
   const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-    if (String(input).endsWith('/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'remote', media_url: '/media.mp4', heartbeat_url: '/heartbeat', resume_ms: 50_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+	vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+		if (String(input).includes('/catalog/items/')) return new Response(JSON.stringify({ id: 'film' }));
+		if (String(input).endsWith('/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'remote', media_url: '/media.mp4', heartbeat_url: '/heartbeat', resume_ms: 50_000, stream_offset_ms: 0, expires_at: 9999999999 }));
     if (String(input).endsWith('/heartbeat') || String(input).endsWith('/stop')) return new Response('{}');
     throw new Error(`Unexpected request ${String(input)}`);
   });

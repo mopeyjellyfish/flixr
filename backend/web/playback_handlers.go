@@ -37,7 +37,11 @@ func mediaProperties(item catalog.Item) playback.MediaProperties {
 	for _, track := range item.Subtitles {
 		subtitles = append(subtitles, track.Codec)
 	}
-	return playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, AudioCodec: audio, Subtitles: subtitles}
+	channels := 0
+	if len(item.Audio) > 0 {
+		channels = item.Audio[0].Channels
+	}
+	return playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, Width: item.Width, Height: item.Height, FrameRateMilli: item.FrameRateMilli, BitDepth: item.BitDepth, HDR: item.HDR, AudioCodec: audio, AudioChannels: channels, Subtitles: subtitles}
 }
 
 func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +115,8 @@ func playbackFailure(w http.ResponseWriter, err error) {
 		fail(w, http.StatusServiceUnavailable, "playback_capacity")
 	case errors.Is(err, playback.ErrSessionInvalid):
 		fail(w, http.StatusForbidden, "playback_session_invalid")
+	case errors.Is(err, playback.ErrInvalidCapabilities):
+		fail(w, http.StatusBadRequest, "invalid_request")
 	default:
 		fail(w, http.StatusInternalServerError, "playback_failed")
 	}

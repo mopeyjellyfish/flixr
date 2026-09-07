@@ -7,31 +7,45 @@ import (
 )
 
 var (
-	ErrUnsupported       = errors.New("media is unsupported by this client")
-	ErrFFmpegUnavailable = errors.New("ffmpeg is unavailable")
-	ErrCapacity          = errors.New("playback capacity is unavailable")
-	ErrPreparing         = errors.New("matching playback generation is preparing")
-	ErrSessionInvalid    = errors.New("playback session is invalid")
-	ErrInvalidSettings   = errors.New("playback settings are invalid")
-	ErrRestartRequired   = errors.New("playback setting requires restart")
+	ErrUnsupported         = errors.New("media is unsupported by this client")
+	ErrFFmpegUnavailable   = errors.New("ffmpeg is unavailable")
+	ErrCapacity            = errors.New("playback capacity is unavailable")
+	ErrPreparing           = errors.New("matching playback generation is preparing")
+	ErrSessionInvalid      = errors.New("playback session is invalid")
+	ErrInvalidSettings     = errors.New("playback settings are invalid")
+	ErrRestartRequired     = errors.New("playback setting requires restart")
+	ErrInvalidCapabilities = errors.New("playback capabilities are invalid")
 )
 
 // MediaProperties is the path-free media description consumed by the planner.
 type MediaProperties struct {
-	Container    string   `json:"container"`
-	VideoCodec   string   `json:"video_codec"`
-	VideoProfile string   `json:"video_profile,omitempty"`
-	AudioCodec   string   `json:"audio_codec"`
-	Subtitles    []string `json:"subtitles,omitempty"`
+	Container      string   `json:"container"`
+	VideoCodec     string   `json:"video_codec"`
+	VideoProfile   string   `json:"video_profile,omitempty"`
+	Width          int      `json:"width,omitempty"`
+	Height         int      `json:"height,omitempty"`
+	FrameRateMilli int      `json:"frame_rate_milli,omitempty"`
+	BitDepth       int      `json:"bit_depth,omitempty"`
+	HDR            string   `json:"hdr,omitempty"`
+	AudioCodec     string   `json:"audio_codec"`
+	AudioChannels  int      `json:"audio_channels,omitempty"`
+	Subtitles      []string `json:"subtitles,omitempty"`
 }
 
 // ClientCapabilities declares exact original-media and fMP4 HLS support.
 type ClientCapabilities struct {
-	Containers      []string `json:"containers"`
-	VideoCodecs     []string `json:"video_codecs"`
-	VideoProfiles   []string `json:"video_profiles,omitempty"`
-	AudioCodecs     []string `json:"audio_codecs"`
-	SupportsFMP4HLS bool     `json:"supports_fmp4_hls"`
+	Containers        []string `json:"containers"`
+	VideoCodecs       []string `json:"video_codecs"`
+	VideoProfiles     []string `json:"video_profiles,omitempty"`
+	AudioCodecs       []string `json:"audio_codecs"`
+	SupportsFMP4HLS   bool     `json:"supports_fmp4_hls"`
+	SupportsDirect    bool     `json:"supports_direct"`
+	MaxWidth          int      `json:"max_width,omitempty"`
+	MaxHeight         int      `json:"max_height,omitempty"`
+	MaxFrameRateMilli int      `json:"max_frame_rate_milli,omitempty"`
+	MaxBitDepth       int      `json:"max_bit_depth,omitempty"`
+	MaxAudioChannels  int      `json:"max_audio_channels,omitempty"`
+	HDR               []string `json:"hdr,omitempty"`
 }
 
 type ServerReadiness struct {
@@ -58,6 +72,9 @@ type Plan struct {
 
 // PlanFor selects the least expensive compatible path from recorded plain values.
 func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadiness) (Plan, error) {
+	if err := client.Validate(); err != nil {
+		return Plan{}, err
+	}
 	if directCompatible(media, client) {
 		return Plan{
 			Kind:        Direct,
@@ -79,8 +96,34 @@ func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadi
 	return Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", AudioCodec: "aac", Description: "H.264/AAC compatibility stream"}, nil
 }
 
+func (client ClientCapabilities) Validate() error {
+	for _, values := range [][]string{client.Containers, client.VideoCodecs, client.VideoProfiles, client.AudioCodecs, client.HDR} {
+		if len(values) > 16 {
+			return ErrInvalidCapabilities
+		}
+		for _, value := range values {
+			if value == "" || len(value) > 64 {
+				return ErrInvalidCapabilities
+			}
+		}
+	}
+	for _, value := range []int{client.MaxWidth, client.MaxHeight, client.MaxFrameRateMilli, client.MaxBitDepth, client.MaxAudioChannels} {
+		if value < 0 || value > 100000000 {
+			return ErrInvalidCapabilities
+		}
+	}
+	return nil
+}
+
 func directCompatible(media MediaProperties, client ClientCapabilities) bool {
-	return containerCompatible(media.Container, client.Containers) && codecCompatible(media, client)
+	return client.SupportsDirect && containerCompatible(media.Container, client.Containers) && codecCompatible(media, client) && limitsCompatible(media, client)
+}
+
+func limitsCompatible(media MediaProperties, client ClientCapabilities) bool {
+	if media.Width > 0 && (client.MaxWidth <= 0 || media.Width > client.MaxWidth) || media.Height > 0 && (client.MaxHeight <= 0 || media.Height > client.MaxHeight) || media.FrameRateMilli > 0 && (client.MaxFrameRateMilli <= 0 || media.FrameRateMilli > client.MaxFrameRateMilli) || media.BitDepth > 0 && (client.MaxBitDepth <= 0 || media.BitDepth > client.MaxBitDepth) || media.AudioChannels > 0 && (client.MaxAudioChannels <= 0 || media.AudioChannels > client.MaxAudioChannels) {
+		return false
+	}
+	return media.HDR == "" || containsFold(client.HDR, media.HDR)
 }
 
 func codecCompatible(media MediaProperties, client ClientCapabilities) bool {
