@@ -1,6 +1,7 @@
 export type Readiness = { ffprobe: boolean; ffmpeg: boolean };
 export type SetupStatus = { claimed: boolean; readiness: Readiness; demo?: boolean; demo_source?: string };
 export type Profile = { id: string; name: string; protected: boolean; avatar?: string };
+export type ActiveSession = { id: string; subject: string; expires_at: number };
 export type CatalogItem = {
   genres?: string[];
   id: string;

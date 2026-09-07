@@ -1,4 +1,4 @@
-import { ApiError, type CatalogItem, type CatalogPage, type MetadataCandidate, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type MetadataCandidate, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -25,6 +25,9 @@ export const api = {
   profiles: () => request<{ profiles: Profile[] }>('/profiles'),
   createProfile: (name: string, pin: string) => request<Profile>('/profiles', { method: 'POST', body: JSON.stringify({ name, pin }) }),
   updateProfile: (id: string, data: { name?: string; pin?: string; unprotect?: boolean }) => request<Profile>(`/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteProfile: (id: string) => request<{ deleted: boolean }>(`/profiles/${id}`, { method: 'DELETE' }),
+  activeSessions: () => request<{ sessions: ActiveSession[] }>('/owner/sessions'),
+  revokeSession: (id: string) => request<{ revoked: boolean }>(`/owner/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   selectProfile: (id: string, pin = '') => request(`/profiles/${id}/select`, { method: 'POST', body: JSON.stringify({ pin }) }),
   ownerRoots: () => request<OwnerRoots>('/owner/roots'),
   roots: (films: string, tv: string) => request<{ saved: boolean }>('/owner/roots', { method: 'POST', body: JSON.stringify({ films, tv }) }),

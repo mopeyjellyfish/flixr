@@ -92,8 +92,9 @@ describe('owner operations', () => {
   });
 
   it('saves and removes a replacement TMDB token', async () => {
-    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
+      if (path.includes('/profiles/ada') && init?.method === 'DELETE') return new Response(JSON.stringify({ error: { code: 'profile_failed' } }), { status: 500 });
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
       if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: { status: '', scanned: 0, unmatched: 0, failed: 0 } }));
@@ -107,5 +108,26 @@ describe('owner operations', () => {
     fireEvent.click(screen.getByRole('button', { name: /save TMDB credential/i }));
     await screen.findByText(/TMDB credential saved/i);
     expect(fetcher).toHaveBeenLastCalledWith('/api/v1/owner/settings/tmdb', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ token: 'replace-me' }) }));
+  });
+
+  it('confirms profile deletion and reports a deletion error', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/profiles/ada') && init?.method === 'DELETE') return new Response(JSON.stringify({ error: { code: 'profile_failed' } }), { status: 500 });
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [{ id: 'ada', name: 'Ada', protected: false }] }));
+      return new Response('{}');
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    const remove = await screen.findByRole('button', { name: /delete profile/i });
+    fireEvent.click(remove);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Ada"));
+    expect(fetcher).not.toHaveBeenCalledWith('/api/v1/profiles/ada', expect.anything());
+    confirm.mockReturnValue(true);
+    fireEvent.click(remove);
+    expect(await screen.findByText(/could not create that profile/i)).toBeInTheDocument();
   });
 });

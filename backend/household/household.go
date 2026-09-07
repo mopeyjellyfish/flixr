@@ -2,6 +2,7 @@
 package household
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -27,12 +28,18 @@ var (
 	ErrHashSaturated   = errors.New("credential hashing saturated")
 	ErrCredentials     = errors.New("invalid credentials")
 	ErrRecovery        = errors.New("owner recovery unavailable")
+	ErrSessionNotFound = errors.New("session not found")
 )
 
 type Profile struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Protected bool   `json:"protected"`
+}
+type Session struct {
+	ID        string `json:"id"`
+	Subject   string `json:"subject"`
+	ExpiresAt int64  `json:"expires_at"`
 }
 type Manager struct {
 	mu               sync.Mutex
@@ -45,6 +52,7 @@ type Manager struct {
 	sessions         map[string]string
 	// hashGate bounds memory-hard Argon2 work and rejects excess requests instead of queuing them.
 	hashGate chan struct{}
+	deriveFn func(string, []byte) ([]byte, error)
 }
 type profile struct {
 	Profile
@@ -107,6 +115,9 @@ func hash(secret string, salt []byte) []byte {
 	return argon2.IDKey([]byte(secret), salt, 2, 64*1024, 2, 32)
 }
 func (m *Manager) derive(secret string, salt []byte) ([]byte, error) {
+	if m.deriveFn != nil {
+		return m.deriveFn(secret, salt)
+	}
 	select {
 	case m.hashGate <- struct{}{}:
 		defer func() { <-m.hashGate }()
@@ -176,9 +187,6 @@ func (m *Manager) Login(password string) (string, error) {
 	return m.issueLocked("owner")
 }
 
-// RecoverOwner replaces the claimed owner's password from host-local recovery.
-// It is intentionally unavailable without durable storage: a recovery must
-// survive process interruption and revoke persisted owner sessions atomically.
 func (m *Manager) RecoverOwner(password string) error {
 	if password == "" || m.db == nil {
 		return ErrRecovery
@@ -277,6 +285,71 @@ func (m *Manager) Logout(session string) error {
 	}
 	return nil
 }
+func (m *Manager) ActiveSessions() ([]Session, error) {
+	if m.db == nil {
+		return nil, nil
+	}
+	rows, err := m.db.Query("SELECT token_hash,subject,expires_at FROM sessions WHERE revoked=0 AND expires_at>? ORDER BY expires_at DESC", time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []Session
+	for rows.Next() {
+		var hash []byte
+		var s Session
+		if err := rows.Scan(&hash, &s.Subject, &s.ExpiresAt); err != nil {
+			return nil, err
+		}
+		s.ID = base64.RawURLEncoding.EncodeToString(hash)
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+func (m *Manager) RevokeSession(id string) error {
+	hash, err := base64.RawURLEncoding.DecodeString(id)
+	if err != nil || len(hash) != sha256.Size {
+		return ErrSessionNotFound
+	}
+	if m.db == nil {
+		return ErrSessionNotFound
+	}
+	result, err := m.db.Exec("UPDATE sessions SET revoked=1 WHERE token_hash=? AND revoked=0", hash)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+func (m *Manager) DeleteProfile(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.profiles[id]
+	if !ok {
+		return ErrProfileNotFound
+	}
+	if m.db != nil {
+		tx, err := m.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", id); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	delete(m.profiles, id)
+	return nil
+}
 func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
 	id, err := random()
 	if err != nil {
@@ -315,8 +388,8 @@ func (m *Manager) Profiles() []Profile {
 }
 func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.profiles[id]
-	m.mu.Unlock()
 	if !ok {
 		return Profile{}, ErrProfileNotFound
 	}
@@ -340,7 +413,12 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 		p.Protected = true
 	}
 	if m.db != nil {
-		result, err := m.db.Exec("UPDATE profiles SET name=?,pin_hash=?,salt=? WHERE id=?", p.Name, p.hash, p.salt, id)
+		tx, err := m.db.Begin()
+		if err != nil {
+			return Profile{}, err
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec("UPDATE profiles SET name=?,pin_hash=?,salt=? WHERE id=?", p.Name, p.hash, p.salt, id)
 		if err != nil {
 			return Profile{}, err
 		}
@@ -351,59 +429,80 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 		if updated == 0 {
 			return Profile{}, ErrProfileNotFound
 		}
+		if pin != "" || unprotect {
+			if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
+				return Profile{}, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return Profile{}, err
+		}
 	}
-	m.mu.Lock()
 	m.profiles[id] = p
-	m.mu.Unlock()
 	return p.Profile, nil
 }
 func (m *Manager) Select(id, pin string) (string, error) {
-	m.mu.Lock()
-	p, ok := m.profiles[id]
-	m.mu.Unlock()
-	if !ok {
-		return "", ErrPIN
-	}
-	now := time.Now()
-	if now.Before(p.lockedUntil) {
-		return "", ErrRateLimited
-	}
-	valid := !p.Protected
-	if p.Protected {
-		derived, err := m.derive(pin, p.salt)
-		if err != nil {
-			return "", err
+	for {
+		m.mu.Lock()
+		p, ok := m.profiles[id]
+		if !ok {
+			m.mu.Unlock()
+			return "", ErrPIN
 		}
-		valid = subtle.ConstantTimeCompare(derived, p.hash) == 1
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok = m.profiles[id]
-	if !ok {
-		return "", ErrPIN
-	}
-	now = time.Now()
-	if now.Before(p.lockedUntil) {
-		return "", ErrRateLimited
-	}
-	if !valid {
-		p.attempts++
-		if p.attempts >= 5 {
-			p.attempts = 0
-			p.lockedUntil = now.Add(time.Minute)
+		if time.Now().Before(p.lockedUntil) {
+			m.mu.Unlock()
+			return "", ErrRateLimited
 		}
+		hashValue, saltValue := append([]byte(nil), p.hash...), append([]byte(nil), p.salt...)
+		m.mu.Unlock()
+		valid := !p.Protected
+		if p.Protected {
+			derived, err := m.derive(pin, saltValue)
+			if err != nil {
+				return "", err
+			}
+			valid = subtle.ConstantTimeCompare(derived, hashValue) == 1
+		}
+		m.mu.Lock()
+		current, ok := m.profiles[id]
+		if !ok {
+			m.mu.Unlock()
+			return "", ErrPIN
+		}
+		if !bytes.Equal(current.hash, hashValue) || !bytes.Equal(current.salt, saltValue) {
+			m.mu.Unlock()
+			continue
+		}
+		p = current
+		now := time.Now()
+		if now.Before(p.lockedUntil) {
+			m.mu.Unlock()
+			return "", ErrRateLimited
+		}
+		if !valid {
+			p.attempts++
+			if p.attempts >= 5 {
+				p.attempts = 0
+				p.lockedUntil = now.Add(time.Minute)
+			}
+			if err := m.persistAttempt(p); err != nil {
+				m.mu.Unlock()
+				return "", fmt.Errorf("persist pin rate limit: %w", err)
+			}
+			m.profiles[id] = p
+			m.mu.Unlock()
+			return "", ErrPIN
+		}
+		p.attempts = 0
 		if err := m.persistAttempt(p); err != nil {
+			m.mu.Unlock()
 			return "", fmt.Errorf("persist pin rate limit: %w", err)
 		}
 		m.profiles[id] = p
-		return "", ErrPIN
+		token, err := m.issueLocked(id)
+		m.mu.Unlock()
+		return token, err
 	}
-	p.attempts = 0
-	if err := m.persistAttempt(p); err != nil {
-		return "", fmt.Errorf("persist pin rate limit: %w", err)
-	}
-	m.profiles[id] = p
-	return m.issueLocked(id)
 }
 func (m *Manager) persistAttempt(p profile) error {
 	if m.db == nil {
