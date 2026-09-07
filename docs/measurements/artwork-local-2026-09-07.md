@@ -6,7 +6,7 @@ issue's required 4-core, 8 GiB reference host.
 ## Baseline and isolation
 
 - Source: exact `origin/main` release baseline
-  `b08929670b69498fc3efa6653167e10d60bf6968`.
+  `127cc67dcc56e99cc205a44ff6ebda153c7b5201`.
 - Host: macOS 26.6.1, Apple M4 Pro, 24 GiB RAM.
 - The reference 4-core, 8 GiB host was unavailable. These results must not be
   used as its qualification or as a cross-host performance claim.
@@ -35,19 +35,23 @@ visible decode and the 30th distinct visible decode.
 
 | Visit | First visible decoded | 30 visible decoded | Visible decoded / visible artwork |
 | --- | ---: | ---: | ---: |
-| Cold derivative cache | 414.8 ms | 1459.5 ms | 45 / 45 |
-| Warm repeat | 390.7 ms | 523.2 ms | 45 / 45 |
+| Cold derivative cache | 375.0 ms | 471.5 ms | 45 / 45 |
+| Warm repeat | 348.1 ms | 469.8 ms | 45 / 45 |
 
 The warm repeat reloaded after the cold visit on the same isolated server. Both
 timings are Chromium decode completions, not device first-paint measurements.
 
 `ps` sampled the Flixr server and its immediate FFmpeg/FFprobe children every
 100 ms from scan start until scan completion. Its point-in-time combined peak
-was **80.8% CPU** and **118,672 KiB RSS**. This is an observed process-set peak,
+was **64.3% CPU** and **136,512 KiB RSS**. This is an observed process-set peak,
 not a machine-wide limit or a reference-host resource ceiling. The browser run
-started at `2026-09-07T15:46:44Z` and finished at `2026-09-07T15:46:49Z`; the
-concurrent scan finished at `2026-09-07T15:47:21Z`, so the complete cold and
-warm browser sequence occurred during the active scan.
+started at `2026-09-07T16:14:05Z` and finished at `2026-09-07T16:14:09Z`; the
+concurrent scan finished at `2026-09-07T16:14:16Z`.
+
+At the completion of each visit, the harness queried the owner-only scan and
+playback status endpoints. Both checks recorded `scan.status=running` and the
+same running `remux` generation for the real fixture. The emitted
+`concurrency-cold.json` and `concurrency-warm.json` make that overlap explicit.
 
 ## Reproduce
 
@@ -66,6 +70,11 @@ cache and the repository's committed media fixture into a temporary directory,
 then removes the temporary directory on exit. It writes JSON timing and scan
 results, phase timestamps, and the raw `ps` samples under ignored
 `frontend/test-results/artwork-acceptance-*`.
+
+It refuses an occupied measurement port before beginning work and checks that
+the server process it started remains alive before accepting readiness. Each
+browser visit is separately asserted against an active owner scan and an active
+fixture remux.
 
 Its useful controls are `FLIXR_MEASURE_BASELINE` (defaults to `origin/main`),
 `FLIXR_MEASURE_PORT`, and `FLIXR_MEASURE_COPY_COUNT` (defaults to 300). No API

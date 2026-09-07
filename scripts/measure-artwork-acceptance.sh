@@ -18,16 +18,23 @@ profile_jar="$measurement_dir/profile-cookies.txt"
 result_dir="${FLIXR_MEASURE_RESULT_DIR:-$repo_root/frontend/test-results/artwork-acceptance-$(date +%Y%m%d-%H%M%S)}"
 server_pid=""
 sampler_pid=""
+browser_pid=""
 
 cleanup() {
   if [[ -n "$sampler_pid" ]]; then kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true; fi
+  if [[ -n "$browser_pid" ]]; then kill "$browser_pid" 2>/dev/null || true; wait "$browser_pid" 2>/dev/null || true; fi
   if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
   rm -rf "$measurement_dir"
 }
 trap cleanup EXIT
 
 require() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
-for command in git tar npm node go curl jq ffmpeg ffprobe ps; do require "$command"; done
+for command in git tar npm node go curl jq ffmpeg ffprobe ps lsof grep; do require "$command"; done
+[[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || { echo "FLIXR_MEASURE_PORT must be a TCP port" >&2; exit 1; }
+if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "refusing occupied measurement port: $port" >&2
+  exit 1
+fi
 [[ -d "$demo_source" ]] || { echo "demo source is not a directory: $demo_source" >&2; exit 1; }
 [[ -f "$fixture_source" ]] || { echo "fixture source is not a file: $fixture_source" >&2; exit 1; }
 mkdir -p "$source_dir" "$data_dir/demo" "$media_dir/films" "$result_dir"
@@ -42,8 +49,14 @@ cp "$fixture_source" "$media_dir/films/Long Duration Seek 2026.mkv"
 (cd "$source_dir/backend" && go build -o "$measurement_dir/flixr" .)
 
 wait_for_http() {
+  local expected_demo="$1" status
   for _ in $(seq 1 100); do
-    if curl --fail --silent --max-time 1 "http://127.0.0.1:$port/api/v1/setup/status" >/dev/null; then return 0; fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      wait "$server_pid" 2>/dev/null || true
+      echo "isolated Flixr server exited before becoming ready" >&2
+      return 1
+    fi
+    if status="$(curl --fail --silent --max-time 1 "http://127.0.0.1:$port/api/v1/setup/status")" && jq -e --argjson expected_demo "$expected_demo" '.demo == $expected_demo' <<<"$status" >/dev/null; then return 0; fi
     sleep 0.1
   done
   echo "isolated Flixr server did not start" >&2
@@ -51,13 +64,15 @@ wait_for_http() {
 }
 
 start_server() {
+  local expected_demo="$1"
+  shift
   "$@" >"$result_dir/server.log" 2>&1 &
   server_pid="$!"
-  wait_for_http
+  wait_for_http "$expected_demo"
 }
 
 # Import the copied demo cache once, creating durable original artwork in the temp data.
-start_server env FLIXR_DEMO=true FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" "$measurement_dir/flixr"
+start_server true env FLIXR_DEMO=true FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" "$measurement_dir/flixr"
 kill "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
 
 # This is intentionally the sole cache clear. Original artwork and all source paths remain intact.
@@ -67,7 +82,7 @@ rm -rf "$derivative_dir"
 [[ ! -e "$derivative_dir" ]] || { echo "could not clear isolated derivative directory" >&2; exit 1; }
 
 # First scan admits the playable fixture. The copied demo records retain 100 cached posters.
-start_server env FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" FLIXR_FILMS_ROOT="$media_dir/films" FLIXR_SCAN_ON_START=true FLIXR_SCAN_WORKERS=2 "$measurement_dir/flixr"
+start_server false env FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" FLIXR_FILMS_ROOT="$media_dir/films" FLIXR_SCAN_ON_START=true FLIXR_SCAN_WORKERS=2 "$measurement_dir/flixr"
 base_url="http://127.0.0.1:$port"
 curl --fail --silent --show-error --cookie-jar "$cookie_jar" -H "Content-Type: application/json" -d '{"password":"flixr-demo-only"}' "$base_url/api/v1/owner/login" >/dev/null
 alex_id="$(curl --fail --silent --show-error "$base_url/api/v1/profiles" | jq -r '.profiles[] | select(.name == "Alex") | .id')"
@@ -101,10 +116,41 @@ sample_resources() {
   done
 }
 
+assert_concurrent_visit() {
+  local visit="$1" scan_status playback_status
+  kill -0 "$server_pid" 2>/dev/null || { echo "Flixr exited before $visit artwork assertion" >&2; return 1; }
+  scan_status="$(curl --fail --silent --show-error --cookie "$cookie_jar" "$base_url/api/v1/owner/scan/status")"
+  jq -e '.scan.status == "running"' <<<"$scan_status" >/dev/null || { echo "$visit artwork completed outside an active scan: $scan_status" >&2; return 1; }
+  playback_status="$(curl --fail --silent --show-error --cookie "$cookie_jar" "$base_url/api/v1/owner/playback/status")"
+  jq -e --arg catalog_id "$fixture_id" '[.generations[] | select(.catalog_id == $catalog_id and .kind == "remux" and .running)] | length > 0' <<<"$playback_status" >/dev/null || { echo "$visit artwork completed without an active fixture remux: $playback_status" >&2; return 1; }
+  jq -n --arg visit "$visit" --arg checked_at "$(date -u +%FT%TZ)" --argjson scan "$scan_status" --argjson playback "$playback_status" '{visit:$visit,checked_at:$checked_at,scan:$scan,playback:$playback}' >"$result_dir/concurrency-$visit.json"
+}
+
+wait_for_visit() {
+  local visit="$1" phase_file="$result_dir/visits.jsonl"
+  for _ in $(seq 1 300); do
+    if [[ -f "$phase_file" ]] && grep -q "\"visit\":\"$visit\"" "$phase_file"; then
+      assert_concurrent_visit "$visit"
+      return 0
+    fi
+    if ! kill -0 "$browser_pid" 2>/dev/null; then
+      wait "$browser_pid"
+      echo "browser exited before recording $visit artwork visit" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "browser did not record $visit artwork visit" >&2
+  return 1
+}
+
 sample_resources & sampler_pid="$!"
 curl --fail --silent --show-error --cookie "$cookie_jar" -X POST "$base_url/api/v1/owner/scan" >"$result_dir/scan-start.json"
 printf '%s browser_artwork_run_started\n' "$(date -u +%FT%TZ)" >"$result_dir/phases.log"
-FLIXR_MEASURE_URL="$base_url" node "$repo_root/frontend/scripts/measure-artwork-local.mjs" >"$result_dir/artwork-timings.json"
+FLIXR_MEASURE_URL="$base_url" FLIXR_MEASURE_PHASE_FILE="$result_dir/visits.jsonl" node "$repo_root/frontend/scripts/measure-artwork-local.mjs" >"$result_dir/artwork-timings.json" & browser_pid="$!"
+wait_for_visit cold
+wait_for_visit warm
+wait "$browser_pid"; browser_pid=""
 printf '%s browser_artwork_run_finished\n' "$(date -u +%FT%TZ)" >>"$result_dir/phases.log"
 for _ in $(seq 1 300); do
   scan="$(curl --fail --silent --show-error --cookie "$cookie_jar" "$base_url/api/v1/owner/scan/status")"
@@ -118,6 +164,6 @@ printf '%s\n' "$scan" >"$result_dir/scan-final.json"
 derivative_count="$(find "$derivative_dir" -type f -name '*.jpg' | wc -l | tr -d ' ')"
 peak_cpu="$(awk '{split($2, value, "="); if (value[2] + 0 > peak) peak = value[2] + 0} END {printf "%.1f", peak}' "$result_dir/resources.log")"
 peak_rss="$(awk '{split($3, value, "="); if (value[2] + 0 > peak) peak = value[2] + 0} END {printf "%d", peak}' "$result_dir/resources.log")"
-jq -n --arg source_sha "$baseline_sha" --arg fixture "$fixture_source" --argjson copy_count "$copy_count" --argjson derivatives "$derivative_count" --argjson peak_cpu "$peak_cpu" --argjson peak_rss "$peak_rss" --slurpfile timings "$result_dir/artwork-timings.json" --slurpfile scan "$result_dir/scan-final.json" '{source_sha:$source_sha,fixture:$fixture,concurrent_scan_copies:$copy_count,derivatives_after_cold:$derivatives,resources:{sampling_interval_ms:100,peak_cpu_percent:$peak_cpu,peak_rss_kib:$peak_rss,scope:"Flixr server plus immediate ffmpeg/ffprobe children"},artwork_timings:$timings[0],scan:$scan[0]}' >"$result_dir/summary.json"
+jq -n --arg source_sha "$baseline_sha" --arg fixture "$fixture_source" --argjson copy_count "$copy_count" --argjson derivatives "$derivative_count" --argjson peak_cpu "$peak_cpu" --argjson peak_rss "$peak_rss" --slurpfile timings "$result_dir/artwork-timings.json" --slurpfile scan "$result_dir/scan-final.json" --slurpfile cold "$result_dir/concurrency-cold.json" --slurpfile warm "$result_dir/concurrency-warm.json" '{source_sha:$source_sha,fixture:$fixture,concurrent_scan_copies:$copy_count,derivatives_after_cold:$derivatives,resources:{sampling_interval_ms:100,peak_cpu_percent:$peak_cpu,peak_rss_kib:$peak_rss,scope:"Flixr server plus immediate ffmpeg/ffprobe children"},artwork_timings:$timings[0],concurrent_visits:{cold:$cold[0],warm:$warm[0]},scan:$scan[0]}' >"$result_dir/summary.json"
 printf 'Results: %s\n' "$result_dir"
 cat "$result_dir/summary.json"

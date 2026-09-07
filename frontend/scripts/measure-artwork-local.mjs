@@ -1,7 +1,9 @@
 import { chromium } from '@playwright/test';
+import { appendFile } from 'node:fs/promises';
 
 const baseURL = process.env.FLIXR_MEASURE_URL;
 if (!baseURL) throw new Error('Set FLIXR_MEASURE_URL to the isolated server URL.');
+const phaseFile = process.env.FLIXR_MEASURE_PHASE_FILE;
 
 const observer = `(() => {
   const state = { start: performance.now(), visibleDecoded: new Set(), watched: new WeakSet(), firstVisibleDecoded: null, grid30Decoded: null };
@@ -47,7 +49,11 @@ async function measure(navigate) {
     return { first_visible_decoded_ms: window.__issue56Artwork.firstVisibleDecoded, visible_grid_30_decoded_ms: window.__issue56Artwork.grid30Decoded, visible_decoded_images: window.__issue56Artwork.visibleDecoded.size, visible_artwork_images: visibleArtworkImages };
   });
 }
-const initial = await measure(() => page.goto(`${baseURL}/movies`, { waitUntil: 'networkidle' }));
-const repeat = await measure(() => page.reload({ waitUntil: 'networkidle' }));
+async function recordVisit(visit, timing) {
+  if (phaseFile) await appendFile(phaseFile, `${JSON.stringify({ visit, recorded_at: new Date().toISOString(), timing })}\n`);
+  return timing;
+}
+const initial = await recordVisit('cold', await measure(() => page.goto(`${baseURL}/movies`, { waitUntil: 'networkidle' })));
+const repeat = await recordVisit('warm', await measure(() => page.reload({ waitUntil: 'networkidle' })));
 console.log(JSON.stringify({ initial, repeat }, null, 2));
 await browser.close();
