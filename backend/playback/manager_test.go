@@ -68,6 +68,9 @@ func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, 
 	if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
 		return nil, err
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
+		return nil, err
+	}
 	return process, nil
 }
 
@@ -331,6 +334,12 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	}
 	if name != "ffmpeg" || !strings.Contains(strings.Join(args, " "), "libx264") {
 		t.Fatalf("unexpected command: %s %v", name, args)
+	}
+	joined := strings.Join(args, " ")
+	for _, exact := range []string{"-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-master_pl_name master.m3u8"} {
+		if !strings.Contains(joined, exact) {
+			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
+		}
 	}
 	if _, _, err := ffmpegCommand(Remux, "https://media.example/file", dir, 0, time.Minute); err == nil {
 		t.Fatal("accepted a non-loopback input")

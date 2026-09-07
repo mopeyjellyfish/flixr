@@ -72,7 +72,7 @@ func TestMediaPropertiesPersistAndRevisionZeroReprobes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	properties := catalog.MediaProperties{Container: "matroska", DurationMS: 2_000, VideoCodec: "h264", VideoProfile: "High", PrimaryVideoStreamIndex: 0, Width: 320, Height: 180, Bitrate: 12_000, FrameRateMilli: 24000, BitDepth: 8, HDR: "smpte2084", Audio: []catalog.AudioTrack{{Index: 1, Codec: "aac", Channels: 2, Language: "eng", Title: "English", Default: true}}, Subtitles: []catalog.SubtitleTrack{{Index: 2, Codec: "subrip", Language: "fra", Title: "French", Forced: true}}}
+	properties := catalog.MediaProperties{Container: "matroska", DurationMS: 2_000, VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, PrimaryVideoStreamIndex: 0, Width: 320, Height: 180, Bitrate: 12_000, FrameRateMilli: 24000, BitDepth: 8, HDR: "smpte2084", Audio: []catalog.AudioTrack{{Index: 1, Codec: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, Bitrate: 128000, Language: "eng", Title: "English", Default: true}}, Subtitles: []catalog.SubtitleTrack{{Index: 2, Codec: "subrip", Language: "fra", Title: "French", Forced: true}}}
 	var probes atomic.Int32
 	prober := catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
 		probes.Add(1)
@@ -87,17 +87,17 @@ func TestMediaPropertiesPersistAndRevisionZeroReprobes(t *testing.T) {
 		t.Fatalf("items = %#v, %v", items, err)
 	}
 	item, ok := c.Item(items[0].ID)
-	if !ok || item.PrimaryVideoStreamIndex != 0 || item.DurationMS != 2_000 || item.FrameRateMilli != 24000 || item.BitDepth != 8 || item.Audio[0].Title != "English" || !item.Subtitles[0].Forced {
+	if !ok || item.PrimaryVideoStreamIndex != 0 || item.DurationMS != 2_000 || item.VideoLevel != 12 || item.FrameRateMilli != 24000 || item.BitDepth != 8 || item.Audio[0].Profile != "LC" || item.Audio[0].SampleRate != 48000 || item.Audio[0].Bitrate != 128000 || item.Audio[0].Title != "English" || !item.Subtitles[0].Forced {
 		t.Fatalf("properties = %#v", item)
 	}
-	if _, err := db.Exec("UPDATE catalog_items SET probe_revision=1,video_frame_rate_milli=0,video_bit_depth=0"); err != nil {
+	if _, err := db.Exec("UPDATE catalog_items SET probe_revision=2,video_frame_rate_milli=0,video_bit_depth=0,audio_json='[]'"); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := catalog.OpenWithProber(db, prober)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored, ok := reopened.Item(item.ID); !ok || restored.Width != 320 || restored.FrameRateMilli != 0 || restored.BitDepth != 0 || restored.DurationMS != 2_000 || restored.Audio[0].Index != 1 {
+	if restored, ok := reopened.Item(item.ID); !ok || restored.Width != 320 || restored.FrameRateMilli != 0 || restored.BitDepth != 0 || restored.DurationMS != 2_000 || len(restored.Audio) != 0 {
 		t.Fatalf("reopened properties = %#v", restored)
 	}
 	if err := reopened.Scan(context.Background(), 1); err != nil {
@@ -106,11 +106,15 @@ func TestMediaPropertiesPersistAndRevisionZeroReprobes(t *testing.T) {
 	if got := probes.Load(); got != 2 {
 		t.Fatalf("probes = %d, want 2", got)
 	}
+	var revision int
+	if err := db.QueryRow("SELECT probe_revision FROM catalog_items WHERE id=?", item.ID).Scan(&revision); err != nil || revision != 3 {
+		t.Fatalf("probe revision = %d, err = %v", revision, err)
+	}
 	if err := reopened.Scan(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := probes.Load(); got != 2 {
-		t.Fatalf("unchanged revision-two scan probed %d times", got)
+		t.Fatalf("unchanged revision-three scan probed %d times", got)
 	}
 }
 
@@ -128,7 +132,7 @@ func TestSeriesProjectsPersistedMediaProperties(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	properties := catalog.MediaProperties{DurationMS: 2_000, VideoCodec: "h264", PrimaryVideoStreamIndex: 0, Width: 320, Height: 180, Bitrate: 12_000, FrameRateMilli: 24000, BitDepth: 8, HDR: "smpte2084", Audio: []catalog.AudioTrack{{Index: 1, Codec: "aac", Channels: 2}}, Subtitles: []catalog.SubtitleTrack{{Index: 2, Codec: "subrip", Language: "eng", Default: true}}}
+	properties := catalog.MediaProperties{DurationMS: 2_000, VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, PrimaryVideoStreamIndex: 0, Width: 320, Height: 180, Bitrate: 12_000, FrameRateMilli: 24000, BitDepth: 8, HDR: "smpte2084", Audio: []catalog.AudioTrack{{Index: 1, Codec: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, Bitrate: 128000}}, Subtitles: []catalog.SubtitleTrack{{Index: 2, Codec: "subrip", Language: "eng", Default: true}}}
 	c, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) { return properties, nil }))
 	if err != nil || c.SetRoots("", root) != nil || c.Scan(context.Background(), 1) != nil {
 		t.Fatalf("scan: %v", err)
@@ -151,7 +155,7 @@ func TestSeriesProjectsPersistedMediaProperties(t *testing.T) {
 		t.Fatalf("series = %#v", series)
 	}
 	episode := series.Seasons[0].Episodes[0]
-	if episode.DurationMS != 2_000 || episode.PrimaryVideoStreamIndex != 0 || episode.Width != 320 || episode.Bitrate != 12_000 || episode.FrameRateMilli != 24000 || episode.BitDepth != 8 || episode.HDR != "smpte2084" || len(episode.Audio) != 1 || episode.Audio[0].Index != 1 || len(episode.Subtitles) != 1 || episode.Subtitles[0].Index != 2 {
+	if episode.DurationMS != 2_000 || episode.VideoProfile != "High" || episode.VideoLevel != 12 || episode.PrimaryVideoStreamIndex != 0 || episode.Width != 320 || episode.Bitrate != 12_000 || episode.FrameRateMilli != 24000 || episode.BitDepth != 8 || episode.HDR != "smpte2084" || len(episode.Audio) != 1 || episode.Audio[0].Index != 1 || episode.Audio[0].Profile != "LC" || episode.Audio[0].SampleRate != 48000 || episode.Audio[0].Bitrate != 128000 || len(episode.Subtitles) != 1 || episode.Subtitles[0].Index != 2 {
 		t.Fatalf("series episode properties = %#v", episode.MediaProperties)
 	}
 }

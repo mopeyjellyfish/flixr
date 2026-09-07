@@ -42,9 +42,10 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 		args = append(args, "-c", "copy")
 	} else {
 		args = append(args,
-			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-pix_fmt", "yuv420p",
+			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),
+			"-b:v", strconv.FormatInt(compatibilityVideoBitrate, 10), "-maxrate", strconv.FormatInt(compatibilityVideoBitrate, 10), "-bufsize", strconv.FormatInt(compatibilityVideoBitrate*2, 10),
 			"-force_key_frames", "expr:gte(t,n_forced*4)", "-sc_threshold", "0",
-			"-c:a", "aac", "-ac", "2", "-b:a", "128k",
+			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(compatibilityAudioBitrate, 10),
 		)
 	}
 	args = append(args,
@@ -56,6 +57,7 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
 		"-hls_fmp4_init_filename", "init.mp4",
 		"-hls_segment_filename", filepath.Join(outputDir, "segment-%06d.m4s"),
+		"-master_pl_name", "master.m3u8",
 		filepath.Join(outputDir, "index.m3u8"),
 	)
 	for _, arg := range args {

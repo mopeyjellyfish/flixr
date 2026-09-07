@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	assetName         = regexp.MustCompile(`^(?:index\.m3u8|init\.mp4|segment-[0-9]+\.m4s)$`)
+	assetName         = regexp.MustCompile(`^(?:master\.m3u8|index\.m3u8|init\.mp4|segment-[0-9]+\.m4s)$`)
 	generationDirName = regexp.MustCompile(`^[A-Za-z0-9_-]{32}$`)
 )
 
@@ -334,7 +334,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, expiresAt: now.Add(settings.LeaseTTL)}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
-		if err := waitForFile(m.files.Fs, filepath.Join(dir, "index.m3u8"), gen.done, m.manifestWait); err != nil {
+		if err := waitForFile(m.files.Fs, filepath.Join(dir, "master.m3u8"), gen.done, m.manifestWait); err != nil {
 			_ = m.Stop(session.ID, profileID)
 			m.mu.Lock()
 			delete(m.pendingJobs, jobKey)

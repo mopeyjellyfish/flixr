@@ -77,13 +77,16 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		Format struct {
 			FormatName string `json:"format_name"`
 			Duration   string `json:"duration"`
+			BitRate    string `json:"bit_rate"`
 		} `json:"format"`
 		Streams []struct {
 			Index         *int              `json:"index"`
 			CodecType     string            `json:"codec_type"`
 			CodecName     string            `json:"codec_name"`
 			Profile       string            `json:"profile"`
+			Level         int               `json:"level"`
 			Channels      int               `json:"channels"`
+			SampleRate    string            `json:"sample_rate"`
 			Width         int               `json:"width"`
 			Height        int               `json:"height"`
 			BitRate       string            `json:"bit_rate"`
@@ -103,26 +106,48 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 	}
 	media := MediaProperties{Container: value.Format.FormatName, PrimaryVideoStreamIndex: -1}
 	media.DurationMS = durationMilliseconds(value.Format.Duration)
+	formatBitrate := positiveInt64(value.Format.BitRate)
 	for _, stream := range value.Streams {
 		switch stream.CodecType {
 		case "video":
 			if media.VideoCodec == "" {
 				media.VideoCodec = stream.CodecName
-				media.VideoProfile = stream.Profile
+				media.VideoProfile, media.VideoLevel = stream.Profile, nonNegative(stream.Level)
 				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), hdrTransfer(stream.ColorTransfer)
 				media.FrameRateMilli = frameRateMilli(stream.AvgFrameRate)
 				media.BitDepth = bitDepth(stream.BitsPerSample, stream.BitsPerRaw)
-				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
-					media.Bitrate = bitrate
+				media.Bitrate = positiveInt64(stream.BitRate)
+				if media.Bitrate == 0 {
+					media.Bitrate = formatBitrate
 				}
 			}
 		case "audio":
-			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Channels: nonNegative(stream.Channels), Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
+			bitrate := positiveInt64(stream.BitRate)
+			if bitrate == 0 {
+				bitrate = formatBitrate
+			}
+			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Profile: stream.Profile, Channels: nonNegative(stream.Channels), SampleRate: positiveInt(stream.SampleRate), Bitrate: bitrate, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		case "subtitle":
 			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		}
 	}
 	return media, nil
+}
+
+func positiveInt(value string) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
+}
+
+func positiveInt64(value string) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }
 
 func bitDepth(values ...json.Number) int {

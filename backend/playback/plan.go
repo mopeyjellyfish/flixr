@@ -20,17 +20,22 @@ var (
 
 // MediaProperties is the path-free media description consumed by the planner.
 type MediaProperties struct {
-	Container      string   `json:"container"`
-	VideoCodec     string   `json:"video_codec"`
-	VideoProfile   string   `json:"video_profile,omitempty"`
-	Width          int      `json:"width,omitempty"`
-	Height         int      `json:"height,omitempty"`
-	FrameRateMilli int      `json:"frame_rate_milli,omitempty"`
-	BitDepth       int      `json:"bit_depth,omitempty"`
-	HDR            string   `json:"hdr,omitempty"`
-	AudioCodec     string   `json:"audio_codec"`
-	AudioChannels  int      `json:"audio_channels,omitempty"`
-	Subtitles      []string `json:"subtitles,omitempty"`
+	Container       string   `json:"container"`
+	VideoCodec      string   `json:"video_codec"`
+	VideoProfile    string   `json:"video_profile,omitempty"`
+	VideoLevel      int      `json:"video_level,omitempty"`
+	Width           int      `json:"width,omitempty"`
+	Height          int      `json:"height,omitempty"`
+	VideoBitrate    int64    `json:"video_bitrate,omitempty"`
+	FrameRateMilli  int      `json:"frame_rate_milli,omitempty"`
+	BitDepth        int      `json:"bit_depth,omitempty"`
+	HDR             string   `json:"hdr,omitempty"`
+	AudioCodec      string   `json:"audio_codec"`
+	AudioProfile    string   `json:"audio_profile,omitempty"`
+	AudioChannels   int      `json:"audio_channels,omitempty"`
+	AudioSampleRate int      `json:"audio_sample_rate,omitempty"`
+	AudioBitrate    int64    `json:"audio_bitrate,omitempty"`
+	Subtitles       []string `json:"subtitles,omitempty"`
 }
 
 // ClientCapabilities declares exact original-media and fMP4 HLS support.
@@ -41,6 +46,8 @@ type ClientCapabilities struct {
 	AudioCodecs       []string `json:"audio_codecs"`
 	SupportsFMP4HLS   bool     `json:"supports_fmp4_hls"`
 	SupportsDirect    bool     `json:"supports_direct"`
+	SupportsRemux     bool     `json:"supports_remux"`
+	SupportsTranscode bool     `json:"supports_transcode"`
 	MaxWidth          int      `json:"max_width,omitempty"`
 	MaxHeight         int      `json:"max_height,omitempty"`
 	MaxFrameRateMilli int      `json:"max_frame_rate_milli,omitempty"`
@@ -64,12 +71,34 @@ const (
 
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
-	Kind        Kind   `json:"kind"`
-	Container   string `json:"container,omitempty"`
-	VideoCodec  string `json:"video_codec,omitempty"`
-	AudioCodec  string `json:"audio_codec,omitempty"`
-	Description string `json:"description,omitempty"`
+	Kind            Kind   `json:"kind"`
+	Container       string `json:"container,omitempty"`
+	VideoCodec      string `json:"video_codec,omitempty"`
+	VideoProfile    string `json:"video_profile,omitempty"`
+	VideoLevel      int    `json:"video_level,omitempty"`
+	Width           int    `json:"width,omitempty"`
+	Height          int    `json:"height,omitempty"`
+	VideoBitrate    int64  `json:"video_bitrate,omitempty"`
+	FrameRateMilli  int    `json:"frame_rate_milli,omitempty"`
+	BitDepth        int    `json:"bit_depth,omitempty"`
+	HDR             string `json:"hdr,omitempty"`
+	AudioCodec      string `json:"audio_codec,omitempty"`
+	AudioProfile    string `json:"audio_profile,omitempty"`
+	AudioChannels   int    `json:"audio_channels,omitempty"`
+	AudioSampleRate int    `json:"audio_sample_rate,omitempty"`
+	AudioBitrate    int64  `json:"audio_bitrate,omitempty"`
+	Description     string `json:"description,omitempty"`
 }
+
+const (
+	compatibilityMaxWidth        = 1920
+	compatibilityMaxHeight       = 1080
+	compatibilityMaxFrameRate    = 30000
+	compatibilityVideoBitrate    = 5_000_000
+	compatibilityAudioChannels   = 2
+	compatibilityAudioSampleRate = 48000
+	compatibilityAudioBitrate    = 128_000
+)
 
 // PlanFor selects the least expensive compatible path from recorded plain values.
 func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadiness) (Plan, error) {
@@ -78,47 +107,41 @@ func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadi
 		return Plan{}, err
 	}
 	if directCompatible(media, client) {
-		return Plan{
-			Kind:        Direct,
-			Container:   media.Container,
-			VideoCodec:  media.VideoCodec,
-			AudioCodec:  media.AudioCodec,
-			Description: "Original media",
-		}, nil
+		plan := sourcePlan(Direct, media)
+		plan.Description = "Original media"
+		return plan, nil
 	}
 	if !fallbackCompatible(client) {
 		return Plan{Kind: Unsupported}, ErrUnsupported
 	}
-	if !ready.FFmpeg {
-		return Plan{}, ErrFFmpegUnavailable
+	if remuxCompatible(media, client) {
+		if !ready.FFmpeg {
+			return Plan{}, ErrFFmpegUnavailable
+		}
+		plan := sourcePlan(Remux, media)
+		plan.Container, plan.Description = "fmp4-hls", "Stream-copy fMP4 HLS"
+		return plan, nil
 	}
-	if !fallbackLimitsKnown(media, client) || exceedsKnownLimits(media, client) {
-		return Plan{Kind: Unsupported}, ErrUnsupported
+	if transcodeCompatible(media, client) {
+		if !ready.FFmpeg {
+			return Plan{}, ErrFFmpegUnavailable
+		}
+		return compatibilityPlan(media), nil
 	}
-	if codecCompatible(media, client) {
-		return Plan{Kind: Remux, Container: "fmp4-hls", VideoCodec: media.VideoCodec, AudioCodec: media.AudioCodec, Description: "Stream-copy fMP4 HLS"}, nil
-	}
-	return Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", AudioCodec: "aac", Description: "H.264/AAC compatibility stream"}, nil
+	return Plan{Kind: Unsupported}, ErrUnsupported
 }
 
-// fallbackLimitsKnown prevents stream-copy or an unbounded transcode from
-// carrying a source property the browser did not positively assess.
-func fallbackLimitsKnown(media MediaProperties, client ClientCapabilities) bool {
-	return !(media.Width > 0 && client.MaxWidth <= 0 ||
-		media.Height > 0 && client.MaxHeight <= 0 ||
-		media.FrameRateMilli > 0 && client.MaxFrameRateMilli <= 0 ||
-		media.BitDepth > 0 && client.MaxBitDepth <= 0 ||
-		media.AudioChannels > 0 && client.MaxAudioChannels <= 0 ||
-		media.HDR != "" && len(client.HDR) == 0)
+func sourcePlan(kind Kind, media MediaProperties) Plan {
+	return Plan{Kind: kind, Container: media.Container, VideoCodec: media.VideoCodec, VideoProfile: media.VideoProfile, VideoLevel: media.VideoLevel, Width: media.Width, Height: media.Height, VideoBitrate: media.VideoBitrate, FrameRateMilli: media.FrameRateMilli, BitDepth: media.BitDepth, HDR: media.HDR, AudioCodec: media.AudioCodec, AudioProfile: media.AudioProfile, AudioChannels: media.AudioChannels, AudioSampleRate: media.AudioSampleRate, AudioBitrate: media.AudioBitrate}
 }
 
-func exceedsKnownLimits(media MediaProperties, client ClientCapabilities) bool {
-	return media.Width > 0 && client.MaxWidth > 0 && media.Width > client.MaxWidth ||
-		media.Height > 0 && client.MaxHeight > 0 && media.Height > client.MaxHeight ||
-		media.FrameRateMilli > 0 && client.MaxFrameRateMilli > 0 && media.FrameRateMilli > client.MaxFrameRateMilli ||
-		media.BitDepth > 0 && client.MaxBitDepth > 0 && media.BitDepth > client.MaxBitDepth ||
-		media.AudioChannels > 0 && client.MaxAudioChannels > 0 && media.AudioChannels > client.MaxAudioChannels ||
-		media.HDR != "" && len(client.HDR) > 0 && !containsFold(client.HDR, media.HDR)
+func compatibilityPlan(media MediaProperties) Plan {
+	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: media.Width, Height: media.Height, VideoBitrate: compatibilityVideoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, Description: "Bounded H.264/AAC compatibility stream"}
+	if media.AudioCodec != "" {
+		plan.AudioCodec, plan.AudioProfile = "aac", "LC"
+		plan.AudioChannels, plan.AudioSampleRate, plan.AudioBitrate = compatibilityAudioChannels, compatibilityAudioSampleRate, compatibilityAudioBitrate
+	}
+	return plan
 }
 
 func (client ClientCapabilities) Normalized() (ClientCapabilities, error) {
@@ -183,6 +206,25 @@ func directCompatible(media MediaProperties, client ClientCapabilities) bool {
 	return client.SupportsDirect && containerCompatible(media.Container, client.Containers) && codecCompatible(media, client) && limitsCompatible(media, client)
 }
 
+func remuxCompatible(media MediaProperties, client ClientCapabilities) bool {
+	return client.SupportsRemux && codecCompatible(media, client) && limitsCompatible(media, client)
+}
+
+func transcodeCompatible(media MediaProperties, client ClientCapabilities) bool {
+	if !client.SupportsTranscode || media.Width <= 0 || media.Height <= 0 || media.Width%2 != 0 || media.Height%2 != 0 || media.FrameRateMilli <= 0 || media.Width > compatibilityMaxWidth || media.Height > compatibilityMaxHeight || media.FrameRateMilli > compatibilityMaxFrameRate || media.HDR != "" {
+		return false
+	}
+	if _, ok := videoCodecNames[strings.ToLower(strings.TrimSpace(media.VideoCodec))]; !ok {
+		return false
+	}
+	if media.AudioCodec != "" {
+		if _, ok := audioCodecNames[strings.ToLower(strings.TrimSpace(media.AudioCodec))]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func limitsCompatible(media MediaProperties, client ClientCapabilities) bool {
 	if media.Width > 0 && (client.MaxWidth <= 0 || media.Width > client.MaxWidth) || media.Height > 0 && (client.MaxHeight <= 0 || media.Height > client.MaxHeight) || media.FrameRateMilli > 0 && (client.MaxFrameRateMilli <= 0 || media.FrameRateMilli > client.MaxFrameRateMilli) || media.BitDepth > 0 && (client.MaxBitDepth <= 0 || media.BitDepth > client.MaxBitDepth) || media.AudioChannels > 0 && (client.MaxAudioChannels <= 0 || media.AudioChannels > client.MaxAudioChannels) {
 		return false
@@ -191,7 +233,7 @@ func limitsCompatible(media MediaProperties, client ClientCapabilities) bool {
 }
 
 func codecCompatible(media MediaProperties, client ClientCapabilities) bool {
-	if !containsFold(client.VideoCodecs, media.VideoCodec) || !containsFold(client.AudioCodecs, media.AudioCodec) {
+	if !containsFold(client.VideoCodecs, media.VideoCodec) || media.AudioCodec != "" && !containsFold(client.AudioCodecs, media.AudioCodec) {
 		return false
 	}
 	return media.VideoProfile == "" || len(client.VideoProfiles) == 0 || containsFold(client.VideoProfiles, media.VideoProfile)

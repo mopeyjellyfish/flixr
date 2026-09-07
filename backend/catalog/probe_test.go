@@ -57,7 +57,7 @@ func TestFFprobeRejectsMalformedOutput(t *testing.T) {
 }
 
 func TestFFprobeRecordsFrameRateAndBitDepth(t *testing.T) {
-	payload := `{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"2"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","avg_frame_rate":"30000/1001","bits_per_raw_sample":"10"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":6}]}`
+	payload := `{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"2","bit_rate":"900000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","level":40,"avg_frame_rate":"30000/1001","bits_per_raw_sample":"10"},{"index":1,"codec_type":"audio","codec_name":"aac","profile":"LC","channels":6,"sample_rate":"48000","bit_rate":"256000"}]}`
 	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}
 	file, err := os.CreateTemp(t.TempDir(), "media")
 	if err != nil {
@@ -68,8 +68,22 @@ func TestFFprobeRecordsFrameRateAndBitDepth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FrameRateMilli != 29970 || got.BitDepth != 10 || got.Audio[0].Channels != 6 {
+	if got.VideoLevel != 40 || got.Bitrate != 900000 || got.FrameRateMilli != 29970 || got.BitDepth != 10 || got.Audio[0].Profile != "LC" || got.Audio[0].Channels != 6 || got.Audio[0].SampleRate != 48000 || got.Audio[0].Bitrate != 256000 {
 		t.Fatalf("properties = %#v", got)
+	}
+}
+
+func TestFFprobeUsesFormatBitrateAsConservativeStreamBound(t *testing.T) {
+	payload := `{"format":{"format_name":"matroska,webm","duration":"2","bit_rate":"157945"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","level":12,"width":320,"height":180,"avg_frame_rate":"24/1","bits_per_raw_sample":"8"},{"index":1,"codec_type":"audio","codec_name":"aac","profile":"LC","channels":1,"sample_rate":"48000"}]}`
+	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}
+	file, err := os.CreateTemp(t.TempDir(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	got, err := prober.Probe(context.Background(), file)
+	if err != nil || got.Bitrate != 157945 || got.Audio[0].Bitrate != 157945 {
+		t.Fatalf("properties = %#v, err = %v", got, err)
 	}
 }
 

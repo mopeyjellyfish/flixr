@@ -21,6 +21,14 @@ import (
 	"github.com/spf13/afero"
 )
 
+func TestPlaybackPlannerReceivesExactPrimaryStreamProperties(t *testing.T) {
+	item := catalog.Item{MediaProperties: catalog.MediaProperties{Container: "matroska", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, Bitrate: 157945, FrameRateMilli: 24000, BitDepth: 8, Audio: []catalog.AudioTrack{{Codec: "aac", Profile: "LC", Channels: 1, SampleRate: 48000, Bitrate: 157945}}}}
+	got := mediaProperties(item)
+	if got.VideoLevel != 12 || got.VideoBitrate != 157945 || got.AudioProfile != "LC" || got.AudioSampleRate != 48000 || got.AudioBitrate != 157945 {
+		t.Fatalf("planner media = %#v", got)
+	}
+}
+
 type webFakeProcess struct {
 	once     sync.Once
 	done     chan struct{}
@@ -50,6 +58,9 @@ func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.
 	dir := filepath.Dir(args[len(args)-1])
 	files := afero.Afero{Fs: afero.NewOsFs()}
 	if err := files.WriteFile(filepath.Join(dir, "index.m3u8"), []byte("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\nsegment-000001.m4s\n"), 0o600); err != nil {
+		return nil, err
+	}
+	if err := files.WriteFile(filepath.Join(dir, "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=320x180,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
 		return nil, err
 	}
 	if err := files.WriteFile(filepath.Join(dir, "init.mp4"), []byte("init"), 0o600); err != nil {
@@ -110,7 +121,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	server.readyMu.Unlock()
 	handler := server.Handler()
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -132,8 +143,17 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("#EXTM3U")) {
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" || !bytes.Contains(response.Body.Bytes(), []byte(`CODECS="avc1.640028,mp4a.40.2"`)) || !bytes.Contains(response.Body.Bytes(), []byte("index.m3u8")) {
 		t.Fatalf("manifest = %d: %s", response.Code, response.Body.String())
+	}
+	for _, asset := range []struct{ name, contentType string }{{"index.m3u8", "application/vnd.apple.mpegurl"}, {"init.mp4", "video/mp4"}, {"segment-000001.m4s", "video/mp4"}} {
+		request = httptest.NewRequest(http.MethodGet, "/api/v1/playback/sessions/"+plan.SessionID+"/"+asset.name, nil)
+		request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != asset.contentType {
+			t.Fatalf("%s = %d, content type %q", asset.name, response.Code, response.Header().Get("Content-Type"))
+		}
 	}
 	request = httptest.NewRequest(http.MethodGet, plan.MediaURL, nil)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: twoToken})

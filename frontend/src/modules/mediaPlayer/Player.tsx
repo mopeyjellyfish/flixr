@@ -71,7 +71,8 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
   useEffect(() => {
     let active = true;
     let timer = 0;
-	api.item(catalogID).then(browserCapabilities).then((capabilities) => api.playbackPlan(catalogID, capabilities)).then(async (initial) => {
+	api.item(catalogID).then(browserCapabilities).then((capabilities) => active ? api.playbackPlan(catalogID, capabilities) : undefined).then(async (initial) => {
+		if (!initial) return;
       if (!active) { void api.playbackStop(initial.session_id); return; }
       let plan = initial;
       playback.current = initial;

@@ -30,8 +30,12 @@ type playbackSettingsRequest struct {
 
 func mediaProperties(item catalog.Item) playback.MediaProperties {
 	audio := ""
+	audioProfile := ""
+	audioSampleRate := 0
+	var audioBitrate int64
 	if len(item.Audio) > 0 {
-		audio = item.Audio[0].Codec
+		audio, audioProfile = item.Audio[0].Codec, item.Audio[0].Profile
+		audioSampleRate, audioBitrate = item.Audio[0].SampleRate, item.Audio[0].Bitrate
 	}
 	subtitles := make([]string, 0, len(item.Subtitles))
 	for _, track := range item.Subtitles {
@@ -41,7 +45,7 @@ func mediaProperties(item catalog.Item) playback.MediaProperties {
 	if len(item.Audio) > 0 {
 		channels = item.Audio[0].Channels
 	}
-	return playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, Width: item.Width, Height: item.Height, FrameRateMilli: item.FrameRateMilli, BitDepth: item.BitDepth, HDR: item.HDR, AudioCodec: audio, AudioChannels: channels, Subtitles: subtitles}
+	return playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, VideoLevel: item.VideoLevel, Width: item.Width, Height: item.Height, VideoBitrate: item.Bitrate, FrameRateMilli: item.FrameRateMilli, BitDepth: item.BitDepth, HDR: item.HDR, AudioCodec: audio, AudioProfile: audioProfile, AudioChannels: channels, AudioSampleRate: audioSampleRate, AudioBitrate: audioBitrate, Subtitles: subtitles}
 }
 
 func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +165,7 @@ func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) playbackManifest(w http.ResponseWriter, r *http.Request) {
-	s.servePlaybackAsset(w, r, "index.m3u8")
+	s.servePlaybackAsset(w, r, "master.m3u8")
 }
 
 func (s *Server) playbackSegment(w http.ResponseWriter, r *http.Request) {
