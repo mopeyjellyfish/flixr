@@ -66,6 +66,50 @@ func (s *Server) metadataUnmatch(w http.ResponseWriter, r *http.Request) {
 	write(w, http.StatusOK, item)
 }
 
+func (s *Server) metadataFields(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	fields, err := s.catalog.MetadataFields(r.PathValue("kind"), r.PathValue("id"))
+	if err != nil {
+		s.metadataError(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"fields": fields})
+}
+func (s *Server) metadataPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	var edit catalog.MetadataEdit
+	if !decode(r, &edit) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	fields, err := s.catalog.PreviewMetadata(r.PathValue("kind"), r.PathValue("id"), edit)
+	if err != nil {
+		s.metadataError(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"fields": fields})
+}
+func (s *Server) metadataEdit(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	var edit catalog.MetadataEdit
+	if !decode(r, &edit) {
+		fail(w, 400, "invalid_request")
+		return
+	}
+	item, err := s.catalog.EditMetadata(r.PathValue("kind"), r.PathValue("id"), edit)
+	if err != nil {
+		s.metadataError(w, err)
+		return
+	}
+	write(w, http.StatusOK, item)
+}
+
 func (s *Server) metadataError(w http.ResponseWriter, err error) {
 	if errors.Is(err, catalog.ErrMetadataNotFound) {
 		fail(w, http.StatusNotFound, "catalog_not_found")

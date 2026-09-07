@@ -717,6 +717,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	c.mu.RUnlock()
 	var observations []scanObservation
 	for id, item := range next {
+		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
+			c.applyLockedFields("film", previous.ID, &item)
+		}
 		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok && (previous.OwnerMatch || previous.OwnerUnmatch) {
 			item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
 			next[id] = item
