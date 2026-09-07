@@ -17,5 +17,6 @@ export default defineConfig({
     { name: 'firefox', testMatch: /mock-api\.spec\.ts/, use: { ...devices['Desktop Firefox'] } },
     { name: 'webkit', testMatch: /mock-api\.spec\.ts/, use: { ...devices['Desktop Safari'] } },
     { name: 'chromium-production', testMatch: /production\.spec\.ts/, use: { ...devices['Desktop Chrome'], launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : undefined } },
+    { name: 'chromium-metadata', testMatch: /metadata-provider\.spec\.ts/, use: { ...devices['Desktop Chrome'], launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : undefined } },
   ],
 });

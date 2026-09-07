@@ -731,10 +731,19 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	}
 	if provider != nil && token != "" {
 		for id, item := range next {
-			if item.Kind != "film" || item.ProviderID != "" || item.OwnerUnmatch {
+			if item.Kind != "film" || item.OwnerUnmatch {
 				continue
 			}
-			enrichment, err := provider.Lookup(ctx, token, "film", item.Title)
+			var enrichment Enrichment
+			var err error
+			if item.ProviderID != "" {
+				enrichment, err = c.pendingArtwork(artworkIdentity{catalogKind: "film", catalogID: id, providerID: item.ProviderID})
+				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
+					continue
+				}
+			} else {
+				enrichment, err = provider.Lookup(ctx, token, "film", item.Title)
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
@@ -746,18 +755,25 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				observations = append(observations, providerFailure("film:"+id, "unmatched"))
 				continue
 			}
-			artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+			identity := artworkIdentity{catalogKind: "film", catalogID: id, providerID: enrichment.ProviderID}
+			artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
+			if err != nil {
+				return nil, err
+			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if artworkFailed {
 				observations = append(observations, providerFailure("film:"+id, "provider_artwork_failed"))
 			}
-			item.LocalOnly = false
-			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
-			if enrichment.Title != "" {
-				item.Title = enrichment.Title
+			if item.ProviderID == "" {
+				item.LocalOnly = false
+				item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
+				if enrichment.Title != "" {
+					item.Title = enrichment.Title
+				}
 			}
+			item.Poster, item.Backdrop = enrichment.Poster, enrichment.Backdrop
 			if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
 				c.applyLockedFields("film", previous.ID, &item)
 			}
@@ -777,13 +793,24 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 		series[item.SeriesID] = Series{ID: item.SeriesID, Title: seriesTitle(item.path, item.Title), Kind: "series", LocalOnly: item.LocalOnly, Playable: true}
 	}
 	for id, value := range series {
-		if previous, ok := previousSeries[id]; ok && (previous.ProviderID != "" || previous.OwnerUnmatch) {
+		previous, retained := previousSeries[id]
+		var enrichment Enrichment
+		var enrichmentErr error
+		attempted := false
+		if retained && (previous.ProviderID != "" || previous.OwnerUnmatch) {
 			value.Title = previous.Title
 			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly
+			if !previous.OwnerUnmatch && provider != nil && token != "" {
+				enrichment, enrichmentErr = c.pendingArtwork(artworkIdentity{catalogKind: "series", catalogID: id, providerID: previous.ProviderID})
+				attempted = enrichmentErr != nil || enrichment.Poster != "" || enrichment.Backdrop != ""
+			}
 		} else if provider != nil && token != "" {
-			enrichment, err := provider.Lookup(ctx, token, "series", value.Title)
-			if err != nil {
+			enrichment, enrichmentErr = provider.Lookup(ctx, token, "series", value.Title)
+			attempted = true
+		}
+		if attempted {
+			if enrichmentErr != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -791,18 +818,25 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			} else if enrichment.ProviderID == "" {
 				observations = append(observations, providerFailure("series:"+id, "unmatched"))
 			} else {
-				artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+				identity := artworkIdentity{catalogKind: "series", catalogID: id, providerID: enrichment.ProviderID}
+				artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, value.Poster, value.Backdrop)
+				if err != nil {
+					return nil, err
+				}
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
 				if artworkFailed {
 					observations = append(observations, providerFailure("series:"+id, "provider_artwork_failed"))
 				}
-				value.LocalOnly = false
-				value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
-				if enrichment.Title != "" {
-					value.Title = enrichment.Title
+				if value.ProviderID == "" {
+					value.LocalOnly = false
+					value.ProviderID, value.Year, value.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
+					if enrichment.Title != "" {
+						value.Title = enrichment.Title
+					}
 				}
+				value.Poster, value.Backdrop = enrichment.Poster, enrichment.Backdrop
 			}
 		}
 		if previous, ok := previousSeries[id]; ok {
@@ -815,10 +849,19 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	if episodeProvider, ok := provider.(EpisodeProvider); ok && token != "" {
 		for id, item := range next {
 			parent, found := series[item.SeriesID]
-			if item.Kind != "episode" || !found || parent.ProviderID == "" || (item.ProviderID != "" && (item.Poster != "" || item.Backdrop != "")) {
+			if item.Kind != "episode" || !found || parent.ProviderID == "" {
 				continue
 			}
-			enrichment, err := episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+			var enrichment Enrichment
+			var err error
+			if item.ProviderID != "" {
+				enrichment, err = c.pendingArtwork(artworkIdentity{catalogKind: "episode", catalogID: id, providerID: item.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID})
+				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
+					continue
+				}
+			} else {
+				enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
@@ -830,18 +873,25 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
 				continue
 			}
-			artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+			identity := artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
+			artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
+			if err != nil {
+				return nil, err
+			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if artworkFailed {
 				observations = append(observations, providerFailure("episode:"+id, "provider_artwork_failed"))
 			}
-			item.LocalOnly = false
-			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
-			if enrichment.Title != "" {
-				item.Title = enrichment.Title
+			if item.ProviderID == "" {
+				item.LocalOnly = false
+				item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
+				if enrichment.Title != "" {
+					item.Title = enrichment.Title
+				}
 			}
+			item.Poster, item.Backdrop = enrichment.Poster, enrichment.Backdrop
 			next[id] = item
 		}
 	}
@@ -903,6 +953,9 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 			for _, old := range previous {
 				if old.ID != x.ID && old.rootKind == x.rootKind && old.path == x.path {
 					if _, err = tx.Exec(`UPDATE catalog_metadata_fields SET catalog_id=? WHERE catalog_kind='film' AND catalog_id=?`, x.ID, old.ID); err != nil {
+						return err
+					}
+					if _, err = tx.Exec(`UPDATE catalog_artwork_retries SET catalog_id=? WHERE catalog_kind=? AND catalog_id=?`, x.ID, old.Kind, old.ID); err != nil {
 						return err
 					}
 				}
@@ -968,6 +1021,21 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM catalog_series WHERE NOT EXISTS (SELECT 1 FROM catalog_seasons WHERE catalog_seasons.series_id=catalog_series.id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind IN ('film','episode') AND NOT EXISTS (SELECT 1 FROM catalog_items WHERE catalog_items.id=catalog_artwork_retries.catalog_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='series' AND NOT EXISTS (SELECT 1 FROM catalog_series WHERE catalog_series.id=catalog_artwork_retries.catalog_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind IN ('film','episode') AND NOT EXISTS (SELECT 1 FROM catalog_items WHERE catalog_items.id=catalog_artwork_retries.catalog_id AND catalog_items.provider_id=catalog_artwork_retries.provider_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='series' AND NOT EXISTS (SELECT 1 FROM catalog_series WHERE catalog_series.id=catalog_artwork_retries.catalog_id AND catalog_series.provider_id=catalog_artwork_retries.provider_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='episode' AND NOT EXISTS (SELECT 1 FROM catalog_items JOIN catalog_series ON catalog_series.id=catalog_items.series_id WHERE catalog_items.id=catalog_artwork_retries.catalog_id AND catalog_items.series_id=catalog_artwork_retries.parent_catalog_id AND catalog_series.provider_id=catalog_artwork_retries.parent_provider_id)`); err != nil {
 			return err
 		}
 		if _, err = tx.Exec("DELETE FROM scan_files WHERE scan_id=?", status.ID); err != nil {

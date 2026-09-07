@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,27 +77,120 @@ func (p metadataBlockingProvider) Lookup(context.Context, string, string, string
 
 type retryEpisodeArtworkProvider struct {
 	episodeCalls int
-	artworkCalls int
+	exactCalls   map[string]int
+	artworkCalls map[string]int
 }
 
-func (p *retryEpisodeArtworkProvider) Lookup(_ context.Context, _ string, kind, _ string) (catalog.Enrichment, error) {
+type staleArtworkProvider struct {
+	fetchCalls int
+}
+
+func (p *staleArtworkProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "same-id", Title: "Automatic title", Poster: "/automatic-poster.jpg"}, nil
+}
+
+func (p *staleArtworkProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
+	return nil, nil
+}
+
+func (p *staleArtworkProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "same-id", Title: "Owner title"}, nil
+}
+
+func (p *staleArtworkProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	p.fetchCalls++
+	if p.fetchCalls == 1 {
+		return catalog.Artwork{}, errors.New("temporary artwork outage")
+	}
+	return catalog.Artwork{Bytes: []byte("stale automatic artwork"), ContentType: "image/jpeg"}, nil
+}
+
+type staleEpisodeArtworkProvider struct {
+	staleArtworkProvider
+}
+
+type ownerMatchArtworkRetryProvider struct {
+	fetchCalls int
+}
+
+func (p *ownerMatchArtworkRetryProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{}, nil
+}
+
+func (p *ownerMatchArtworkRetryProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
+	return nil, nil
+}
+
+func (p *ownerMatchArtworkRetryProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "selected-id", Title: "Owner selection", Poster: "/selected-poster.jpg"}, nil
+}
+
+func (p *ownerMatchArtworkRetryProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	p.fetchCalls++
+	if p.fetchCalls == 1 {
+		return catalog.Artwork{}, errors.New("temporary artwork outage")
+	}
+	return catalog.Artwork{Bytes: []byte("selected poster"), ContentType: "image/jpeg"}, nil
+}
+
+func (p *staleEpisodeArtworkProvider) Lookup(_ context.Context, _ string, kind, _ string) (catalog.Enrichment, error) {
 	if kind == "series" {
-		return catalog.Enrichment{ProviderID: "series-id", Title: "Accurate Show"}, nil
+		return catalog.Enrichment{ProviderID: "same-series-id", Title: "Automatic series"}, nil
 	}
 	return catalog.Enrichment{}, nil
 }
 
-func (p *retryEpisodeArtworkProvider) LookupEpisode(context.Context, string, string, int, int) (catalog.Enrichment, error) {
-	p.episodeCalls++
-	return catalog.Enrichment{ProviderID: "episode-id", Title: "Accurate Episode", Backdrop: "/still.jpg"}, nil
+func (p *staleEpisodeArtworkProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "same-series-id"}, nil
 }
 
-func (p *retryEpisodeArtworkProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
-	p.artworkCalls++
-	if p.artworkCalls == 1 {
+func (p *staleEpisodeArtworkProvider) LookupEpisode(context.Context, string, string, int, int) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "episode-id", Title: "Automatic episode", Backdrop: "/automatic-still.jpg"}, nil
+}
+
+func (p *retryEpisodeArtworkProvider) Lookup(_ context.Context, _ string, kind, _ string) (catalog.Enrichment, error) {
+	return p.enrichment(kind), nil
+}
+
+func (p *retryEpisodeArtworkProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
+	return nil, nil
+}
+
+func (p *retryEpisodeArtworkProvider) ByID(_ context.Context, _, kind, _, _, _ string) (catalog.Enrichment, error) {
+	if p.exactCalls == nil {
+		p.exactCalls = map[string]int{}
+	}
+	p.exactCalls[kind]++
+	enrichment := p.enrichment(kind)
+	enrichment.Title = "Updated " + enrichment.Title
+	return enrichment, nil
+}
+
+func (p *retryEpisodeArtworkProvider) enrichment(kind string) catalog.Enrichment {
+	switch kind {
+	case "film":
+		return catalog.Enrichment{ProviderID: "film-id", Title: "Accurate Film", Poster: "/film-poster.jpg", Backdrop: "/film-backdrop.jpg"}
+	case "series":
+		return catalog.Enrichment{ProviderID: "series-id", Title: "Accurate Show", Poster: "/series-poster.jpg", Backdrop: "/series-backdrop.jpg"}
+	}
+	return catalog.Enrichment{}
+}
+
+func (p *retryEpisodeArtworkProvider) LookupEpisode(context.Context, string, string, int, int) (catalog.Enrichment, error) {
+	p.episodeCalls++
+	return catalog.Enrichment{ProviderID: "episode-id", Title: "Accurate Episode", Poster: "/episode-poster.jpg", Backdrop: "/still.jpg"}, nil
+}
+
+func (p *retryEpisodeArtworkProvider) FetchArtwork(_ context.Context, imagePath string) (catalog.Artwork, error) {
+	if p.artworkCalls == nil {
+		p.artworkCalls = map[string]int{}
+	}
+	p.artworkCalls[imagePath]++
+	call := p.artworkCalls[imagePath]
+	if (strings.Contains(imagePath, "backdrop") || strings.Contains(imagePath, "still")) && call == 1 {
 		return catalog.Artwork{}, errors.New("temporary artwork outage")
 	}
-	return catalog.Artwork{Bytes: []byte("episode image"), ContentType: "image/jpeg"}, nil
+	return catalog.Artwork{Bytes: []byte(fmt.Sprintf("%s:%d", imagePath, call)), ContentType: "image/jpeg"}, nil
 }
 
 func TestScanRecordsProviderOutcomes(t *testing.T) {
@@ -242,6 +337,30 @@ func TestScanRecordsProviderOutcomes(t *testing.T) {
 	})
 }
 
+func TestTMDBRateLimitStopsAfterOneRetryAndReportsFailedStatus(t *testing.T) {
+	requests := 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer provider.Close()
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	c.SetProvider(catalog.NewTMDBWithOrigins(provider.Client(), provider.URL, provider.URL))
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("rate-limited scan: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("provider requests = %d, want one request and one retry", requests)
+	}
+	if status := c.MetadataStatus(); status.State != "failed" || !status.Configured || !strings.Contains(status.Message, "start another scan") {
+		t.Fatalf("metadata status = %#v", status)
+	}
+}
+
 func openCatalog(t *testing.T, data string) (*sqlite.DB, *catalog.Catalog) {
 	t.Helper()
 	db, err := sqlite.Open(data)
@@ -344,6 +463,12 @@ func TestScanEnrichesFilmAndSeriesOnce(t *testing.T) {
 	if fake.calls["film:Film"] != 1 || fake.calls["series:Show"] != 1 {
 		t.Fatalf("provider calls = %#v", fake.calls)
 	}
+	if err := c.Scan(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls["film:Film"] != 1 || fake.calls["series:Show"] != 1 || fake.calls["episode:1:1"] != 1 || fake.calls["episode:1:2"] != 1 {
+		t.Fatalf("unchanged provider calls = %#v", fake.calls)
+	}
 }
 
 func TestNormalModeProviderSetupEnrichesUnchangedLibraryAndSurvivesRestart(t *testing.T) {
@@ -435,21 +560,61 @@ func TestNormalModeProviderSetupEnrichesUnchangedLibraryAndSurvivesRestart(t *te
 	}
 }
 
-func TestUnchangedEpisodeRetriesMissingArtworkAndKeepsProviderSeriesTitle(t *testing.T) {
-	tv, data := t.TempDir(), t.TempDir()
+func TestUnchangedProviderMatchesRetryEachMissingArtworkField(t *testing.T) {
+	films, tv, data := t.TempDir(), t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
 	writeMedia(t, filepath.Join(tv, "Show", "Show.S01E01.mp4"))
 	db, c := openCatalog(t, data)
 	defer db.Close()
 	provider := &retryEpisodeArtworkProvider{}
 	c.SetProvider(provider)
-	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots("", tv) != nil || c.Scan(context.Background(), 1) != nil {
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, tv) != nil || c.Scan(context.Background(), 1) != nil {
 		t.Fatalf("first scan: %v", err)
 	}
-	seriesID := c.MetadataTargets()[0].ID
+	items, _, err := c.Browse("", 0, 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("first browse = %#v, %v", items, err)
+	}
+	var film, seriesSummary catalog.Item
+	for _, item := range items {
+		if item.Kind == "film" {
+			film = item
+		} else if item.Kind == "series" {
+			seriesSummary = item
+		}
+	}
+	if film.Title != "Accurate Film" || film.Poster == "" || film.Backdrop != "" || seriesSummary.Title != "Accurate Show" || seriesSummary.Poster == "" || seriesSummary.Backdrop != "" {
+		t.Fatalf("first artwork = film %#v, series %#v", film, seriesSummary)
+	}
+	if _, err := c.EditMetadata("film", film.ID, catalog.MetadataEdit{Fields: []catalog.MetadataField{
+		{Field: "title", Value: "Owner Film", Source: "owner", Locked: true},
+		{Field: "poster", Value: film.Poster, Source: "owner", Locked: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.EditMetadata("series", seriesSummary.ID, catalog.MetadataEdit{Fields: []catalog.MetadataField{
+		{Field: "title", Value: "Owner Show", Source: "owner", Locked: true},
+		{Field: "poster", Value: seriesSummary.Poster, Source: "owner", Locked: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	seriesID := seriesSummary.ID
 	series, ok := c.Series(seriesID)
-	if !ok || series.Title != "Accurate Show" || series.Seasons[0].Episodes[0].Backdrop != "" || c.ScanStatus().Status != "partial" {
+	if !ok || series.Seasons[0].Episodes[0].Backdrop != "" || c.ScanStatus().Status != "partial" || c.ScanStatus().Failed != 3 {
 		t.Fatalf("first enrichment = %#v status=%#v", series, c.ScanStatus())
 	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Shutdown(context.Background())
+	c = reopened
+	c.SetProvider(provider)
 	if err := c.Scan(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -458,10 +623,216 @@ func TestUnchangedEpisodeRetriesMissingArtworkAndKeepsProviderSeriesTitle(t *tes
 		t.Fatalf("retried series = %#v", series)
 	}
 	episode := series.Seasons[0].Episodes[0]
-	if series.Title != "Accurate Show" || episode.Title != "Accurate Episode" || episode.Backdrop == "" || provider.episodeCalls != 2 || c.ScanStatus().Status != "complete" {
+	items, _, err = c.Browse("", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Kind == "film" {
+			film = item
+		} else if item.Kind == "series" {
+			seriesSummary = item
+		}
+	}
+	if film.Title != "Owner Film" || film.Poster == "" || film.Backdrop == "" || seriesSummary.Title != "Owner Show" || seriesSummary.Poster == "" || seriesSummary.Backdrop == "" || episode.Title != "Accurate Episode" || episode.Poster == "" || episode.Backdrop == "" || provider.episodeCalls != 1 || c.ScanStatus().Status != "complete" {
 		t.Fatalf("retried enrichment = %#v calls=%d status=%#v", series, provider.episodeCalls, c.ScanStatus())
 	}
-	if data, _, err := c.Artwork(episode.ID, "backdrop"); err != nil || string(data) != "episode image" {
-		t.Fatalf("retried artwork = %q, %v", data, err)
+	for _, check := range []struct{ id, kind, want string }{
+		{film.ID, "poster", "/film-poster.jpg:1"},
+		{film.ID, "backdrop", "/film-backdrop.jpg:2"},
+		{series.ID, "poster", "/series-poster.jpg:1"},
+		{series.ID, "backdrop", "/series-backdrop.jpg:2"},
+		{episode.ID, "poster", "/episode-poster.jpg:1"},
+		{episode.ID, "backdrop", "/still.jpg:2"},
+	} {
+		if data, _, err := c.Artwork(check.id, check.kind); err != nil || string(data) != check.want {
+			t.Fatalf("%s %s artwork = %q, %v", check.id, check.kind, data, err)
+		}
+	}
+	for _, imagePath := range []string{"/film-poster.jpg", "/series-poster.jpg", "/episode-poster.jpg"} {
+		if provider.artworkCalls[imagePath] != 1 {
+			t.Fatalf("cached %s fetched %d times", imagePath, provider.artworkCalls[imagePath])
+		}
+	}
+	if provider.exactCalls["film"] != 0 || provider.exactCalls["series"] != 0 {
+		t.Fatalf("pending artwork refetched metadata: %#v", provider.exactCalls)
+	}
+}
+
+func TestScanFailsWhenArtworkRetryCannotBeRecorded(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	c.SetProvider(&retryEpisodeArtworkProvider{})
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_artwork_retry_insert BEFORE INSERT ON catalog_artwork_retries BEGIN SELECT RAISE(ABORT, 'forced retry insert failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "remember backdrop artwork retry") {
+		t.Fatalf("scan error = %v", err)
+	}
+	if status := c.ScanStatus(); status.Status != "failed" || !strings.Contains(status.Message, "forced retry insert failure") {
+		t.Fatalf("scan status = %#v", status)
+	}
+}
+
+func TestOwnerRematchClearsPendingArtworkForSameProviderID(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &staleArtworkProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	item := c.MetadataTargets()[0]
+	if item.ProviderID != "same-id" || item.Poster != "" || c.ScanStatus().Status != "partial" {
+		t.Fatalf("initial metadata = %#v, status=%#v", item, c.ScanStatus())
+	}
+	if _, err := c.Match(context.Background(), "film", item.ID, "same-id", "en", "GB"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	item = c.MetadataTargets()[0]
+	if !item.OwnerMatch || item.Poster != "" || provider.fetchCalls != 1 {
+		t.Fatalf("old pending artwork applied after owner rematch: %#v, fetches=%d", item, provider.fetchCalls)
+	}
+}
+
+func TestOwnerMatchRetriesOfferedArtworkAfterTransientFailure(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &ownerMatchArtworkRetryProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	item := c.MetadataTargets()[0]
+	matched, err := c.Match(context.Background(), "film", item.ID, "selected-id", "en", "GB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched.OwnerMatch || matched.Poster != "" || provider.fetchCalls != 1 {
+		t.Fatalf("matched item = %#v, fetches=%d", matched, provider.fetchCalls)
+	}
+	var retries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_artwork_retries WHERE catalog_kind='film' AND catalog_id=? AND provider_id='selected-id' AND artwork_kind='poster'`, item.ID).Scan(&retries); err != nil || retries != 1 {
+		t.Fatalf("match retries = %d, %v", retries, err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	matched = c.MetadataTargets()[0]
+	if !matched.OwnerMatch || matched.Poster == "" || provider.fetchCalls != 2 || c.ScanStatus().Status != "complete" {
+		t.Fatalf("retried match = %#v, fetches=%d, status=%#v", matched, provider.fetchCalls, c.ScanStatus())
+	}
+}
+
+func TestOwnerSeriesRematchClearsChildEpisodeArtworkRetries(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(tv, "Show", "Show.S01E01.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &staleEpisodeArtworkProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots("", tv) != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	seriesSummary := c.MetadataTargets()[0]
+	if _, err := c.Match(context.Background(), "series", seriesSummary.ID, "same-series-id", "en", "GB"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	series, ok := c.Series(seriesSummary.ID)
+	if !ok || series.Seasons[0].Episodes[0].Backdrop != "" || provider.fetchCalls != 1 {
+		t.Fatalf("old episode artwork applied after series rematch: %#v, fetches=%d", series, provider.fetchCalls)
+	}
+}
+
+func TestArtworkRetryCompletionIsAtomic(t *testing.T) {
+	films, tv, data := t.TempDir(), t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	writeMedia(t, filepath.Join(tv, "Show", "Show.S01E01.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &retryEpisodeArtworkProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, tv) != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_artwork_retry_completion BEFORE DELETE ON catalog_artwork_retries BEGIN SELECT RAISE(ABORT, 'forced retry failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if status := c.ScanStatus(); status.Status != "partial" || status.Failed != 3 {
+		t.Fatalf("failed completion status = %#v", status)
+	}
+	var retries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_artwork_retries`).Scan(&retries); err != nil || retries != 3 {
+		t.Fatalf("pending retries = %d, %v", retries, err)
+	}
+	items, _, err := c.Browse("", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Poster == "" {
+			t.Fatalf("cached poster was lost: %#v", item)
+		}
+		if bytes, _, err := c.Artwork(item.ID, "poster"); err != nil || !strings.HasSuffix(string(bytes), ":1") {
+			t.Fatalf("cached poster changed: %q, %v", bytes, err)
+		}
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_artwork_retry_completion`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil || c.ScanStatus().Status != "complete" {
+		t.Fatalf("retry after database recovery: %v, status=%#v", err, c.ScanStatus())
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_artwork_retries`).Scan(&retries); err != nil || retries != 0 {
+		t.Fatalf("completed retries = %d, %v", retries, err)
+	}
+}
+
+func TestCompletedArtworkRetrySurvivesLaterScanPersistenceFailure(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &retryEpisodeArtworkProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_later_scan_persist BEFORE UPDATE OF title ON catalog_items BEGIN SELECT RAISE(ABORT, 'forced scan persistence failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "forced scan persistence failure") {
+		t.Fatalf("retry scan error = %v", err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER reject_later_scan_persist`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	item := c.MetadataTargets()[0]
+	if item.Backdrop == "" || provider.artworkCalls["/film-backdrop.jpg"] != 2 {
+		t.Fatalf("completed retry lost after later persistence failure: %#v, calls=%#v", item, provider.artworkCalls)
+	}
+	if data, _, err := c.Artwork(item.ID, "backdrop"); err != nil || string(data) != "/film-backdrop.jpg:2" {
+		t.Fatalf("completed backdrop = %q, %v", data, err)
 	}
 }

@@ -108,6 +108,11 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		return Item{}, err
 	}
 	defer tx.Rollback()
+	if providerWrite {
+		if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=?`, kind, id); err != nil {
+			return Item{}, err
+		}
+	}
 	seen := map[string]bool{}
 	for _, field := range edit.Fields {
 		field.Field = strings.TrimSpace(field.Field)
@@ -135,6 +140,11 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		if field.Field == "year" && field.Value != "" {
 			if _, err := strconv.Atoi(field.Value); err != nil {
 				return Item{}, errors.New("invalid year")
+			}
+		}
+		if !providerWrite && (field.Field == "poster" || field.Field == "backdrop") {
+			if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, kind, id, field.Field); err != nil {
+				return Item{}, err
 			}
 		}
 		if _, err := tx.Exec(`INSERT INTO catalog_metadata_fields(catalog_kind,catalog_id,field,value,source,locked) VALUES(?,?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id,field) DO UPDATE SET value=excluded.value,source=excluded.source,locked=excluded.locked`, kind, id, field.Field, field.Value, field.Source, boolInt(field.Locked)); err != nil {
@@ -296,7 +306,7 @@ func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdi
 	}
 	for imageKind, path := range map[string]string{"poster": enrichment.Poster, "backdrop": enrichment.Backdrop} {
 		if path != "" {
-			if _, ok := artwork[imageKind]; !ok {
+			if _, ok := artwork.available[imageKind]; !ok {
 				return MetadataEdit{}, nil, Item{}, ErrProviderUnavailable
 			}
 		}
@@ -304,7 +314,7 @@ func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdi
 	if err := ctx.Err(); err != nil {
 		return MetadataEdit{}, nil, Item{}, err
 	}
-	return refreshEdit(id, enrichment, artwork), artwork, item, nil
+	return refreshEdit(id, enrichment, artwork.available), artwork.available, item, nil
 }
 
 func refreshEdit(id string, enrichment Enrichment, artwork map[string]Artwork) MetadataEdit {
