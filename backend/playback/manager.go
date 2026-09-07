@@ -40,6 +40,7 @@ type ManagerConfig struct {
 
 type inputAuthority struct {
 	catalogID        string
+	sourceKey        string
 	audioStreamIndex int
 	external         bool
 	expiresAt        time.Time
@@ -262,7 +263,7 @@ func (m *Manager) create(profileID, catalogID string, plan Plan, positionMS int6
 	if plan.AudioSelected {
 		audioSelectionIndex = plan.AudioStreamIndex
 	}
-	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%t", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec, audioSelectionIndex, plan.AudioExternal)
+	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec, plan.SourceKey, audioSelectionIndex, plan.AudioExternal)
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
@@ -377,9 +378,9 @@ func (m *Manager) create(profileID, catalogID string, plan Plan, positionMS int6
 	}
 	m.generations[generationID] = gen
 	m.sessions[session.ID] = session
-	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, audioStreamIndex: -1, expiresAt: now.Add(settings.LeaseTTL)}
+	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: -1, expiresAt: now.Add(settings.LeaseTTL)}
 	if plan.AudioExternal {
-		m.inputs[inputTokens[1]] = inputAuthority{catalogID: catalogID, audioStreamIndex: plan.AudioStreamIndex, external: true, expiresAt: now.Add(settings.LeaseTTL)}
+		m.inputs[inputTokens[1]] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: plan.AudioStreamIndex, external: true, expiresAt: now.Add(settings.LeaseTTL)}
 	}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
@@ -680,15 +681,30 @@ func (m *Manager) retireGeneration(ctx context.Context, gen *generation) {
 	_ = m.files.RemoveAll(gen.dir)
 }
 
+func (m *Manager) InputCatalog(token string) (string, bool) {
+	id, _, _, _, ok := m.InputFile(token)
+	return id, ok
+}
+
+func (m *Manager) InputSource(token string) (string, string, bool) {
+	id, sourceKey, _, _, ok := m.InputFile(token)
+	return id, sourceKey, ok
+}
+
 func (m *Manager) Input(token string) (catalogID string, audioStreamIndex int, external, ok bool) {
+	id, _, index, external, ok := m.InputFile(token)
+	return id, index, external, ok
+}
+
+func (m *Manager) InputFile(token string) (catalogID, sourceKey string, audioStreamIndex int, external, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	authority, ok := m.inputs[token]
 	if !ok || !time.Now().Before(authority.expiresAt) {
 		delete(m.inputs, token)
-		return "", 0, false, false
+		return "", "", 0, false, false
 	}
-	return authority.catalogID, authority.audioStreamIndex, authority.external, true
+	return authority.catalogID, authority.sourceKey, authority.audioStreamIndex, authority.external, true
 }
 
 func (m *Manager) renewInputsLocked(gen *generation, expiresAt time.Time) {

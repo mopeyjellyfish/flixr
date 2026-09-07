@@ -54,6 +54,7 @@ const (
 
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
+	SourceKey              string `json:"-"`
 	Kind                   Kind   `json:"kind"`
 	Container              string `json:"container,omitempty"`
 	VideoCodec             string `json:"video_codec,omitempty"`

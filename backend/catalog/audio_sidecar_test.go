@@ -56,7 +56,11 @@ func TestAudioSidecarIsSelectablePathFreeAndDurable(t *testing.T) {
 	if containsPathJSON(string(encoded)) {
 		t.Fatalf("sidecar path leaked: %s", encoded)
 	}
-	file, err := library.OpenAudio(items[0].ID, 2, true)
+	playbackItem, err := library.PlaybackItemContext(context.Background(), items[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := library.OpenAudioSource(items[0].ID, playbackItem.SourceKey(), 2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,6 +68,10 @@ func TestAudioSidecarIsSelectablePathFreeAndDurable(t *testing.T) {
 	file.Close()
 	if err != nil || string(contents) != "external-audio" {
 		t.Fatalf("sidecar contents = %q, %v", contents, err)
+	}
+	if file, err := library.OpenAudioSource(items[0].ID, "changed-source", 2, true); err == nil {
+		file.Close()
+		t.Fatal("sidecar opened for a different physical source")
 	}
 
 	reopened, err := catalog.OpenWithProber(db, prober)

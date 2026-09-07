@@ -162,15 +162,22 @@ func (c *Catalog) loadExternalAudio() error {
 
 // OpenAudio opens a catalog-validated external audio selection beneath its media root.
 func (c *Catalog) OpenAudio(id string, selectionIndex int, external bool) (*os.File, error) {
+	return c.OpenAudioSource(id, "", selectionIndex, external)
+}
+
+// OpenAudioSource pins both the primary media identity and any selected sidecar
+// to the physical source admitted for the playback generation.
+func (c *Catalog) OpenAudioSource(id, sourceKey string, selectionIndex int, external bool) (*os.File, error) {
 	if !external {
-		return c.Open(id)
+		return c.OpenSource(id, sourceKey)
 	}
 	c.mu.RLock()
-	item, ok := c.items[id]
+	item, ok := c.playbackSource(id)
 	rootPath := c.film
 	if item.rootKind == "episode" {
 		rootPath = c.tv
 	}
+	item.sourceRoot = rootPath
 	var relativePath string
 	for _, track := range item.Audio {
 		if track.External && track.Index == selectionIndex {
@@ -179,7 +186,7 @@ func (c *Catalog) OpenAudio(id string, selectionIndex int, external bool) (*os.F
 		}
 	}
 	c.mu.RUnlock()
-	if !ok || relativePath == "" {
+	if !ok || !item.Playable || relativePath == "" || (sourceKey != "" && item.SourceKey() != sourceKey) {
 		return nil, os.ErrNotExist
 	}
 	root, err := os.OpenRoot(rootPath)

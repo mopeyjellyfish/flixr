@@ -153,6 +153,7 @@ for (const viewport of viewports) {
       ] } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
       if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [{ ...film, provider_id: '42' }] } };
+      if (path.endsWith('/owner/identity/repairs') && method === 'GET') return { json: { conflicts: [], merges: [] } };
       if (path.endsWith('/metadata/film/film-1/fields') && method === 'GET') return { json: { fields: [{ field: 'tags', value: 'family', source: 'local', locked: true }] } };
       if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
@@ -192,6 +193,52 @@ for (const viewport of viewports) {
     await check(page, errors);
   });
 }
+
+test('mocked owner identity repair confirms merge and unmerge without exposing file paths', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const errors: string[] = [];
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', (error) => errors.push(error.message));
+  const arrival = { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false };
+  const duplicate = { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false };
+  let merged = false;
+  let unmerged = false;
+  await mock(page, (path, method) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/owner/roots')) return { json: { films: '', tv: '' } };
+    if (path.endsWith('/settings/tmdb')) return { json: { configured: false } };
+    if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [] } };
+    if (path.endsWith('/owner/identity/repairs')) return { json: { conflicts: merged ? [] : [{ id: 7, kind: 'film', reason: 'provider_identity', state: 'open', left: arrival, right: duplicate }], merges: merged ? [{ id: 'merge-7', kind: 'film', state: unmerged ? 'unmerged' : 'active', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] }] : [] } };
+    if (path.endsWith('/owner/identity/merges') && method === 'POST') { merged = true; return { json: { id: 'merge-7', kind: 'film', state: 'active', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] } }; }
+    if (path.endsWith('/owner/identity/merges/merge-7/unmerge') && method === 'POST') { unmerged = true; return { json: { id: 'merge-7', kind: 'film', state: 'unmerged', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] } }; }
+    if (path.endsWith('/owner/settings')) return { json: { settings: [] } };
+    if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 } };
+    if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 }, generations: [] } };
+    if (path.endsWith('/scan/status')) return { json: { scan: {} } };
+    if (path.endsWith('/profiles')) return { json: { profiles: [] } };
+    return undefined;
+  });
+
+  await open(page, '/owner');
+  const repair = page.getByRole('region', { name: 'Identity repair' });
+  await expect(repair.getByText(/same provider identity/i)).toBeVisible();
+  await expect(repair).not.toContainText('film-a');
+  await expect(repair).not.toContainText('film-b');
+  await expect(repair).not.toContainText('/media');
+  await repair.getByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }).check();
+  page.once('dialog', (dialog) => dialog.accept());
+  await repair.getByRole('button', { name: /merge selected titles/i }).click();
+  await expect(repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('owner-identity-repair.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
+  await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('owner-identity-repair-mobile.png'), fullPage: true });
+  page.once('dialog', (dialog) => dialog.accept());
+  await repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }).click();
+  await expect(repair.getByText(/unmerge retained the state/i)).toBeVisible();
+  await check(page, errors);
+});
 
 test('mocked viewer journey: filtered grids, sort, demo detail, and My List', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });

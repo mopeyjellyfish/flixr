@@ -404,7 +404,7 @@ func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
 
 func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
 	session, err := manager.Create("profile-a", "film-1", plan, 4_000)
 	if err != nil {
 		t.Fatal(err)
@@ -423,6 +423,9 @@ func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
 	}
 	if catalogID, audioIndex, external, ok := manager.Input(tokens[1]); !ok || catalogID != "film-1" || audioIndex != 2 || !external {
 		t.Fatalf("audio authority = %q %d %v %v", catalogID, audioIndex, external, ok)
+	}
+	if catalogID, sourceKey, ok := manager.InputSource(tokens[1]); !ok || catalogID != "film-1" || sourceKey != "source-a" {
+		t.Fatalf("audio source authority = %q %q %v", catalogID, sourceKey, ok)
 	}
 	if !manager.Stop(session.ID, "profile-a") {
 		t.Fatal("stop failed")
@@ -505,4 +508,34 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestSourceVersionSeparatesGenerationsAndInputAuthority(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	first, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "original"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "replacement"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID == second.GenerationID {
+		t.Fatal("replacement shared original generation")
+	}
+	manager.mu.Lock()
+	tokens := make(map[string]string)
+	for token, authority := range manager.inputs {
+		tokens[token] = authority.sourceKey
+	}
+	manager.mu.Unlock()
+	if len(tokens) != 2 {
+		t.Fatalf("input authorities %v", tokens)
+	}
+	for token, want := range tokens {
+		id, key, ok := manager.InputSource(token)
+		if !ok || id != "film" || key != want {
+			t.Fatalf("input %s %s %v", id, key, ok)
+		}
+	}
 }

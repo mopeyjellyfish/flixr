@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -49,6 +49,9 @@ export const api = {
   editMetadata: (kind: string, id: string, fields: MetadataField[]) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/fields`, { method: 'PUT', body: JSON.stringify({ fields }) }),
   refreshMetadataPreview: (kind: string, id: string) => request<{ fields: MetadataField[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/refresh/preview`, { method: 'POST' }),
   refreshMetadata: (kind: string, id: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
+  identityRepairs: () => request<IdentityRepairs>('/owner/identity/repairs'),
+  mergeIdentity: (kind: string, survivorID: string, sourceID: string) => request<IdentityMerge>('/owner/identity/merges', { method: 'POST', body: JSON.stringify({ kind, survivor_id: survivorID, source_id: sourceID }) }),
+  unmergeIdentity: (mergeID: string) => request<IdentityMerge>(`/owner/identity/merges/${encodeURIComponent(mergeID)}/unmerge`, { method: 'POST' }),
   recheck: () => request<SetupStatus>('/owner/readiness/recheck', { method: 'POST' }),
   playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),

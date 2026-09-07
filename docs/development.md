@@ -251,3 +251,40 @@ Personal ratings are profile-scoped local records. They are never provider metad
 `GET /api/v1/history?limit=25&before=<cursor>` returns at most 100 events per page. `PUT` or `DELETE /api/v1/ratings/{catalogID}` changes the selected profile's rating. `POST /api/v1/history/import` accepts source events; an omitted `source_time` remains unknown rather than becoming an invented time. The server assigns internal event IDs and receipt timestamps; imports retain their original identity and timestamp in `source_id` and `source_time`. Completion writes use a random token persisted for the playback generation, so repeated observations deduplicate while later playbacks still create events after a catalog removal and re-add.
 
 `POST /api/v1/history/clear` hides the current profile's prior events while retaining the ledger. Its response has an ID and five-minute `undo_until`; `POST /api/v1/history/clear/{id}/undo` restores that clear within the window. Explicit watched/unwatched actions remain current-state progress actions and do not rewrite history.
+
+## Logical titles and identity repair
+
+Catalog IDs identify logical titles. Migration 019 preserves existing IDs and
+adds private physical-source records, including a full SHA-256 digest. First
+indexing and changed bytes require a full read; unchanged files reuse persisted
+proof and probe results. An unchanged pre-019 source receives its full digest on
+first playback admission, without requiring a library-wide rescan; cancellation
+or changed file evidence prevents admission. macOS and Linux also compare file
+identity and change time to detect equal-size replacements that preserve
+modification time. Other platforms use size and modification time for cache
+validation.
+
+Renames and moves retain an unambiguous title only with matching full-content
+proof. Sampled fingerprints and provider IDs alone never merge titles. A legacy
+file that disappeared before receiving a full digest needs an owner decision.
+A same-path replacement retains its title unless valid provider or episode
+evidence contradicts it. Missing files leave unavailable titles and their
+progress, My List membership, viewing ledger, and owner metadata intact.
+Byte-identical duplicates retain their physical sources and keep the existing
+primary while it is present.
+Admitted playback pins a private source version; a changed source requires a new
+playback plan instead of changing bytes under an existing session.
+
+In **Server settings → Metadata → Identity repair**, review the conflict and
+explicitly choose which title keeps its identity. Merge retains both original
+anchors and metadata, snapshots each profile's progress, and resolves immutable
+history events to the survivor once. Unmerge restores the original mapping and
+unchanged progress; newer playback or a manual reset remains intact and is
+reported in the repair history. Series repairs list each affected episode.
+Original event title/kind and `original_catalog_id` remain available in history.
+
+The owner-only HTTP contract is `GET /api/v1/owner/identity/repairs`,
+`POST /api/v1/owner/identity/merges` with `kind`, `survivor_id`, and `source_id`,
+and `POST /api/v1/owner/identity/merges/{id}/unmerge`. Overlapping active repairs
+or repeated undo return HTTP 409 `identity_conflict`. Responses contain public
+title details and reconciliation decisions, never filesystem paths or digests.
