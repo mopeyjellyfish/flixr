@@ -18,3 +18,11 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 | Lease TTL, heartbeat, segment window, process grace | 45s, 15s, 60s, 2s | server / environment | `FLIXR_LEASE_TTL`, `FLIXR_HEARTBEAT_INTERVAL`, `FLIXR_SEGMENT_WINDOW`, `FLIXR_PROCESS_GRACE` | yes |
 
 The owner Configuration panel provides a searchable Basic view, an Advanced view, portable non-secret export, and import preview. Imports use the same validated library or playback setter as the owner form and accept exactly one scope per request, so each applied change is atomic at that scope. Mixed scopes, network and access settings require explicit review. Exports omit all secret values; previews reject environment-managed values.
+
+## Metadata edits and refresh
+
+In Server settings → Metadata, expand **Edit metadata** for a film or series. Edit its title, synopsis, year, cached artwork references, tags, or local content rating, select the fields to lock, and choose **Save metadata**. Locked values survive rescans and provider refresh. Tags and content ratings remain local and are never replaced by a provider refresh.
+
+To refresh a locked field, clear **Lock this field** and save first. **Preview provider refresh** shows the proposed values and their source; **Refresh unlocked fields** applies that provider snapshot while checking the current locks again. Previews last one minute, and the server retains the four most recent title previews. After expiry, eviction, or a restart, refresh fetches a new snapshot. Matching or unmatching a title invalidates older snapshots of its identity.
+
+Metadata and refreshed artwork references commit together. Provider, artwork-cache, cancellation, and database failures leave the previous committed values and artwork intact. Cached images remain local; failed refresh objects are removed, and bounded background maintenance collects objects abandoned by an interrupted process.

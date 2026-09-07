@@ -139,7 +139,7 @@ for (const viewport of viewports) {
     await open(page, '/search?q=relay');
     await expect(page.getByTestId('card-series-1')).toBeVisible();
 
-    await mock(page, (path) => {
+    await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed: true, readiness: { ffprobe: false, ffmpeg: true } } };
       if (path.endsWith('/owner/roots')) return { json: { films: '/media/films', tv: '/media/tv' } };
       if (path.endsWith('/owner/settings')) return { json: { settings: [
@@ -150,7 +150,9 @@ for (const viewport of viewports) {
         { key: 'playback.global_bytes', category: 'Playback', scope: 'server', default: '536870912', environment: 'FLIXR_GLOBAL_BYTES', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'at least generation bytes', secret: false, advanced: false, value: '536870912', source: 'saved', mutable: true },
       ] } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
-      if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [] } };
+      if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [{ ...film, provider_id: '42' }] } };
+      if (path.endsWith('/metadata/film/film-1/fields') && method === 'GET') return { json: { fields: [{ field: 'tags', value: 'family', source: 'local', locked: true }] } };
+      if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
       if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
       if (path.endsWith('/scan/status')) return { json: { scan: { status: 'partial', scanned: 2, unmatched: 1, failed: 1 } } };
@@ -161,6 +163,10 @@ for (const viewport of viewports) {
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
     await expect(page.getByText(/partial: 2 scanned/i)).toBeVisible();
     await expect(page.getByLabel(/TMDB access token/i)).toHaveValue('');
+    await page.getByText('Edit metadata').click();
+    await expect(page.getByLabel('Tags')).toHaveValue('family');
+    await page.getByRole('button', { name: /preview provider refresh/i }).click();
+    await expect(page.getByText(/Provider refresh/)).toBeVisible();
     await check(page, errors);
 
     await mock(page, (path) => {

@@ -41,6 +41,7 @@ export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons
 export type OwnerRoots = { films: string; tv: string };
 export type TMDBSettings = { configured: boolean };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
+export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
 export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };

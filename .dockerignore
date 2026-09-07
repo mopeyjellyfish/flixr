@@ -5,6 +5,10 @@
 bin
 backend/flixr
 backend/testdata
+!backend/testdata/
+!backend/testdata/media/
+!backend/testdata/media/corpus/
+!backend/testdata/media/corpus/Long Duration Seek 2026.mkv
 backend/web/assets
 flixr-data
 media

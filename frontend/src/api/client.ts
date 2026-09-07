@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type MetadataCandidate, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -44,6 +44,11 @@ export const api = {
   metadataCandidates: (kind: string, id: string) => request<{ candidates: MetadataCandidate[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/candidates`),
   matchMetadata: (kind: string, id: string, providerID: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/match`, { method: 'PUT', body: JSON.stringify({ provider_id: providerID, language: 'en-US', region: 'US' }) }),
   unmatchMetadata: (kind: string, id: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/match`, { method: 'DELETE' }),
+  metadataFields: (kind: string, id: string) => request<{ fields: MetadataField[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/fields`),
+  previewMetadata: (kind: string, id: string, fields: MetadataField[]) => request<{ fields: MetadataField[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/preview`, { method: 'POST', body: JSON.stringify({ fields }) }),
+  editMetadata: (kind: string, id: string, fields: MetadataField[]) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/fields`, { method: 'PUT', body: JSON.stringify({ fields }) }),
+  refreshMetadataPreview: (kind: string, id: string) => request<{ fields: MetadataField[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/refresh/preview`, { method: 'POST' }),
+  refreshMetadata: (kind: string, id: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/refresh`, { method: 'POST' }),
   recheck: () => request<SetupStatus>('/owner/readiness/recheck', { method: 'POST' }),
   playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),
@@ -55,9 +60,10 @@ export const api = {
   viewer: (media: 'all' | 'film' | 'series') => request<ViewerModel>(`/catalog/view?media=${media}`),
   saveViewerPreference: (media: 'all' | 'film' | 'series', preference: ViewerPreference) => request<ViewerPreference>(`/catalog/preferences/${media}`, { method: 'PUT', body: JSON.stringify(preference) }),
   setListed: (kind: 'film' | 'series', id: string, listed: boolean) => request<{ listed: boolean }>(`/catalog/list/${kind}/${encodeURIComponent(id)}`, { method: listed ? 'PUT' : 'DELETE' }),
+  setWatched: (kind: 'film' | 'episode' | 'season' | 'series', id: string, watched: boolean, season?: number) => request<{ watched: boolean }>(`/catalog/watched/${kind}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ watched, season }) }),
   playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, capabilities }) }),
-  playbackHeartbeat: (sessionID: string, positionMs: number) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
-  playbackSeek: (sessionID: string, positionMs: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs }) }),
+  playbackHeartbeat: (sessionID: string, positionMs: number, observation: number, ended = false) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs, observation, ended }) }),
+  playbackSeek: (sessionID: string, positionMs: number, observation: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs, observation }) }),
   playbackStop: (sessionID: string) => request<{ stopped: boolean }>(`/playback/sessions/${encodeURIComponent(sessionID)}/stop`, { method: 'POST' }),
   screens: () => request<{ screens: ScreenPresence[] }>('/screens'),
   advertiseScreen: (name: string) => request<{ screen: ScreenPresence; ticket: string }>('/screens/presence', { method: 'POST', body: JSON.stringify({ name }) }),

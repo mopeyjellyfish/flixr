@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type MetadataCandidate, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
+import { ApiError, type ActiveSession, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -153,7 +153,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
             <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
-            <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} />
+            <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
           </section>
           <SettingsPanel onNotice={setNotice} />
           <section id="support" className="owner-section" aria-labelledby="support-title">
@@ -166,8 +166,26 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   );
 }
 
-function MetadataRepair({ items, candidates, onFind, onSelect, onClear }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void>; onClear: (item: MetadataTarget) => Promise<void> }) {
-  return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Title identification</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}{item.provider_id ? ' · matched' : ' · unmatched'}</span><button type="button" onClick={() => void onFind(item)}>{item.provider_id ? 'Change match' : 'Find matches'}</button>{item.provider_id && <button type="button" onClick={() => void onClear(item)}>Unmatch</button>}{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}</li>)}</ul>}</section>;
+function MetadataRepair({ items, candidates, onFind, onSelect, onClear, onUpdate }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void>; onClear: (item: MetadataTarget) => Promise<void>; onUpdate: (item: MetadataTarget) => void }) {
+  return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Title identification</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}{item.provider_id ? ' · matched' : ' · unmatched'}</span><button type="button" onClick={() => void onFind(item)}>{item.provider_id ? 'Change match' : 'Find matches'}</button>{item.provider_id && <button type="button" onClick={() => void onClear(item)}>Unmatch</button>}{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}<MetadataEditor item={item} onSaved={onUpdate} /></li>)}</ul>}</section>;
+}
+
+const metadataInputs: Array<[MetadataField['field'], string, 'owner' | 'local']> = [['title', 'Title', 'owner'], ['synopsis', 'Synopsis', 'owner'], ['year', 'Release year', 'owner'], ['poster', 'Poster URL', 'owner'], ['backdrop', 'Backdrop URL', 'owner'], ['tags', 'Tags', 'local'], ['content_rating', 'Content rating', 'local']];
+
+function MetadataEditor({ item, onSaved }: { item: MetadataTarget; onSaved: (item: MetadataTarget) => void }) {
+  const [fields, setFields] = useState<MetadataField[]>([]);
+  const [preview, setPreview] = useState<MetadataField[]>([]);
+  const [open, setOpen] = useState(false);
+  const [notice, setNotice] = useState('');
+  const load = async () => { try { setFields((await api.metadataFields(item.kind, item.id)).fields ?? []); setOpen(true); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Metadata fields are unavailable.'); } };
+  const value = (name: MetadataField['field']) => fields.find((field) => field.field === name) ?? { field: name, value: name === 'title' ? item.title : name === 'synopsis' ? item.synopsis ?? '' : name === 'year' ? String(item.year ?? '') : name === 'poster' ? item.poster ?? '' : name === 'backdrop' ? item.backdrop ?? '' : '', source: name === 'tags' || name === 'content_rating' ? 'local' : 'owner', locked: false } as MetadataField;
+  const change = (name: MetadataField['field'], patch: Partial<MetadataField>) => setFields((current) => { const old = current.find((field) => field.field === name) ?? value(name); return [...current.filter((field) => field.field !== name), { ...old, ...patch }]; });
+  const editable = () => metadataInputs.map(([field, , source]) => ({ ...value(field), source, field }));
+  const save = async () => { try { const updated = await api.editMetadata(item.kind, item.id, editable()); onSaved(updated); setNotice('Metadata saved.'); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save metadata.'); } };
+  const previewChanges = async () => { try { setPreview((await api.previewMetadata(item.kind, item.id, editable())).fields ?? []); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Preview is unavailable.'); } };
+  const previewRefresh = async () => { try { setPreview((await api.refreshMetadataPreview(item.kind, item.id)).fields ?? []); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Provider refresh is unavailable.'); } };
+  const refresh = async () => { try { const updated = await api.refreshMetadata(item.kind, item.id); onSaved(updated); setNotice('Provider metadata refreshed.'); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Provider refresh is unavailable.'); } };
+  return <details open={open} onToggle={(event) => { const next = (event.currentTarget as HTMLDetailsElement).open; setOpen(next); if (next && !open) void load(); }}><summary>Edit metadata</summary>{notice && <p role="status">{notice}</p>}{open && <div>{metadataInputs.map(([field, label]) => <label key={field}>{label}{field === 'synopsis' ? <textarea value={value(field).value} onChange={(event) => change(field, { value: event.target.value })} /> : <input value={value(field).value} onChange={(event) => change(field, { value: event.target.value })} /> }<span><input type="checkbox" checked={value(field).locked} onChange={(event) => change(field, { locked: event.target.checked })} /> Lock this field</span></label>)}<div className="actions"><button type="button" onClick={() => void previewChanges()}>Preview changes</button><button type="button" onClick={() => void save()}>Save metadata</button><button type="button" disabled={!item.provider_id} onClick={() => void previewRefresh()}>Preview provider refresh</button><button type="button" disabled={!item.provider_id} onClick={() => void refresh()}>Refresh unlocked fields</button></div>{preview.length > 0 && <ul aria-label="Metadata refresh preview">{preview.map((field) => <li key={field.field}>{field.field}: {field.value || 'empty'} · {field.source}{field.locked ? ' · locked' : ''}</li>)}</ul>}</div>}</details>;
 }
 
 function OwnerHeader({ onBrowse, onLogout }: OwnerProps) {

@@ -130,4 +130,25 @@ describe('owner operations', () => {
     fireEvent.click(remove);
     expect(await screen.findByText(/could not create that profile/i)).toBeInTheDocument();
   });
+
+  it('edits locked local metadata and previews a provider refresh', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
+      if (path.includes('/settings/tmdb')) return new Response(JSON.stringify({ configured: true }));
+      if (path.includes('/owner/metadata/unmatched')) return new Response(JSON.stringify({ items: [{ id: 'film-1', kind: 'film', title: 'Film', local_only: false, provider_id: '42', synopsis: 'Old', year: 2024 }] }));
+      if (path.includes('/fields') && !path.includes('/refresh')) return new Response(JSON.stringify({ fields: [{ field: 'tags', value: 'family', source: 'local', locked: true }] }));
+      if (path.includes('/refresh/preview')) return new Response(JSON.stringify({ fields: [{ field: 'synopsis', value: 'Provider text', source: 'provider', locked: false }] }));
+      return new Response(JSON.stringify({ profiles: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    fireEvent.click(await screen.findByText('Edit metadata'));
+    expect(await screen.findByDisplayValue('family')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /preview provider refresh/i }));
+    expect(await screen.findByText(/Provider text/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /save metadata/i }));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/metadata/film/film-1/fields', expect.objectContaining({ method: 'PUT' }));
+  });
 });

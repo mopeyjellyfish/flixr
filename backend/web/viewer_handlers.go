@@ -45,6 +45,35 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	write(w, http.StatusOK, map[string]bool{"listed": r.Method == http.MethodPut})
 }
 
+func (s *Server) watched(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	var body struct {
+		Watched bool `json:"watched"`
+		Season  int  `json:"season"`
+	}
+	if !decode(r, &body) {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	ids, err := s.catalog.WatchedItems(r.PathValue("kind"), r.PathValue("id"), body.Season)
+	if errors.Is(err, catalog.ErrCatalogNotFound) {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	profile, _ := s.house.Profile(s.session(r))
+	if err := s.house.SetWatched(profile.ID, ids, body.Watched); err != nil {
+		fail(w, http.StatusInternalServerError, "progress_failed")
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"watched": body.Watched, "items": len(ids)})
+}
+
 func (s *Server) preferences(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return

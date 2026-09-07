@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 )
 
@@ -18,7 +19,10 @@ type playbackPlanRequest struct {
 }
 
 type playbackPositionRequest struct {
-	PositionMS int64 `json:"position_ms"`
+	PositionMS  int64 `json:"position_ms"`
+	Observation int64 `json:"observation"`
+	ObservedAt  int64 `json:"observed_at"`
+	Ended       bool  `json:"ended"`
 }
 
 type playbackSettingsRequest struct {
@@ -79,10 +83,30 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
-	position, _ := s.house.Position(s.session(r), item.ID)
-	session, err := s.playback.Create(profile.ID, item.ID, plan, position)
+	position, generation, err := s.house.ProgressState(s.session(r), item.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "progress_failed")
+		return
+	}
+	session, err := s.playback.Create(profile.ID, item.ID, plan, position, generation+1)
 	if err != nil {
 		playbackFailure(w, err)
+		return
+	}
+	if r.Context().Err() != nil {
+		s.playback.Stop(session.ID, profile.ID)
+		return
+	}
+	// Only an admitted session may claim progress. A manual action or another
+	// admitted plan during preparation wins the compare-and-swap and revokes
+	// this candidate before its unguessable session ID is exposed to the client.
+	if _, _, err := s.house.BeginPlayback(profile.ID, item.ID, generation); err != nil {
+		s.playback.Stop(session.ID, profile.ID)
+		if errors.Is(err, household.ErrProgressConflict) {
+			fail(w, http.StatusConflict, "progress_conflict")
+		} else {
+			fail(w, http.StatusInternalServerError, "progress_failed")
+		}
 		return
 	}
 	write(w, http.StatusCreated, playbackResponse(session))
@@ -95,15 +119,16 @@ func playbackResponse(session playback.Session) map[string]any {
 		mediaURL = base + "/manifest.m3u8"
 	}
 	return map[string]any{
-		"plan":             session.Plan,
-		"session_id":       session.ID,
-		"media_url":        mediaURL,
-		"heartbeat_url":    base + "/heartbeat",
-		"seek_url":         base + "/seek",
-		"stop_url":         base + "/stop",
-		"resume_ms":        session.PositionMS,
-		"stream_offset_ms": session.StreamOffsetMS,
-		"expires_at":       session.ExpiresAt.Unix(),
+		"plan":                session.Plan,
+		"session_id":          session.ID,
+		"media_url":           mediaURL,
+		"heartbeat_url":       base + "/heartbeat",
+		"seek_url":            base + "/seek",
+		"stop_url":            base + "/stop",
+		"progress_generation": session.ProgressGeneration,
+		"resume_ms":           session.PositionMS,
+		"stream_offset_ms":    session.StreamOffsetMS,
+		"expires_at":          session.ExpiresAt.Unix(),
 	}
 }
 
@@ -211,19 +236,26 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body playbackPositionRequest
-	if !decode(r, &body) || body.PositionMS < 0 {
+	if !decode(r, &body) || body.PositionMS < 0 || body.Observation < 0 {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	updated, err := s.playback.Heartbeat(session.ID, session.ProfileID, body.PositionMS)
+	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
+	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
 	if err != nil {
-		playbackFailure(w, err)
-		return
-	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, body.PositionMS); err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
+	updated := session
+	if accepted {
+		updated, err = s.playback.Heartbeat(session.ID, session.ProfileID, body.PositionMS)
+		if err != nil {
+			playbackFailure(w, err)
+			return
+		}
+	}
+
 	write(w, http.StatusOK, map[string]any{"expires_at": updated.ExpiresAt.Unix()})
 }
 
@@ -236,19 +268,26 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body playbackPositionRequest
-	if !decode(r, &body) || body.PositionMS < 0 {
+	if !decode(r, &body) || body.PositionMS < 0 || body.Observation < 0 {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	updated, err := s.playback.Seek(session.ID, session.ProfileID, body.PositionMS)
+	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
+	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
 	if err != nil {
-		playbackFailure(w, err)
-		return
-	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, body.PositionMS); err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
+	updated := session
+	if accepted {
+		updated, err = s.playback.Seek(session.ID, session.ProfileID, body.PositionMS)
+		if err != nil {
+			playbackFailure(w, err)
+			return
+		}
+	}
+
 	write(w, http.StatusOK, playbackResponse(updated))
 }
 
@@ -258,10 +297,6 @@ func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.playbackSession(w, r, false)
 	if !ok {
-		return
-	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, session.PositionMS); err != nil {
-		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
 	if !s.playback.Stop(session.ID, session.ProfileID) {

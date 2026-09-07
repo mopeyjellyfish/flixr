@@ -3,6 +3,7 @@ package catalog_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -19,18 +20,34 @@ func TestPre011CatalogDatabaseMigratesLegacyTrackIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = raw.Exec(`
-		CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-		CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-		CREATE TABLE scan_runs (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER, status TEXT NOT NULL, scanned INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, unmatched INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '');
-		CREATE TABLE catalog_series (id TEXT PRIMARY KEY, title TEXT NOT NULL, local_only INTEGER NOT NULL DEFAULT 1, provider_id TEXT NOT NULL DEFAULT '', year INTEGER NOT NULL DEFAULT 0, synopsis TEXT NOT NULL DEFAULT '', poster TEXT NOT NULL DEFAULT '', backdrop TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL DEFAULT 0, genres_json TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL DEFAULT 0, playable INTEGER NOT NULL DEFAULT 1, demo INTEGER NOT NULL DEFAULT 0, metadata_provider TEXT NOT NULL DEFAULT '', metadata_language TEXT NOT NULL DEFAULT '', metadata_region TEXT NOT NULL DEFAULT '', match_confidence REAL NOT NULL DEFAULT 0, owner_matched INTEGER NOT NULL DEFAULT 0, owner_unmatched INTEGER NOT NULL DEFAULT 0);
-		CREATE TABLE catalog_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, relative_path TEXT NOT NULL, local_only INTEGER NOT NULL DEFAULT 1, root_kind TEXT NOT NULL DEFAULT 'film', updated_at INTEGER NOT NULL DEFAULT 0, fingerprint TEXT NOT NULL DEFAULT '', container TEXT NOT NULL DEFAULT '', video_codec TEXT NOT NULL DEFAULT '', audio_json TEXT NOT NULL DEFAULT '[]', subtitle_json TEXT NOT NULL DEFAULT '[]', size_bytes INTEGER NOT NULL DEFAULT 0, mtime_unix INTEGER NOT NULL DEFAULT 0, series_id TEXT NOT NULL DEFAULT '', season_id TEXT NOT NULL DEFAULT '', provider_id TEXT NOT NULL DEFAULT '', year INTEGER NOT NULL DEFAULT 0, synopsis TEXT NOT NULL DEFAULT '', poster TEXT NOT NULL DEFAULT '', backdrop TEXT NOT NULL DEFAULT '', video_profile TEXT NOT NULL DEFAULT '', genres_json TEXT NOT NULL DEFAULT '[]', added_at INTEGER NOT NULL DEFAULT 0, playable INTEGER NOT NULL DEFAULT 1, demo INTEGER NOT NULL DEFAULT 0, metadata_provider TEXT NOT NULL DEFAULT '', metadata_language TEXT NOT NULL DEFAULT '', metadata_region TEXT NOT NULL DEFAULT '', match_confidence REAL NOT NULL DEFAULT 0, owner_matched INTEGER NOT NULL DEFAULT 0, owner_unmatched INTEGER NOT NULL DEFAULT 0);
-	`)
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	// Build a real version-10 database, including all earlier artwork tables.
+	migrations, err := os.ReadDir("../sqlite/migrations")
 	if err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
-	for version := 1; version <= 10; version++ {
+	for _, migration := range migrations {
+		var version int
+		if _, err := fmt.Sscanf(migration.Name(), "%d_", &version); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+		if version > 10 {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join("../sqlite/migrations", migration.Name()))
+		if err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(string(body)); err != nil {
+			raw.Close()
+			t.Fatalf("legacy migration %s: %v", migration.Name(), err)
+		}
 		if _, err := raw.Exec("INSERT INTO schema_migrations(version) VALUES(?)", version); err != nil {
 			raw.Close()
 			t.Fatal(err)
@@ -56,6 +73,7 @@ func TestPre011CatalogDatabaseMigratesLegacyTrackIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer c.Shutdown(context.Background())
 	item, ok := c.Item("legacy")
 	if !ok || item.Audio[0].Index != -1 || item.Subtitles[0].Index != -1 {
 		t.Fatalf("legacy track indexes = %#v / %#v", item.Audio, item.Subtitles)

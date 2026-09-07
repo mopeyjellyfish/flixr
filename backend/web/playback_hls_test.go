@@ -46,9 +46,13 @@ func (p *webFakeProcess) Wait() error { <-p.done; return nil }
 type webFakeExecutor struct {
 	process  *webFakeProcess
 	inputURL string
+	onStart  func()
 }
 
 func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.Process, error) {
+	if e.onStart != nil {
+		e.onStart()
+	}
 	e.process = &webFakeProcess{done: make(chan struct{})}
 	for index, arg := range args {
 		if arg == "-i" && index+1 < len(args) {
@@ -193,6 +197,52 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if position, err := house.Position(oneToken, "film"); err != nil || position != 1234 {
 		t.Fatalf("position = %d, %v", position, err)
 	}
+	// A different plan cannot fit beside the active HLS generation. Admission
+	// failure must leave the original session's progress authority intact.
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"video_profiles":["Baseline"],"supports_fmp4_hls":true}}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("competing plan=%d %s", response.Code, response.Body)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/heartbeat", bytes.NewBufferString(`{"position_ms":2000,"observation":2}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 2000 {
+		t.Fatalf("failed plan fenced active session: position=%d %v", position, err)
+	}
+	// A delayed seek must not move either durable progress or the live HLS lease.
+	for _, event := range []struct{ route, body string }{{"heartbeat", `{"position_ms":3000,"observation":3}`}, {"seek", `{"position_ms":1000,"observation":2}`}} {
+		request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/"+event.route, bytes.NewBufferString(event.body))
+		request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 200 {
+			t.Fatalf("ordered %s: %d %s", event.route, response.Code, response.Body)
+		}
+	}
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 3000 {
+		t.Fatalf("delayed seek position=%d %v", position, err)
+	}
+	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 3000 {
+		t.Fatalf("delayed seek changed lease: %+v", current)
+	}
+	if err := house.SetWatched(one.ID, []string{"film"}, true); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":1000,"observation":4}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatalf("stale manual seek: %d", response.Code)
+	}
+	var completed int
+	if err := db.QueryRow(`SELECT completed FROM progress WHERE profile_id=? AND catalog_id='film'`, one.ID).Scan(&completed); err != nil || completed != 1 {
+		t.Fatalf("seek undid manual watched: %d %v", completed, err)
+	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/stop", nil)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
@@ -200,4 +250,43 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if response.Code != http.StatusOK || !executor.process.signaled {
 		t.Fatalf("stop = %d, signaled=%v", response.Code, executor.process.signaled)
 	}
+	// A manual reset while FFmpeg prepares must defeat the candidate's CAS.
+	executor.onStart = func() {
+		if err := house.SetWatched(one.ID, []string{"film"}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("manual raced preparation: %d %s", response.Code, response.Body)
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("conflicted candidate leaked a generation")
+	}
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 0 {
+		t.Fatalf("candidate undid manual reset=%d %v", position, err)
+	}
+
+	// Cancellation while preparing has no durable effect and retires the candidate.
+	_, beforeGeneration, err := house.ProgressState(oneToken, "film")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor.onStart = cancel
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`)).WithContext(ctx)
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if _, afterGeneration, err := house.ProgressState(oneToken, "film"); err != nil || afterGeneration != beforeGeneration {
+		t.Fatalf("canceled plan advanced generation: %d -> %d (%v)", beforeGeneration, afterGeneration, err)
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("canceled plan leaked a generation")
+	}
+
 }

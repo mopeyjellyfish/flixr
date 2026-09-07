@@ -195,3 +195,33 @@ poster scaling without hiding failures behind screenshot-only assertions.
 - `frontend/` — React, TypeScript, Vite, Tailwind CSS, unit tests, and Playwright tests.
 - `docs/features/flixr-core/` — accepted pitch, delivery plan, and validation evidence.
 - `DESIGN.md` — accepted Cobalt Signal interface direction.
+
+### Progress ordering and watched state
+
+Each admitted playback plan acquires a durable, server-issued generation for its profile
+and catalog item. A newer plan supersedes previous playback sessions for that
+item. Failed session creation preserves the current generation; a manual action
+during preparation defeats the candidate plan. Mark watched or start over advances the same generation atomically for
+all selected items, so old playback messages cannot undo the action. Starting
+a plan preserves completion until the new playback reports an observation;
+completed items start at zero. Completion is set by `ended: true` or a position
+at or beyond 90% of the catalog duration, and remains set within that playback.
+
+Heartbeat and seek requests accept a positive integer `observation`, incremented
+by the player for every seek, heartbeat, ended event, page-hide beacon, and final
+write. The server compares it only within the session's generation. Duplicate or
+lower observations and messages from superseded generations are acknowledged
+without changing progress. HLS session replacement preserves that generation.
+`updated_at` and `completed_at` always use server time. Client `observed_at` is
+accepted for older clients but ignored. Older players without `observation`
+continue in receipt order within their generation; upgrading the client is
+required for ordering delayed messages within one playback. Lease expiry, stop,
+and shutdown never resave a cached position.
+
+The legacy `GET /api/v1/progress/{id}` also returns `generation`. A legacy `PUT`
+must echo that value; each accepted write advances it. An omitted generation
+means zero and works only for initial or migrated progress that has not yet
+changed. A stale generation returns HTTP 409 `progress_conflict`; read the latest
+state and let the viewer decide whether to retry. Never automatically retry an
+old position with a newly read token. The shipped player uses playback sessions
+rather than this legacy route.
