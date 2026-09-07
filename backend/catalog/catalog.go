@@ -137,12 +137,13 @@ type Item struct {
 	Demo         bool     `json:"demo"`
 	MediaProperties
 
-	path          string
-	rootKind      string
-	fingerprint   string
-	size          int64
-	mtime         int64
-	probeRevision int
+	metadataVersion uint64
+	path            string
+	rootKind        string
+	fingerprint     string
+	size            int64
+	mtime           int64
+	probeRevision   int
 }
 
 const mediaProbeRevision = 1
@@ -216,9 +217,12 @@ type Catalog struct {
 	maintenanceDone   chan struct{}
 	maintenanceStatus ArtworkMaintenanceStatus
 	maintenanceDir    afero.File
+	artworkObjectsDir afero.File
 	derivativeBytes   int64
 	derivativeCount   int
 	derivativeReady   bool
+	refreshPreviews   map[string]refreshPreview
+	metadataVersions  map[string]uint64
 }
 
 func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
@@ -228,7 +232,7 @@ func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
 }
 
 func New() *Catalog {
-	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, prober: newFFprobe(), fs: afero.NewOsFs()}
+	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: newFFprobe(), fs: afero.NewOsFs()}
 }
 
 // Open uses the production ffprobe prober and OS-backed Afero filesystem.
@@ -244,7 +248,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if prober == nil || fs == nil {
 		return nil, errors.New("catalog prober and filesystem are required")
 	}
-	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, prober: prober, provider: NewTMDB(nil), fs: fs}
+	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: prober, provider: NewTMDB(nil), fs: fs}
 	if db == nil {
 		return c, nil
 	}
@@ -717,6 +721,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	c.mu.RUnlock()
 	var observations []scanObservation
 	for id, item := range next {
+		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
+			c.applyLockedFields("film", previous.ID, &item)
+		}
 		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok && (previous.OwnerMatch || previous.OwnerUnmatch) {
 			item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
 			next[id] = item
@@ -748,6 +755,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 			item.LocalOnly = false
 			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
+				c.applyLockedFields("film", previous.ID, &item)
+			}
 			next[id] = item
 		}
 	}
@@ -787,6 +797,11 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				value.LocalOnly = false
 				value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
 			}
+		}
+		if previous, ok := previousSeries[id]; ok {
+			item := Item{ID: value.ID, Title: value.Title, Synopsis: value.Synopsis, Year: value.Year, Poster: value.Poster, Backdrop: value.Backdrop}
+			c.applyLockedFields("series", previous.ID, &item)
+			value.Title, value.Synopsis, value.Year, value.Poster, value.Backdrop = item.Title, item.Synopsis, item.Year, item.Poster, item.Backdrop
 		}
 		series[id] = value
 	}
@@ -842,6 +857,15 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 		for _, x := range next {
 			if x.SeriesID != "" {
 				series[x.SeriesID] = seriesTitle(x.path, x.Title)
+			}
+		}
+		for _, x := range next {
+			for _, old := range previous {
+				if old.ID != x.ID && old.rootKind == x.rootKind && old.path == x.path {
+					if _, err = tx.Exec(`UPDATE catalog_metadata_fields SET catalog_id=? WHERE catalog_kind='film' AND catalog_id=?`, x.ID, old.ID); err != nil {
+						return err
+					}
+				}
 			}
 		}
 		for seriesID, seriesTitle := range series {

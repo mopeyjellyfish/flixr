@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"image"
@@ -44,9 +45,22 @@ func (c *Catalog) startArtworkMaintenance() {
 	c.maintenanceCancel, c.maintenanceDone = cancel, make(chan struct{})
 	go func() {
 		defer close(c.maintenanceDone)
+		defer func() {
+			c.artworkMu.Lock()
+			defer c.artworkMu.Unlock()
+			for _, directory := range []afero.File{c.maintenanceDir, c.artworkObjectsDir} {
+				if directory != nil {
+					_ = directory.Close()
+				}
+			}
+			c.maintenanceDir, c.artworkObjectsDir = nil, nil
+		}()
 		run := func() {
 			c.artworkMu.Lock()
 			err := c.cleanupDerivativesLocked(time.Now())
+			if objectErr := c.cleanupArtworkObjectsLocked(); err == nil {
+				err = objectErr
+			}
 			outcome := "complete"
 			if err != nil {
 				outcome = "failed"
@@ -94,37 +108,78 @@ func allowedArtworkContentType(contentType string) bool {
 	return false
 }
 
+// Artwork objects are immutable. Only the database reference publishes them.
+// Callers hold artworkMu until commit/rollback and cleanup, so readers cannot
+// race replacement cleanup and maintenance cannot remove unpublished objects.
+func (c *Catalog) replaceArtwork(tx *sql.Tx, id, kind string, art Artwork) (string, string, error) {
+	if (kind != "poster" && kind != "backdrop") || len(art.Bytes) == 0 || len(art.Bytes) > maxArtworkSource || !allowedArtworkContentType(art.ContentType) {
+		return "", "", errors.New("invalid artwork")
+	}
+	var previous string
+	if err := tx.QueryRow(`SELECT object_name FROM catalog_artwork WHERE catalog_id=? AND kind=?`, id, kind).Scan(&previous); err != nil && err != sql.ErrNoRows {
+		return "", "", err
+	}
+	dir := filepath.Join(c.db.DataDir(), "artwork", "objects")
+	if err := c.fs.MkdirAll(dir, 0o700); err != nil {
+		return "", "", err
+	}
+	file, err := afero.TempFile(c.fs, dir, "image-")
+	if err != nil {
+		return "", "", err
+	}
+	name := filepath.Base(file.Name())
+	retained := false
+	defer func() {
+		if !retained {
+			_ = file.Close()
+			_ = c.fs.Remove(file.Name())
+		}
+	}()
+	if err := c.fs.Chmod(file.Name(), 0o600); err != nil {
+		return "", "", err
+	}
+	if _, err := file.Write(art.Bytes); err != nil {
+		return "", "", err
+	}
+	if err := file.Sync(); err != nil {
+		return "", "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.Exec(`INSERT INTO catalog_artwork(catalog_id,kind,content_type,object_name) VALUES(?,?,?,?) ON CONFLICT(catalog_id,kind) DO UPDATE SET content_type=excluded.content_type,object_name=excluded.object_name`, id, kind, art.ContentType, name); err != nil {
+		return "", "", err
+	}
+	retained = true
+	return name, previous, nil
+}
+
+func (c *Catalog) removeArtworkObject(name string) {
+	if name != "" && filepath.Base(name) == name {
+		_ = c.fs.Remove(filepath.Join(c.db.DataDir(), "artwork", "objects", name))
+	}
+}
+
 func (c *Catalog) cacheArtwork(id, kind string, art Artwork) (string, error) {
-	if c.db == nil || (kind != "poster" && kind != "backdrop") || len(art.Bytes) == 0 || !allowedArtworkContentType(art.ContentType) {
+	if c.db == nil {
 		return "", nil
 	}
-	dir := filepath.Join(c.db.DataDir(), "artwork")
-	if err := c.fs.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	tmp, err := afero.TempFile(c.fs, dir, ".tmp-")
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	tx, err := c.db.Begin()
 	if err != nil {
 		return "", err
 	}
-	name := tmp.Name()
-	defer c.fs.Remove(name)
-	if err := c.fs.Chmod(name, 0o600); err != nil {
-		tmp.Close()
+	defer tx.Rollback()
+	name, previous, err := c.replaceArtwork(tx, id, kind, art)
+	if err != nil {
 		return "", err
 	}
-	if _, err := tmp.Write(art.Bytes); err != nil {
-		tmp.Close()
+	if err := tx.Commit(); err != nil {
+		c.removeArtworkObject(name)
 		return "", err
 	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := c.fs.Rename(name, artworkFile(c.db.DataDir(), id, kind)); err != nil {
-		return "", err
-	}
-	if _, err := c.db.Exec(`INSERT INTO catalog_artwork(catalog_id,kind,content_type) VALUES(?,?,?) ON CONFLICT(catalog_id,kind) DO UPDATE SET content_type=excluded.content_type`, id, kind, art.ContentType); err != nil {
-		return "", err
-	}
+	c.removeArtworkObject(previous)
 	return artworkURL(id, kind), nil
 }
 
@@ -167,11 +222,20 @@ func (c *Catalog) Artwork(id, kind string) ([]byte, string, error) {
 	if c.db == nil || (kind != "poster" && kind != "backdrop") {
 		return nil, "", os.ErrNotExist
 	}
-	var contentType string
-	if err := c.db.QueryRow(`SELECT content_type FROM catalog_artwork WHERE catalog_id=? AND kind=?`, id, kind).Scan(&contentType); err != nil {
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	var contentType, objectName string
+	if err := c.db.QueryRow(`SELECT content_type,object_name FROM catalog_artwork WHERE catalog_id=? AND kind=?`, id, kind).Scan(&contentType, &objectName); err != nil {
 		return nil, "", os.ErrNotExist
 	}
-	data, err := afero.ReadFile(c.fs, artworkFile(c.db.DataDir(), id, kind))
+	path := artworkFile(c.db.DataDir(), id, kind)
+	if objectName != "" {
+		if filepath.Base(objectName) != objectName {
+			return nil, "", os.ErrNotExist
+		}
+		path = filepath.Join(c.db.DataDir(), "artwork", "objects", objectName)
+	}
+	data, err := afero.ReadFile(c.fs, path)
 	if err != nil {
 		return nil, "", fmt.Errorf("read cached artwork: %w", err)
 	}
@@ -333,6 +397,45 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) error {
 		_ = c.maintenanceDir.Close()
 		c.maintenanceDir = nil
 		c.derivativeReady = true
+	}
+	return nil
+}
+
+// Incremental orphan collection recovers objects left by a crash before commit.
+// The shared artwork lock excludes active writers and readers during collection.
+func (c *Catalog) cleanupArtworkObjectsLocked() error {
+	dir := filepath.Join(c.db.DataDir(), "artwork", "objects")
+	if c.artworkObjectsDir == nil {
+		directory, err := c.fs.Open(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		c.artworkObjectsDir = directory
+	}
+	entries, err := c.artworkObjectsDir.Readdir(maintenanceBatch)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "image-") {
+			continue
+		}
+		var count int
+		if err := c.db.QueryRow(`SELECT count(*) FROM catalog_artwork WHERE object_name=?`, entry.Name()).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if err := c.fs.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		_ = c.artworkObjectsDir.Close()
+		c.artworkObjectsDir = nil
 	}
 	return nil
 }

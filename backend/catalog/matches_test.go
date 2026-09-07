@@ -12,20 +12,35 @@ import (
 )
 
 type ownerMatchProvider struct {
-	outage bool
-	poster string
+	outage     bool
+	poster     string
+	enrichment catalog.Enrichment
+	started    chan<- struct{}
+	gate       <-chan struct{}
 }
 
 func (p ownerMatchProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
 	if p.outage {
 		return catalog.Enrichment{}, errors.New("offline")
 	}
-	return catalog.Enrichment{}, nil
+	return p.enrichment, nil
 }
 func (p ownerMatchProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
 	return []catalog.Candidate{{Provider: "tmdb", ID: "42", Title: "The Right Film", Year: 2024, Confidence: 1}}, nil
 }
 func (p ownerMatchProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	if p.started != nil {
+		p.started <- struct{}{}
+	}
+	if p.gate != nil {
+		<-p.gate
+	}
+	if p.outage {
+		return catalog.Enrichment{}, errors.New("offline")
+	}
+	if p.enrichment.ProviderID != "" {
+		return p.enrichment, nil
+	}
 	return catalog.Enrichment{ProviderID: "42", Year: 2024, Synopsis: "owner choice", Poster: "/poster", Backdrop: "/backdrop"}, nil
 }
 func (p ownerMatchProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
@@ -73,6 +88,7 @@ func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Shutdown(context.Background())
 	persisted, _, err := reopened.Browse("", 0, 1)
 	if err != nil || len(persisted) != 1 || persisted[0].ProviderID != "42" || !persisted[0].OwnerMatch {
 		t.Fatalf("restart = %#v, %v", persisted, err)
