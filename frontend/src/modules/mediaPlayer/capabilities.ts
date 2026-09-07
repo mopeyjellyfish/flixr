@@ -11,20 +11,24 @@ export async function browserCapabilities(media: CatalogItem): Promise<PlaybackC
 	const audio = media.audio?.[0];
 	const isMP4 = media.container?.split(',').some((value) => mp4Aliases.has(value.trim().toLowerCase())) ?? false;
 	const hasKnownVideo = (media.width ?? 0) > 0 && (media.height ?? 0) > 0 && (media.bitrate ?? 0) > 0 && (media.frame_rate_milli ?? 0) > 0 && (media.bit_depth ?? 0) > 0;
-	const directCandidate = isMP4 && media.video_codec === 'h264' && ['Baseline', 'Main', 'High'].includes(media.video_profile ?? '') && audio?.codec === 'aac' && (audio.channels ?? 0) > 0 && hasKnownVideo;
-	let direct = false;
-	if (directCandidate) {
+	const videoCandidate = media.video_codec === 'h264' && ['Baseline', 'Main', 'High'].includes(media.video_profile ?? '') && hasKnownVideo;
+	let videoSupported = false;
+	if (videoCandidate) {
 		try {
-			const audioSupported = probe.canPlayType('audio/mp4; codecs="mp4a.40.2"') !== '';
 			if (navigator.mediaCapabilities) {
-				direct = audioSupported && (await navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: 'video/mp4; codecs="avc1.64001f"', width: media.width!, height: media.height!, bitrate: media.bitrate!, framerate: media.frame_rate_milli! / 1000 } })).supported;
+				videoSupported = (await navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: 'video/mp4; codecs="avc1.64001f"', width: media.width!, height: media.height!, bitrate: media.bitrate!, framerate: media.frame_rate_milli! / 1000 } })).supported;
 			} else {
-				direct = audioSupported && probe.canPlayType('video/mp4; codecs="avc1.64001f"') !== '';
+				videoSupported = probe.canPlayType('video/mp4; codecs="avc1.64001f"') !== '';
 			}
 		} catch {
-			direct = false;
+			videoSupported = false;
 		}
 	}
+	// Generic codec support does not prove an AAC channel layout. We therefore
+	// do not claim direct audio playback or an audio-channel maximum without a
+	// complete native audio configuration.
+	const direct = isMP4 && videoSupported && !audio;
+	const hdr = ['smpte2084', 'arib-std-b67'].includes(media.hdr ?? '') ? media.hdr : undefined;
 	return {
 		containers: [...(mp4 ? ['mp4'] : []), ...(webm ? ['webm'] : [])],
 		video_codecs: [...(mp4 ? ['h264'] : []), ...(webm ? ['vp9'] : [])],
@@ -32,11 +36,10 @@ export async function browserCapabilities(media: CatalogItem): Promise<PlaybackC
 		audio_codecs: [...(mp4 ? ['aac'] : []), ...(webm ? ['opus'] : [])],
 		supports_fmp4_hls: nativeHLS || mediaSourceHLS,
 		supports_direct: direct,
-		max_width: direct ? media.width : undefined,
-		max_height: direct ? media.height : undefined,
-		max_frame_rate_milli: direct ? media.frame_rate_milli : undefined,
-		max_bit_depth: direct ? media.bit_depth : undefined,
-		max_audio_channels: direct ? audio?.channels : undefined,
-		hdr: direct && media.hdr ? [media.hdr] : [],
+		max_width: videoSupported ? media.width : undefined,
+		max_height: videoSupported ? media.height : undefined,
+		max_frame_rate_milli: videoSupported ? media.frame_rate_milli : undefined,
+		max_bit_depth: videoSupported ? media.bit_depth : undefined,
+		hdr: videoSupported && hdr ? [hdr] : [],
 	};
 }

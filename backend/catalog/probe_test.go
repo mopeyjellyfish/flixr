@@ -72,3 +72,20 @@ func TestFFprobeRecordsFrameRateAndBitDepth(t *testing.T) {
 		t.Fatalf("properties = %#v", got)
 	}
 }
+
+func TestFFprobeNormalizesSDRAndUsesGreatestValidBitDepth(t *testing.T) {
+	payload := `{"format":{},"streams":[{"codec_type":"video","codec_name":"h264","bits_per_sample":8,"bits_per_raw_sample":"10","color_transfer":"bt709"}]}`
+	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}
+	file, err := os.CreateTemp(t.TempDir(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	got, err := prober.Probe(context.Background(), file)
+	if err != nil || got.BitDepth != 10 || got.HDR != "" {
+		t.Fatalf("properties = %#v, err = %v", got, err)
+	}
+	if hdrTransfer("smpte2084") != "smpte2084" || hdrTransfer("arib-std-b67") != "arib-std-b67" {
+		t.Fatal("HDR transfer normalization")
+	}
+}

@@ -109,7 +109,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			if media.VideoCodec == "" {
 				media.VideoCodec = stream.CodecName
 				media.VideoProfile = stream.Profile
-				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), stream.ColorTransfer
+				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), hdrTransfer(stream.ColorTransfer)
 				media.FrameRateMilli = frameRateMilli(stream.AvgFrameRate)
 				media.BitDepth = bitDepth(stream.BitsPerSample, stream.BitsPerRaw)
 				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
@@ -126,12 +126,24 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 }
 
 func bitDepth(values ...json.Number) int {
+	max := 0
 	for _, value := range values {
 		if parsed, err := strconv.Atoi(value.String()); err == nil && parsed > 0 {
-			return parsed
+			if parsed > max {
+				max = parsed
+			}
 		}
 	}
-	return 0
+	return max
+}
+
+func hdrTransfer(value string) string {
+	switch strings.ToLower(value) {
+	case "smpte2084", "arib-std-b67":
+		return strings.ToLower(value)
+	default:
+		return ""
+	}
 }
 
 func frameRateMilli(value string) int {

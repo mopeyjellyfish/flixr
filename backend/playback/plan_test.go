@@ -68,6 +68,20 @@ func TestPlanForRejectsEachKnownLimitBeforeStreamCopy(t *testing.T) {
 	}
 }
 
+func TestPlanForDoesNotRemuxWhenTitleEvidenceIsMissing(t *testing.T) {
+	media := MediaProperties{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Width: 3840, Height: 2160, FrameRateMilli: 60000, BitDepth: 10, AudioChannels: 6}
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsDirect: false}
+	plan, err := PlanFor(media, client, ServerReadiness{FFmpeg: true})
+	if plan.Kind != Unsupported || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("plan = %#v, err = %v", plan, err)
+	}
+	client.MaxWidth, client.MaxHeight, client.MaxFrameRateMilli, client.MaxBitDepth = 3840, 2160, 60000, 10
+	plan, err = PlanFor(media, client, ServerReadiness{FFmpeg: true})
+	if plan.Kind != Unsupported || !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("unproven audio plan = %#v, err = %v", plan, err)
+	}
+}
+
 func TestClientCapabilitiesNormalizesAliasesAndRejectsUnknownValues(t *testing.T) {
 	client, err := (ClientCapabilities{Containers: []string{"mov"}, VideoCodecs: []string{"avc1"}, VideoProfiles: []string{"high"}, AudioCodecs: []string{"mp4a"}, HDR: []string{"smpte2084"}}).Normalized()
 	if err != nil || client.Containers[0] != "mp4" || client.VideoCodecs[0] != "h264" || client.AudioCodecs[0] != "aac" {

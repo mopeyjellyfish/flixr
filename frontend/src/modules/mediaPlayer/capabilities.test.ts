@@ -12,7 +12,8 @@ it('uses a valid video-only MediaCapabilities request for MP4 aliases', async ()
 	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
 	const result = await browserCapabilities(media);
 	expect(decodingInfo).toHaveBeenCalledWith({ type: 'file', video: { contentType: 'video/mp4; codecs="avc1.64001f"', width: 320, height: 180, bitrate: 5968, framerate: 24 } });
-	expect(result).toMatchObject({ supports_direct: true, max_width: 320, max_audio_channels: 2 });
+	expect(result).toMatchObject({ supports_direct: false, max_width: 320 });
+	expect(result.max_audio_channels).toBeUndefined();
 	expect(result.containers).toContain('mp4');
 	expect(result.video_codecs).toContain('h264');
 	expect(result.audio_codecs).toContain('aac');
@@ -22,6 +23,8 @@ it('falls back conservatively when the API rejects or media details are incomple
 	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
 	const decodingInfo = vi.fn().mockRejectedValue(new TypeError('invalid configuration'));
 	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
-	expect((await browserCapabilities(media)).supports_direct).toBe(false);
+	const rejected = await browserCapabilities(media);
+	expect(rejected.supports_direct).toBe(false);
+	expect(rejected.max_width).toBeUndefined();
 	expect((await browserCapabilities({ ...media, width: undefined })).supports_direct).toBe(false);
 });

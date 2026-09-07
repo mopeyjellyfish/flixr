@@ -95,6 +95,7 @@ export function messageFor(code: string): string {
     metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     metadata_busy: 'Wait for the current scan to finish, then retry metadata repair.',
     playback_unsupported: 'This title is not compatible with this browser.',
+	playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
     playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
     playback_preparing: 'This local stream is already preparing. Try again in a moment.',
