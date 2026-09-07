@@ -118,6 +118,10 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	}
 	heartbeat(third, 200, 3, 1)
 	state(200, 1)
+	var completionEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM viewing_events WHERE profile_id=? AND catalog_id='film' AND event_type='completed'`, p.ID).Scan(&completionEvents); err != nil || completionEvents != 1 {
+		t.Fatalf("completion ledger=%d %v", completionEvents, err)
+	}
 	replay := plan()
 	heartbeat(replay, 50, 1, 1)
 	state(50, 0)

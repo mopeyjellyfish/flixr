@@ -20,7 +20,9 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
     const response = handler(url.pathname, request.method(), url.search, request.postDataJSON() as Record<string, unknown> | undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
-      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined);
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname.startsWith('/api/v1/ratings/') ? { json: { rating: null } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });
@@ -449,4 +451,51 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
   await secondClient.locator('video').dispatchEvent('pause');
   await expect(secondClient.getByRole('alert')).toContainText(/complete that request/i);
   expect(errors.every((message) => message.includes('403') || message.includes('500'))).toBeTruthy();
+});
+
+test('personal history dates, clear undo, and rating persist across navigation', async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', error => errors.push(error.message));
+  const timestamp = Date.UTC(2024, 4, 6, 12);
+  let cleared = false;
+  let rating = 2;
+  await mock(page, (path, method, _query, body) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [film] }] } };
+    if (path.endsWith('/catalog/items/film-1')) return { json: film };
+    if (path.endsWith('/ratings/film-1')) {
+      if (method === 'PUT') { rating = Number(body?.value); return { json: { saved: true } }; }
+      return { json: { rating: { value: rating } } };
+    }
+    if (path.endsWith('/history/clear')) { cleared = true; return { json: { id: 'clear-one', undo_until: Date.now() + 300000 } }; }
+    if (path.endsWith('/history/clear/clear-one/undo')) { cleared = false; return { json: { restored: true } }; }
+    if (path.endsWith('/history')) return { json: { events: cleared ? [] : [
+      { id: 'local', catalog_id: 'film-1', title: 'Local completion', kind: 'film', type: 'completed', provenance: 'local', source_time: null, recorded_at: timestamp },
+      { id: 'imported', catalog_id: 'gone', title: 'Unknown imported viewing', kind: 'film', type: 'summary', provenance: 'import', source_time: null, recorded_at: timestamp },
+    ] } };
+    return undefined;
+  });
+  await page.goto('/history');
+  await expect(page.getByRole('heading', { name: 'Viewing history' })).toBeVisible();
+  await expect(page.locator('time')).toHaveAttribute('datetime', new Date(timestamp).toISOString());
+  await expect(page.getByText('Date unknown')).toHaveCount(1);
+  await check(page, errors);
+  await page.screenshot({ path: testInfo.outputPath('history-desktop.png') });
+  await page.getByRole('button', { name: 'Clear history' }).click();
+  await expect(page.getByText('Local completion')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo clear' }).click();
+  await expect(page.getByText('Local completion')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await check(page, errors);
+  await page.screenshot({ path: testInfo.outputPath('history-phone.png') });
+  await page.goto('/detail/film-1');
+  const select = page.getByRole('combobox', { name: 'Your rating' });
+  await expect(select).toHaveValue('2');
+  await select.selectOption('5');
+  await expect(select).toBeEnabled();
+  await expect(select).toHaveValue('5');
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: 'Your rating' })).toHaveValue('5');
+  await check(page, errors);
 });
