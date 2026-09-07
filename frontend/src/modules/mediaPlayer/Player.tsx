@@ -167,6 +167,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const positionMs = currentPosition();
     try {
       const acknowledgement = await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
+      if (version !== sourceVersion.current || finalizing.current || playback.current?.session_id !== plan.session_id) return false;
       if (ended && !acknowledgement.accepted) {
         dispatch({ type: 'error', message: 'Episode completion could not be saved. Return to your library and try again.' });
         return false;

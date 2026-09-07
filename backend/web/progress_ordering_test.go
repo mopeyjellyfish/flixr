@@ -95,7 +95,10 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	second := plan()
 	heartbeat(second, 400, 1, 1)
 	state(400, 0)
-	heartbeat(first, 900, 1<<62, 1<<62)
+	stalePlan := request("POST", first, `{"position_ms":900,"observation":4611686018427387904,"observed_at":4611686018427387904}`)
+	if stalePlan.Code != http.StatusForbidden {
+		t.Fatalf("superseded heartbeat=%d, want 403", stalePlan.Code)
+	}
 	state(400, 0)
 	for _, watched := range []bool{true, false} {
 		w := request("PUT", "/api/v1/catalog/watched/film/film", fmt.Sprintf(`{"watched":%t}`, watched))

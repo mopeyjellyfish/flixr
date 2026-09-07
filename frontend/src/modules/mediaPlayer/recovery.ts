@@ -7,14 +7,12 @@ export class PlaybackNetworkError extends Error {
   }
 }
 
-const terminalServiceFailures = new Set(['ffmpeg_unavailable', 'playback_capacity', 'playback_unsupported']);
-
 export function isRetryablePlaybackFailure(error: unknown): boolean {
   if (error instanceof PlaybackNetworkError) return true;
   if (!(error instanceof ApiError)) return false;
   if (error.code === 'playback_session_invalid' || error.code === 'playback_preparing') return true;
-  if (error.status === 0) return true;
-  return error.status >= 500 && !terminalServiceFailures.has(error.code);
+  if (error.code === 'request_failed') return error.status === 0 || error.status >= 500;
+  return false;
 }
 
 export class PlaybackRecovery {

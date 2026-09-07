@@ -107,6 +107,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.playback.StopSupersededPlans(session)
 	write(w, http.StatusCreated, playbackResponse(session))
 }
 

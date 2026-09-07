@@ -119,6 +119,7 @@ type Manager struct {
 	generations    map[string]*generation
 	inputs         map[string]inputAuthority
 	revokedViewers map[string]struct{}
+	pendingViewers map[string]int
 	starting       int
 	pendingJobs    map[string]struct{}
 	startWG        sync.WaitGroup
@@ -136,6 +137,7 @@ func NewDirectManager() *Manager {
 		generations:    map[string]*generation{},
 		inputs:         map[string]inputAuthority{},
 		revokedViewers: map[string]struct{}{},
+		pendingViewers: map[string]int{},
 		pendingJobs:    map[string]struct{}{},
 	}
 }
@@ -176,6 +178,7 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		generations:    map[string]*generation{},
 		inputs:         map[string]inputAuthority{},
 		revokedViewers: map[string]struct{}{},
+		pendingViewers: map[string]int{},
 		pendingJobs:    map[string]struct{}{},
 		cancel:         cancel,
 		janitorDone:    make(chan struct{}),
@@ -224,11 +227,16 @@ func (m *Manager) CreateForViewer(viewerID, profileID, catalogID string, plan Pl
 	if profileID == "" || catalogID == "" {
 		return Session{}, ErrSessionInvalid
 	}
-	m.mu.Lock()
-	_, viewerRevoked := m.revokedViewers[viewerID]
-	m.mu.Unlock()
-	if viewerID != "" && viewerRevoked {
-		return Session{}, ErrSessionInvalid
+	if viewerID != "" {
+		m.mu.Lock()
+		_, viewerRevoked := m.revokedViewers[viewerID]
+		if viewerRevoked {
+			m.mu.Unlock()
+			return Session{}, ErrSessionInvalid
+		}
+		m.pendingViewers[viewerID]++
+		m.mu.Unlock()
+		defer m.finishViewerCreate(viewerID)
 	}
 	if positionMS < 0 {
 		positionMS = 0
@@ -261,7 +269,7 @@ func (m *Manager) CreateForViewer(viewerID, profileID, catalogID string, plan Pl
 	}
 
 	m.mu.Lock()
-	_, viewerRevoked = m.revokedViewers[viewerID]
+	_, viewerRevoked := m.revokedViewers[viewerID]
 	if m.closed || (viewerID != "" && viewerRevoked) {
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
@@ -616,7 +624,9 @@ func (m *Manager) StopViewer(viewerID string) {
 	}
 	type ownedSession struct{ id, profileID string }
 	m.mu.Lock()
-	m.revokedViewers[viewerID] = struct{}{}
+	if m.pendingViewers[viewerID] > 0 {
+		m.revokedViewers[viewerID] = struct{}{}
+	}
 	owned := make([]ownedSession, 0)
 	for _, session := range m.sessions {
 		if session.ViewerID == viewerID {
@@ -626,6 +636,44 @@ func (m *Manager) StopViewer(viewerID string) {
 	m.mu.Unlock()
 	for _, session := range owned {
 		m.StopForViewer(session.id, viewerID, session.profileID)
+	}
+}
+
+func (m *Manager) finishViewerCreate(viewerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	remaining := m.pendingViewers[viewerID] - 1
+	if remaining > 0 {
+		m.pendingViewers[viewerID] = remaining
+		return
+	}
+	delete(m.pendingViewers, viewerID)
+	delete(m.revokedViewers, viewerID)
+}
+
+// StopSupersededPlans releases older plan responses for the same viewer and
+// title. A later admitted generation is left alone when responses complete out
+// of order, and playback owned by another bearer session is never selected.
+func (m *Manager) StopSupersededPlans(current Session) {
+	if current.ViewerID == "" {
+		return
+	}
+	type supersededSession struct{ id, profileID string }
+	m.mu.Lock()
+	admitted, ok := m.sessions[current.ID]
+	if !ok || admitted.ViewerID != current.ViewerID || admitted.ProfileID != current.ProfileID || admitted.CatalogID != current.CatalogID {
+		m.mu.Unlock()
+		return
+	}
+	superseded := make([]supersededSession, 0)
+	for _, session := range m.sessions {
+		if session.ID != current.ID && session.ViewerID == current.ViewerID && session.ProfileID == current.ProfileID && session.CatalogID == current.CatalogID && session.ProgressGeneration <= current.ProgressGeneration {
+			superseded = append(superseded, supersededSession{id: session.ID, profileID: session.ProfileID})
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range superseded {
+		m.StopForViewer(session.id, current.ViewerID, session.profileID)
 	}
 }
 

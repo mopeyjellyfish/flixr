@@ -15,6 +15,9 @@ describe('playback recovery policy', () => {
     expect(isRetryablePlaybackFailure(new ApiError('owner_required', 403))).toBe(false);
     expect(isRetryablePlaybackFailure(new ApiError('playback_unsupported', 422))).toBe(false);
     expect(isRetryablePlaybackFailure(new ApiError('ffmpeg_unavailable', 503))).toBe(false);
+    expect(isRetryablePlaybackFailure(new ApiError('playback_failed', 500))).toBe(false);
+    expect(isRetryablePlaybackFailure(new ApiError('progress_failed', 500))).toBe(false);
+    expect(isRetryablePlaybackFailure(new ApiError('unexpected_failure' as never, 503))).toBe(false);
   });
 });
 

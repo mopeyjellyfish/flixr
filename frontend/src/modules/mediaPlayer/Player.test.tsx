@@ -287,6 +287,39 @@ it('caps consecutive compatibility stream recovery cycles', async () => {
   expect(plans).toBe(4);
 });
 
+it('does not let a stale successful heartbeat reset the recovery cap', async () => {
+  let resolveStaleHeartbeat: ((response: Response) => void) | undefined;
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}/manifest.m3u8`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Promise<Response>((resolve) => { resolveStaleHeartbeat = resolve; });
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.pause(video);
+  await waitFor(() => expect(resolveStaleHeartbeat).toBeTypeOf('function'));
+  hls.error?.({}, { fatal: false, type: 'networkError' });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  resolveStaleHeartbeat!(new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 })));
+  await act(async () => { await Promise.resolve(); });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    hls.error?.({}, { fatal: false, type: 'networkError' });
+    await waitFor(() => expect(hls.attached).toBe(attempt + 3));
+  }
+  hls.error?.({}, { fatal: false, type: 'networkError' });
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/could not reconnect/i);
+  expect(plans).toBe(4);
+});
+
 it('cancels an in-flight recovery plan on explicit stop and releases its late session', async () => {
   let resolveRecovery: ((response: Response) => void) | undefined;
   const stopped: string[] = [];

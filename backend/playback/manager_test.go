@@ -175,6 +175,42 @@ func TestManagerStopsOnlyPlaybackOwnedByOneViewerSession(t *testing.T) {
 	}
 }
 
+func TestManagerSupersedesOnlyOlderPlansForTheSameViewerAndTitle(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDevice, err := manager.CreateForViewer("viewer-b", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopSupersededPlans(current)
+
+	if _, ok := manager.LookupForViewer(old.ID, old.ViewerID, old.ProfileID, false); ok {
+		t.Fatal("older plan retained its lease")
+	}
+	if _, ok := manager.LookupForViewer(otherDevice.ID, otherDevice.ViewerID, otherDevice.ProfileID, false); !ok {
+		t.Fatal("supersession interrupted another device")
+	}
+	if _, ok := manager.LookupForViewer(current.ID, current.ViewerID, current.ProfileID, false); !ok {
+		t.Fatal("supersession stopped the admitted plan")
+	}
+	if _, ok := manager.LookupForViewer(later.ID, later.ViewerID, later.ProfileID, false); !ok {
+		t.Fatal("an earlier response revoked later playback")
+	}
+}
+
 func TestManagerIgnoresEmptyViewerTeardownIdentity(t *testing.T) {
 	manager, _ := testManager(t, nil)
 	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Direct}, 0)
@@ -185,6 +221,18 @@ func TestManagerIgnoresEmptyViewerTeardownIdentity(t *testing.T) {
 	manager.StopViewer("")
 	if _, ok := manager.Lookup(session.ID, "profile-a", false); !ok {
 		t.Fatal("an empty viewer identity stopped unrelated playback")
+	}
+}
+
+func TestManagerDoesNotRetainARevocationFenceWithoutPendingCreates(t *testing.T) {
+	manager, _ := testManager(t, nil)
+
+	manager.StopViewer("viewer-a")
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatalf("retained %d inactive viewer revocation fences", len(manager.revokedViewers))
 	}
 }
 
@@ -214,6 +262,11 @@ func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
 	}
 	if len(manager.Status().Generations) != 0 {
 		t.Fatal("late create retained a generation")
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatal("viewer revocation fence remained after pending create finished")
 	}
 }
 

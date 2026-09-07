@@ -334,30 +334,41 @@ func (m *Manager) RevokeSession(id string) error {
 	return nil
 }
 func (m *Manager) DeleteProfile(id string) error {
+	_, err := m.DeleteProfileAndRevokeSessions(id)
+	return err
+}
+
+// DeleteProfileAndRevokeSessions returns the non-secret identities revoked by
+// the committed deletion so runtime resources can be released afterward.
+func (m *Manager) DeleteProfileAndRevokeSessions(id string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_, ok := m.profiles[id]
 	if !ok {
-		return ErrProfileNotFound
+		return nil, ErrProfileNotFound
 	}
+	var revoked []string
 	if m.db != nil {
 		tx, err := m.db.Begin()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer tx.Rollback()
-		if _, err = tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
-			return err
+		revoked, err = revokeSubjectSessions(tx, id)
+		if err != nil {
+			return nil, err
 		}
 		if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", id); err != nil {
-			return err
+			return nil, err
 		}
 		if err = tx.Commit(); err != nil {
-			return err
+			return nil, err
 		}
+	} else {
+		revoked = m.revokeMemorySessionsLocked(id)
 	}
 	delete(m.profiles, id)
-	return nil
+	return revoked, nil
 }
 func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
 	id, err := random()
@@ -396,11 +407,18 @@ func (m *Manager) Profiles() []Profile {
 	return out
 }
 func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, error) {
+	profile, _, err := m.UpdateProfileAndRevokeSessions(id, name, pin, unprotect)
+	return profile, err
+}
+
+// UpdateProfileAndRevokeSessions reports bearer identities revoked by a
+// committed credential change. Name-only edits return no identities.
+func (m *Manager) UpdateProfileAndRevokeSessions(id, name, pin string, unprotect bool) (Profile, []string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.profiles[id]
 	if !ok {
-		return Profile{}, ErrProfileNotFound
+		return Profile{}, nil, ErrProfileNotFound
 	}
 	if name != "" {
 		p.Name = name
@@ -413,42 +431,84 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 		var err error
 		p.salt, err = salt()
 		if err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
 		p.hash, err = m.derive(pin, p.salt)
 		if err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
 		p.Protected = true
 	}
+	var revoked []string
 	if m.db != nil {
 		tx, err := m.db.Begin()
 		if err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
 		defer tx.Rollback()
 		result, err := tx.Exec("UPDATE profiles SET name=?,pin_hash=?,salt=? WHERE id=?", p.Name, p.hash, p.salt, id)
 		if err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
 		updated, err := result.RowsAffected()
 		if err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
 		if updated == 0 {
-			return Profile{}, ErrProfileNotFound
+			return Profile{}, nil, ErrProfileNotFound
 		}
 		if pin != "" || unprotect {
-			if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=?", id); err != nil {
-				return Profile{}, err
+			revoked, err = revokeSubjectSessions(tx, id)
+			if err != nil {
+				return Profile{}, nil, err
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			return Profile{}, err
+			return Profile{}, nil, err
 		}
+	} else if pin != "" || unprotect {
+		revoked = m.revokeMemorySessionsLocked(id)
 	}
 	m.profiles[id] = p
-	return p.Profile, nil
+	return p.Profile, revoked, nil
+}
+
+func revokeSubjectSessions(tx *sql.Tx, subject string) ([]string, error) {
+	rows, err := tx.Query("SELECT token_hash FROM sessions WHERE subject=? AND revoked=0", subject)
+	if err != nil {
+		return nil, err
+	}
+	var identities []string
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		identities = append(identities, base64.RawURLEncoding.EncodeToString(hash))
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject=? AND revoked=0", subject); err != nil {
+		return nil, err
+	}
+	return identities, nil
+}
+
+func (m *Manager) revokeMemorySessionsLocked(subject string) []string {
+	var identities []string
+	for token, sessionSubject := range m.sessions {
+		if sessionSubject != subject {
+			continue
+		}
+		identities = append(identities, base64.RawURLEncoding.EncodeToString(tokenHash(token)))
+		delete(m.sessions, token)
+	}
+	return identities
 }
 func (m *Manager) Select(id, pin string) (string, error) {
 	for {

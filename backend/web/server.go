@@ -348,7 +348,7 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request")
 		return
 	}
-	p, e := s.house.UpdateProfile(r.PathValue("id"), v.Name, v.PIN, v.Unprotect)
+	p, revoked, e := s.house.UpdateProfileAndRevokeSessions(r.PathValue("id"), v.Name, v.PIN, v.Unprotect)
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
 			fail(w, 429, "credential_busy")
@@ -359,19 +359,26 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	for _, viewerID := range revoked {
+		s.playback.StopViewer(viewerID)
+	}
 	write(w, 200, p)
 }
 func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	if err := s.house.DeleteProfile(r.PathValue("id")); err != nil {
+	revoked, err := s.house.DeleteProfileAndRevokeSessions(r.PathValue("id"))
+	if err != nil {
 		if errors.Is(err, household.ErrProfileNotFound) {
 			fail(w, 404, "profile_not_found")
 		} else {
 			fail(w, 500, "profile_failed")
 		}
 		return
+	}
+	for _, viewerID := range revoked {
+		s.playback.StopViewer(viewerID)
 	}
 	write(w, 200, map[string]bool{"deleted": true})
 }

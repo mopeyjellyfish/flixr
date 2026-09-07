@@ -84,6 +84,41 @@ func TestOwnerRevocationRejectsExistingPlaybackAuthority(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, request("POST", "/api/v1/playback/sessions/"+plan.SessionID+"/heartbeat", `{"position_ms":1}`, viewer).Code)
 	_, ok = manager.LookupForViewer(plan.SessionID, viewerIdentity, profile.ID, false)
 	require.False(t, ok, "revoking viewer authorization must release its playback session")
+
+	planFor := func(token string) (string, string) {
+		response := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`, token)
+		require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+		var created struct {
+			SessionID string `json:"session_id"`
+		}
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &created))
+		identity, valid := house.SessionIdentity(token)
+		require.True(t, valid)
+		return created.SessionID, identity
+	}
+	pinViewer, err := house.Select(profile.ID, "")
+	require.NoError(t, err)
+	pinPlayback, pinIdentity := planFor(pinViewer)
+	w = request("PATCH", "/api/v1/profiles/"+profile.ID, `{"pin":"1234"}`, owner)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	_, ok = manager.LookupForViewer(pinPlayback, pinIdentity, profile.ID, false)
+	require.False(t, ok, "PIN change retained revoked playback")
+
+	deletedViewer, err := house.Select(profile.ID, "1234")
+	require.NoError(t, err)
+	deletedPlayback, deletedIdentity := planFor(deletedViewer)
+	_, err = db.Exec("CREATE TRIGGER fail_profile_delete BEFORE DELETE ON profiles BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+	require.NoError(t, err)
+	w = request("DELETE", "/api/v1/profiles/"+profile.ID, "", owner)
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+	_, ok = manager.LookupForViewer(deletedPlayback, deletedIdentity, profile.ID, false)
+	require.True(t, ok, "failed profile deletion stopped valid playback")
+	_, err = db.Exec("DROP TRIGGER fail_profile_delete")
+	require.NoError(t, err)
+	w = request("DELETE", "/api/v1/profiles/"+profile.ID, "", owner)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	_, ok = manager.LookupForViewer(deletedPlayback, deletedIdentity, profile.ID, false)
+	require.False(t, ok, "profile deletion retained revoked playback")
 }
 
 func TestProfileChangeAndLogoutReleaseOnlyThePriorViewerPlayback(t *testing.T) {
