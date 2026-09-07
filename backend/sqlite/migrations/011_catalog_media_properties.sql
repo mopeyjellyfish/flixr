@@ -1,0 +1,7 @@
+ALTER TABLE catalog_items ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog_items ADD COLUMN primary_video_stream_index INTEGER NOT NULL DEFAULT -1;
+ALTER TABLE catalog_items ADD COLUMN video_width INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog_items ADD COLUMN video_height INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog_items ADD COLUMN video_bitrate INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE catalog_items ADD COLUMN video_hdr TEXT NOT NULL DEFAULT '';
+ALTER TABLE catalog_items ADD COLUMN probe_revision INTEGER NOT NULL DEFAULT 0;
