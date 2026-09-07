@@ -251,8 +251,9 @@ proof. Sampled fingerprints and provider IDs alone never merge titles. A legacy
 file that disappeared before receiving a full digest needs an owner decision.
 A same-path replacement retains its title unless valid provider or episode
 evidence contradicts it. Missing files leave unavailable titles and their
-progress, viewing ledger, and owner metadata intact. Byte-identical duplicates
-retain their physical sources and keep the existing primary while it is present.
+progress, My List membership, viewing ledger, and owner metadata intact.
+Byte-identical duplicates retain their physical sources and keep the existing
+primary while it is present.
 Admitted playback pins a private source version; a changed source requires a new
 playback plan instead of changing bytes under an existing session.
 

@@ -942,11 +942,6 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 		}
 		defer tx.Rollback()
 		for _, old := range unavailable {
-			if old.Kind == "film" {
-				if _, err = tx.Exec("DELETE FROM profile_film_list WHERE catalog_id=?", old.ID); err != nil {
-					return err
-				}
-			}
 			if _, err = tx.Exec("UPDATE catalog_physical_files SET present=0,selected=0 WHERE catalog_id=?", old.ID); err != nil {
 				return err
 			}
