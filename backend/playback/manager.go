@@ -107,33 +107,35 @@ type Status struct {
 
 // Manager owns profile-bound sessions, FFmpeg generations, leases and temporary output.
 type Manager struct {
-	mu           sync.Mutex
-	settings     Settings
-	db           *sqlite.DB
-	files        afero.Afero
-	inputBase    string
-	executor     Executor
-	manifestWait time.Duration
-	sessions     map[string]Session
-	generations  map[string]*generation
-	inputs       map[string]inputAuthority
-	starting     int
-	pendingJobs  map[string]struct{}
-	startWG      sync.WaitGroup
-	cancel       context.CancelFunc
-	janitorDone  chan struct{}
-	closed       bool
+	mu             sync.Mutex
+	settings       Settings
+	db             *sqlite.DB
+	files          afero.Afero
+	inputBase      string
+	executor       Executor
+	manifestWait   time.Duration
+	sessions       map[string]Session
+	generations    map[string]*generation
+	inputs         map[string]inputAuthority
+	revokedViewers map[string]struct{}
+	starting       int
+	pendingJobs    map[string]struct{}
+	startWG        sync.WaitGroup
+	cancel         context.CancelFunc
+	janitorDone    chan struct{}
+	closed         bool
 }
 
 // NewDirectManager creates a no-goroutine manager for direct-only tests and callers.
 func NewDirectManager() *Manager {
 	return &Manager{
-		settings:    DefaultSettings(os.TempDir()),
-		files:       afero.Afero{Fs: afero.NewOsFs()},
-		sessions:    map[string]Session{},
-		generations: map[string]*generation{},
-		inputs:      map[string]inputAuthority{},
-		pendingJobs: map[string]struct{}{},
+		settings:       DefaultSettings(os.TempDir()),
+		files:          afero.Afero{Fs: afero.NewOsFs()},
+		sessions:       map[string]Session{},
+		generations:    map[string]*generation{},
+		inputs:         map[string]inputAuthority{},
+		revokedViewers: map[string]struct{}{},
+		pendingJobs:    map[string]struct{}{},
 	}
 }
 
@@ -163,18 +165,19 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		settings:     config.Settings,
-		db:           config.DB,
-		files:        files,
-		inputBase:    base,
-		executor:     config.Executor,
-		manifestWait: config.ManifestWait,
-		sessions:     map[string]Session{},
-		generations:  map[string]*generation{},
-		inputs:       map[string]inputAuthority{},
-		pendingJobs:  map[string]struct{}{},
-		cancel:       cancel,
-		janitorDone:  make(chan struct{}),
+		settings:       config.Settings,
+		db:             config.DB,
+		files:          files,
+		inputBase:      base,
+		executor:       config.Executor,
+		manifestWait:   config.ManifestWait,
+		sessions:       map[string]Session{},
+		generations:    map[string]*generation{},
+		inputs:         map[string]inputAuthority{},
+		revokedViewers: map[string]struct{}{},
+		pendingJobs:    map[string]struct{}{},
+		cancel:         cancel,
+		janitorDone:    make(chan struct{}),
 	}
 	go manager.janitor(ctx)
 	return manager, nil
@@ -212,7 +215,18 @@ func CleanupOrphans(fs afero.Fs, segmentDir string) error {
 }
 
 func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
+	return m.CreateForViewer("", profileID, catalogID, plan, positionMS, progressGeneration...)
+}
+
+// CreateForViewer binds playback authority to one authenticated viewer session.
+func (m *Manager) CreateForViewer(viewerID, profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
 	if profileID == "" || catalogID == "" {
+		return Session{}, ErrSessionInvalid
+	}
+	m.mu.Lock()
+	_, viewerRevoked := m.revokedViewers[viewerID]
+	m.mu.Unlock()
+	if viewerID != "" && viewerRevoked {
 		return Session{}, ErrSessionInvalid
 	}
 	if positionMS < 0 {
@@ -228,10 +242,11 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		return Session{}, err
 	}
 	if plan.Kind == Direct {
-		session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, ExpiresAt: now.Add(directSessionTTL)}
+		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, ExpiresAt: now.Add(directSessionTTL)}
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if m.closed {
+		_, viewerRevoked := m.revokedViewers[viewerID]
+		if m.closed || (viewerID != "" && viewerRevoked) {
 			return Session{}, ErrSessionInvalid
 		}
 		m.sessions[session.ID] = session
@@ -245,7 +260,8 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	}
 
 	m.mu.Lock()
-	if m.closed {
+	_, viewerRevoked = m.revokedViewers[viewerID]
+	if m.closed || (viewerID != "" && viewerRevoked) {
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
@@ -253,7 +269,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
-		session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
+		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
 		existing.leases[session.ID] = session.ExpiresAt
 		m.sessions[session.ID] = session
 		if authority, ok := m.inputs[existing.input]; ok {
@@ -316,7 +332,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		_ = m.files.RemoveAll(dir)
 		return Session{}, fmt.Errorf("start FFmpeg: %w", err)
 	}
-	session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
+	session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
 	gen := &generation{
 		id: generationID, jobKey: jobKey, kind: plan.Kind, startMS: positionMS, dir: dir,
 		input: inputToken, leases: map[string]time.Time{session.ID: session.ExpiresAt},
@@ -327,7 +343,8 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	go m.waitGeneration(gen, process)
 	m.mu.Lock()
 	m.starting--
-	if m.closed {
+	_, viewerRevoked = m.revokedViewers[viewerID]
+	if m.closed || (viewerID != "" && viewerRevoked) {
 		delete(m.pendingJobs, jobKey)
 		m.mu.Unlock()
 		m.retireGeneration(context.Background(), gen)
@@ -339,10 +356,14 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
 		if err := waitForFile(m.files.Fs, filepath.Join(dir, "index.m3u8"), gen.done, m.manifestWait); err != nil {
-			_ = m.Stop(session.ID, profileID)
+			_ = m.StopForViewer(session.ID, viewerID, profileID)
 			m.mu.Lock()
+			_, viewerRevoked = m.revokedViewers[viewerID]
 			delete(m.pendingJobs, jobKey)
 			m.mu.Unlock()
+			if viewerID != "" && viewerRevoked {
+				return Session{}, ErrSessionInvalid
+			}
 			return Session{}, fmt.Errorf("prepare HLS manifest: %w; ffmpeg: %s", err, gen.log.String())
 		}
 	}
@@ -462,13 +483,18 @@ func (m *Manager) waitGeneration(gen *generation, process Process) {
 }
 
 func (m *Manager) Lookup(id, profileID string, touch bool) (Session, bool) {
+	return m.LookupForViewer(id, "", profileID, touch)
+}
+
+// LookupForViewer requires both the viewer session and profile authority.
+func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (Session, bool) {
 	now := time.Now()
 	m.mu.Lock()
 	session, ok := m.sessions[id]
-	if !ok || session.ProfileID != profileID || !now.Before(session.ExpiresAt) {
+	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || !now.Before(session.ExpiresAt) {
 		m.mu.Unlock()
 		if ok && session.ProfileID == profileID {
-			_ = m.Stop(id, profileID)
+			_ = m.StopForViewer(id, viewerID, profileID)
 		}
 		return Session{}, false
 	}
@@ -492,9 +518,13 @@ func (m *Manager) Lookup(id, profileID string, touch bool) (Session, bool) {
 }
 
 func (m *Manager) Heartbeat(id, profileID string, positionMS int64) (Session, error) {
+	return m.HeartbeatForViewer(id, "", profileID, positionMS)
+}
+
+func (m *Manager) HeartbeatForViewer(id, viewerID, profileID string, positionMS int64) (Session, error) {
 	m.mu.Lock()
 	session, ok := m.sessions[id]
-	if !ok || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
+	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
@@ -519,9 +549,13 @@ func (m *Manager) Heartbeat(id, profileID string, positionMS int64) (Session, er
 }
 
 func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) {
+	return m.SeekForViewer(id, "", profileID, positionMS)
+}
+
+func (m *Manager) SeekForViewer(id, viewerID, profileID string, positionMS int64) (Session, error) {
 	m.mu.Lock()
 	session, ok := m.sessions[id]
-	if !ok || session.ProfileID != profileID || session.GenerationID == "" {
+	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || session.GenerationID == "" {
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
@@ -537,22 +571,26 @@ func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) 
 	}
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
-	replacement, err := m.Create(profileID, catalogID, plan, positionMS, session.ProgressGeneration)
+	replacement, err := m.CreateForViewer(viewerID, profileID, catalogID, plan, positionMS, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
-	if !m.Stop(id, profileID) {
-		_ = m.Stop(replacement.ID, profileID)
+	if !m.StopForViewer(id, viewerID, profileID) {
+		_ = m.StopForViewer(replacement.ID, viewerID, profileID)
 		return Session{}, ErrSessionInvalid
 	}
 	return replacement, nil
 }
 
 func (m *Manager) Stop(id, profileID string) bool {
+	return m.StopForViewer(id, "", profileID)
+}
+
+func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {
 	var retire *generation
 	m.mu.Lock()
 	session, ok := m.sessions[id]
-	if !ok || session.ProfileID != profileID {
+	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID {
 		m.mu.Unlock()
 		return false
 	}
@@ -568,6 +606,26 @@ func (m *Manager) Stop(id, profileID string) bool {
 		m.retireGeneration(context.Background(), retire)
 	}
 	return true
+}
+
+// StopViewer releases every playback lease owned by one authenticated viewer.
+func (m *Manager) StopViewer(viewerID string) {
+	if viewerID == "" {
+		return
+	}
+	type ownedSession struct{ id, profileID string }
+	m.mu.Lock()
+	m.revokedViewers[viewerID] = struct{}{}
+	owned := make([]ownedSession, 0)
+	for _, session := range m.sessions {
+		if session.ViewerID == viewerID {
+			owned = append(owned, ownedSession{id: session.ID, profileID: session.ProfileID})
+		}
+	}
+	m.mu.Unlock()
+	for _, session := range owned {
+		m.StopForViewer(session.id, viewerID, session.profileID)
+	}
 }
 
 func (m *Manager) detachGenerationLocked(id string) *generation {
@@ -617,10 +675,14 @@ func (m *Manager) InputCatalog(token string) (string, bool) {
 }
 
 func (m *Manager) OpenAsset(sessionID, profileID, name string) (afero.File, error) {
+	return m.OpenAssetForViewer(sessionID, "", profileID, name)
+}
+
+func (m *Manager) OpenAssetForViewer(sessionID, viewerID, profileID, name string) (afero.File, error) {
 	if !assetName.MatchString(name) || filepath.Base(name) != name {
 		return nil, os.ErrNotExist
 	}
-	session, ok := m.Lookup(sessionID, profileID, true)
+	session, ok := m.LookupForViewer(sessionID, viewerID, profileID, true)
 	if !ok || session.GenerationID == "" {
 		return nil, ErrSessionInvalid
 	}

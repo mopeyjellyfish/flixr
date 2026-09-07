@@ -75,12 +75,17 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
+	viewerID, ok := s.house.SessionIdentity(s.session(r))
+	if !ok {
+		fail(w, http.StatusForbidden, "profile_required")
+		return
+	}
 	position, generation, err := s.house.ProgressState(s.session(r), item.ID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
-	session, err := s.playback.Create(profile.ID, item.ID, plan, position, generation+1)
+	session, err := s.playback.CreateForViewer(viewerID, profile.ID, item.ID, plan, position, generation+1)
 	if err != nil {
 		playbackFailure(w, err)
 		return
@@ -146,7 +151,12 @@ func (s *Server) playbackSession(w http.ResponseWriter, r *http.Request, touch b
 		return playback.Session{}, false
 	}
 	profile, _ := s.house.Profile(s.session(r))
-	session, ok := s.playback.Lookup(r.PathValue("id"), profile.ID, touch)
+	viewerID, valid := s.house.SessionIdentity(s.session(r))
+	if !valid {
+		fail(w, http.StatusForbidden, "profile_required")
+		return playback.Session{}, false
+	}
+	session, ok := s.playback.LookupForViewer(r.PathValue("id"), viewerID, profile.ID, touch)
 	if !ok {
 		fail(w, http.StatusForbidden, "playback_session_invalid")
 		return playback.Session{}, false
@@ -194,7 +204,7 @@ func (s *Server) servePlaybackAsset(w http.ResponseWriter, r *http.Request, name
 		fail(w, http.StatusConflict, "playback_not_hls")
 		return
 	}
-	file, err := s.playback.OpenAsset(session.ID, session.ProfileID, name)
+	file, err := s.playback.OpenAssetForViewer(session.ID, session.ViewerID, session.ProfileID, name)
 	if err != nil {
 		fail(w, http.StatusNotFound, "playback_asset_not_found")
 		return
@@ -237,7 +247,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := session
 	if accepted {
-		updated, err = s.playback.Heartbeat(session.ID, session.ProfileID, body.PositionMS)
+		updated, err = s.playback.HeartbeatForViewer(session.ID, session.ViewerID, session.ProfileID, body.PositionMS)
 		if err != nil {
 			playbackFailure(w, err)
 			return
@@ -269,7 +279,7 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := session
 	if accepted {
-		updated, err = s.playback.Seek(session.ID, session.ProfileID, body.PositionMS)
+		updated, err = s.playback.SeekForViewer(session.ID, session.ViewerID, session.ProfileID, body.PositionMS)
 		if err != nil {
 			playbackFailure(w, err)
 			return
@@ -287,7 +297,7 @@ func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.playback.Stop(session.ID, session.ProfileID) {
+	if !s.playback.StopForViewer(session.ID, session.ViewerID, session.ProfileID) {
 		fail(w, http.StatusForbidden, "playback_session_invalid")
 		return
 	}

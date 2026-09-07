@@ -252,10 +252,13 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
-	if err := s.house.Logout(s.session(r)); err != nil {
+	session := s.session(r)
+	viewerID, _ := s.house.SessionIdentity(session)
+	if err := s.house.Logout(session); err != nil {
 		fail(w, 500, "logout_failed")
 		return
 	}
+	s.playback.StopViewer(viewerID)
 	http.SetCookie(w, &http.Cookie{Name: "flixr_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	write(w, 200, map[string]bool{"logged_out": true})
 }
@@ -384,6 +387,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.playback.StopViewer(r.PathValue("id"))
 	write(w, 200, map[string]bool{"revoked": true})
 }
 func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +401,7 @@ func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request")
 		return
 	}
+	priorViewerID, _ := s.house.SessionIdentity(s.session(r))
 	x, e := s.house.Select(r.PathValue("id"), v.PIN)
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
@@ -408,6 +413,7 @@ func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.playback.StopViewer(priorViewerID)
 	s.cookie(w, r, x)
 	write(w, 200, map[string]bool{"selected": true})
 }

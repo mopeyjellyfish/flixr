@@ -2,14 +2,15 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Player } from './Player';
 
-const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: { fatal: boolean }) => void), attached: 0, destroyed: 0, imported: 0, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
+const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: { fatal: boolean; type?: string }) => void), attached: 0, destroyed: 0, imported: 0, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
 vi.mock('hls.js', async () => {
   if (hls.waitForImport) await new Promise<void>((resolve) => { hls.releaseImport = resolve; });
   hls.imported += 1;
   class FakeHls {
     static Events = { ERROR: 'error' };
+    static ErrorTypes = { NETWORK_ERROR: 'networkError' };
     static isSupported() { return true; }
-    on(_event: string, handler: (event: unknown, data: { fatal: boolean }) => void) { hls.error = handler; }
+    on(_event: string, handler: (event: unknown, data: { fatal: boolean; type?: string }) => void) { hls.error = handler; }
     loadSource() { /* observable through attachment */ }
     attachMedia() { hls.attached += 1; }
     destroy() { hls.destroyed += 1; }
@@ -27,7 +28,7 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 it('shows an actionable error when native media playback fails', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/missing.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
@@ -58,6 +59,50 @@ it('sends a final heartbeat before stopping an explicit player exit', async () =
   expect(heartbeatIndex).toBeGreaterThanOrEqual(0);
   expect(stopIndex).toBeGreaterThan(heartbeatIndex);
   expect(calls.filter((path) => path.endsWith('/stop'))).toHaveLength(1);
+});
+
+it('bounds a hung final heartbeat before stopping an explicit player exit', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) return new Promise<Response>(() => undefined);
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="film-1" onExit={exit} />);
+  await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/film.mp4'));
+
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  expect(calls.filter((path) => path.endsWith('/stop'))).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  expect(calls.filter((path) => path.endsWith('/heartbeat'))).toHaveLength(1);
+  expect(calls.filter((path) => path.endsWith('/stop'))).toHaveLength(1);
+});
+
+it('bounds a hung final heartbeat before stopping an unmounted player', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) return new Promise<Response>(() => undefined);
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const { unmount } = render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/film.mp4'));
+
+  unmount();
+  expect(calls.filter((path) => path.endsWith('/stop'))).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+  await waitFor(() => expect(calls.filter((path) => path.endsWith('/stop'))).toHaveLength(1));
+  expect(calls.filter((path) => path.endsWith('/heartbeat'))).toHaveLength(1);
 });
 
 it('beacons progress on pagehide for the active plan', async () => {
@@ -102,8 +147,235 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
   video.currentTime = 5;
   fireEvent.seeked(video);
   await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && JSON.parse(request.body ?? '{}').position_ms === 7_000)).toBe(true));
-  hls.error?.({}, { fatal: true });
+  hls.error?.({}, { fatal: true, type: 'mediaError' });
   expect(await screen.findByRole('alert')).toHaveTextContent(/compatibility stream stopped unexpectedly/i);
+});
+
+it('recovers an expired playback lease from the server-acknowledged position', async () => {
+  const calls: string[] = [];
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: `session-${plans}`, media_url: `/media-${plans}.mp4`, heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/seek-${plans}`, stop_url: `/stop-${plans}`, resume_ms: plans === 1 ? 0 : 12_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-2.mp4'));
+  fireEvent.loadedMetadata(video);
+
+  expect(video.currentTime).toBe(12);
+  expect(plans).toBe(2);
+  expect(calls.some((path) => path.endsWith('/session-1/stop'))).toBe(true);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('does not retry after viewer authorization is revoked', async () => {
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/media.mp4', heartbeat_url: '/api/v1/playback/sessions/session-1/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ error: { code: 'profile_required' } }), { status: 403 });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media.mp4'));
+  fireEvent.pause(video);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/choose a profile/i);
+  expect(plans).toBe(1);
+});
+
+it('replans a fatal HLS network failure and rejects the stale source', async () => {
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}/manifest.m3u8`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: plans === 1 ? 4_000 : 7_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  hls.error?.({}, { fatal: true, type: 'networkError' });
+
+  await waitFor(() => expect(hls.attached).toBe(2));
+  expect(plans).toBe(2);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('replans an HLS segment network failure before the media element becomes unusable', async () => {
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}/manifest.m3u8`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: 6_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  hls.error?.({}, { fatal: false, type: 'networkError' });
+  fireEvent.error(video);
+
+  await waitFor(() => expect(hls.attached).toBe(2));
+  expect(plans).toBe(2);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('replans a compatibility stream when the browser reports the segment failure as a media error', async () => {
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}/manifest.m3u8`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: 6_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.error(video);
+
+  await waitFor(() => expect(hls.attached).toBe(2));
+  expect(plans).toBe(2);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('caps consecutive compatibility stream recovery cycles', async () => {
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}/manifest.m3u8`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: 6_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    hls.error?.({}, { fatal: false, type: 'networkError' });
+    await waitFor(() => expect(hls.attached).toBe(attempt + 1));
+  }
+  hls.error?.({}, { fatal: false, type: 'networkError' });
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/could not reconnect/i);
+  expect(plans).toBe(4);
+});
+
+it('cancels an in-flight recovery plan on explicit stop and releases its late session', async () => {
+  let resolveRecovery: ((response: Response) => void) | undefined;
+  const stopped: string[] = [];
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      if (plans === 2) return new Promise<Response>((resolve) => { resolveRecovery = resolve; });
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/media-1.mp4', heartbeat_url: '/api/v1/playback/sessions/session-1/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/stop')) stopped.push(path);
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="film-1" onExit={exit} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(resolveRecovery).toBeTypeOf('function'));
+
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  resolveRecovery!(new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-2', media_url: '/media-2.mp4', heartbeat_url: '/heartbeat-2', resume_ms: 12_000, stream_offset_ms: 0, expires_at: 9999999999 })));
+
+  await waitFor(() => expect(stopped.some((path) => path.endsWith('/session-2/stop'))).toBe(true));
+  expect(video).not.toHaveAttribute('src', '/media-2.mp4');
+});
+
+it('does not start recovery when a heartbeat fails after unmount', async () => {
+  let rejectHeartbeat: ((error: unknown) => void) | undefined;
+  let heartbeats = 0;
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: `session-${plans}`, media_url: `/media-${plans}.mp4`, heartbeat_url: `/heartbeat-${plans}`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) {
+      heartbeats += 1;
+      if (heartbeats === 1) return new Promise<Response>((_resolve, reject) => { rejectHeartbeat = reject; });
+      return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  const { unmount } = render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(rejectHeartbeat).toBeTypeOf('function'));
+
+  unmount();
+  await act(async () => {
+    rejectHeartbeat!(new TypeError('connection lost'));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(plans).toBe(1);
+});
+
+it('releases a seek replacement that arrives after explicit stop', async () => {
+  let resolveSeek: ((response: Response) => void) | undefined;
+  const stopped: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1/manifest.m3u8', heartbeat_url: '/heartbeat-1', seek_url: '/seek-1', stop_url: '/stop-1', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/session-1/seek')) return new Promise<Response>((resolve) => { resolveSeek = resolve; });
+    if (path.includes('/playback/sessions/') && path.endsWith('/stop')) stopped.push(path);
+    if (path.endsWith('/stop-1')) stopped.push(path);
+    return new Response(JSON.stringify({ stopped: true, expires_at: 9999999999 }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="film-1" onExit={exit} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video')!;
+  video.currentTime = 3;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(resolveSeek).toBeTypeOf('function'));
+
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  resolveSeek!(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2/manifest.m3u8', heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/api/v1/playback/sessions/session-2/stop', resume_ms: 3_000, stream_offset_ms: 3_000, expires_at: 9999999999 })));
+
+  await waitFor(() => expect(stopped.some((path) => path.includes('/session-2/stop'))).toBe(true));
+  expect(hls.attached).toBe(1);
 });
 
 it('still stops the server session when saving final progress fails', async () => {

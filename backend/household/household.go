@@ -273,6 +273,15 @@ func (m *Manager) subject(token string) string {
 	return m.sessions[token]
 }
 func (m *Manager) Owner(session string) bool { return m.subject(session) == "owner" }
+
+// SessionIdentity returns a non-secret identifier for an active bearer session.
+func (m *Manager) SessionIdentity(session string) (string, bool) {
+	if m.subject(session) == "" {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(tokenHash(session)), true
+}
+
 func (m *Manager) Logout(session string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

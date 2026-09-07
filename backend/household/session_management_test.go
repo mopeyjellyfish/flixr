@@ -80,6 +80,27 @@ func TestActiveSessionCanBeRevoked(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityIsStableAndDoesNotExposeTheBearerToken(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	m, err := Open(db)
+	require.NoError(t, err)
+	token, err := m.Claim(m.SetupToken(), "password")
+	require.NoError(t, err)
+
+	identity, ok := m.SessionIdentity(token)
+	require.True(t, ok)
+	require.NotEqual(t, token, identity)
+	sessions, err := m.ActiveSessions()
+	require.NoError(t, err)
+	require.Equal(t, sessions[0].ID, identity)
+
+	require.NoError(t, m.Logout(token))
+	_, ok = m.SessionIdentity(token)
+	require.False(t, ok)
+}
+
 func TestPINChangeRevokesProfileSessions(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	require.NoError(t, err)

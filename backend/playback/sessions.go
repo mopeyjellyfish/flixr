@@ -11,6 +11,7 @@ const directSessionTTL = 15 * time.Minute
 // Session is short-lived, profile-bound authority for one catalog item.
 type Session struct {
 	ProgressGeneration int64     `json:"-"`
+	ViewerID           string    `json:"-"`
 	ID                 string    `json:"id"`
 	ProfileID          string    `json:"-"`
 	CatalogID          string    `json:"catalog_id"`
