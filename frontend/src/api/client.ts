@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -54,6 +54,12 @@ export const api = {
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),
   playbackStatus: () => request<PlaybackStatus>('/owner/playback/status'),
   home: (offset = 0) => request<CatalogPage>(`/catalog/home?offset=${offset}&limit=48`),
+  history: (before = '') => request<HistoryPage>(`/history?limit=25${before ? `&before=${encodeURIComponent(before)}` : ''}`),
+  clearHistory: () => request<{ id: string; undo_until: number }>('/history/clear', { method: 'POST' }),
+  undoHistoryClear: (id: string) => request<{ restored: boolean }>(`/history/clear/${encodeURIComponent(id)}/undo`, { method: 'POST' }),
+  rating: (id: string) => request<{ rating: Rating | null }>(`/ratings/${encodeURIComponent(id)}`),
+  setRating: (id: string, value: number) => request<{ saved: boolean }>(`/ratings/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+  deleteRating: (id: string) => request<{ deleted: boolean }>(`/ratings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   search: (query: string, offset = 0) => request<CatalogPage>(`/catalog/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=48`),
   item: (id: string) => request<CatalogItem>(`/catalog/items/${id}`),
   series: (id: string) => request<SeriesDetail>(`/catalog/series/${id}`),

@@ -12,9 +12,10 @@ import { screenCoordinator } from '../modules/screenCoordinator/runtime';
 const InteriorGallery = lazy(() => import('../features/demo/InteriorGallery'));
 const Owner = lazy(async () => ({ default: (await import('../features/owner/Owner')).Owner }));
 const Browse = lazy(async () => ({ default: (await import('../features/browse/Browse')).Browse }));
+const History = lazy(async () => ({ default: (await import('../features/history/History')).History }));
 const Player = lazy(async () => ({ default: (await import('../modules/mediaPlayer/Player')).Player }));
 
-type Route = 'loading' | 'setup' | 'login' | 'profiles' | 'owner' | 'browse' | 'player' | 'failure' | 'gallery';
+type Route = 'loading' | 'setup' | 'login' | 'profiles' | 'owner' | 'browse' | 'history' | 'player' | 'failure' | 'gallery';
 function routeFor(path = window.location.pathname): Route {
   const pathname = path.split(/[?#]/, 1)[0];
   if (pathname === '/dev/interior') return 'gallery';
@@ -22,6 +23,7 @@ function routeFor(path = window.location.pathname): Route {
   if (pathname === '/login') return 'login';
   if (pathname === '/profiles') return 'profiles';
   if (pathname === '/owner') return 'owner';
+  if (pathname === '/history') return 'history';
   if (pathname.startsWith('/play/')) return 'player';
   if (pathname === '/home' || pathname === '/movies' || pathname === '/tv' || pathname === '/search' || pathname.startsWith('/detail/')) return 'browse';
   return 'loading';
@@ -106,6 +108,7 @@ export function App() {
   if (route === 'setup') return <main className="setup-page"><Setup readiness={status.readiness} initialRoots={setupRoots} onCompleted={() => navigate('/home')} /></main>;
   if (route === 'login') return <main><OwnerLogin onLogin={() => void ownerLoggedIn()} /></main>;
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
+  if (route === 'history') return <Suspense fallback={<RouteFallback />}><History onBrowse={() => navigate('/home')} onExit={() => navigate('/profiles')} /></Suspense>;
   if (route === 'player') {
     const catalogID = decodeURIComponent(path.slice('/play/'.length));
     return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} onAdvance={(nextID) => navigate(`/play/${encodeURIComponent(nextID)}`, true)} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
