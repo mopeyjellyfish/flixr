@@ -2,6 +2,9 @@ package catalog
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -43,14 +46,16 @@ func TestArtworkSizedDeduplicatesAndKeepsOriginal(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			data, contentType, err := c.ArtworkSized("film", "poster", 200)
+			data, contentType, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
 			if err != nil || contentType != "image/jpeg" {
 				t.Errorf("derivative = %q %v", contentType, err)
 				return
 			}
 			decoded, _, err := image.Decode(bytes.NewReader(data))
-			if err != nil || decoded.Bounds().Dx() != 200 {
-				t.Errorf("derivative bounds = %v, %v", decoded.Bounds(), err)
+			if err != nil {
+				t.Errorf("decode derivative: %v", err)
+			} else if decoded.Bounds().Dx() != 240 {
+				t.Errorf("derivative width = %d", decoded.Bounds().Dx())
 			}
 		}()
 	}
@@ -74,9 +79,75 @@ func TestArtworkSizedFallsBackForInvalidCachedImage(t *testing.T) {
 	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: []byte("not an image"), ContentType: "image/jpeg"}); err != nil {
 		t.Fatal(err)
 	}
-	data, contentType, err := c.ArtworkSized("film", "poster", 200)
+	data, contentType, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
 	if err != nil || string(data) != "not an image" || contentType != "image/jpeg" {
 		t.Fatalf("fallback = %q %q %v", data, contentType, err)
+	}
+}
+
+func TestArtworkSizedRejectsUnsafeDimensionsAndCancelledWait(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A PNG header is enough for DecodeConfig; no pixel buffer may be allocated.
+	unsafe := []byte{'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0x50, 0, 0, 0, 0x50, 8, 2, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(unsafe[16:20], 5000)
+	binary.BigEndian.PutUint32(unsafe[20:24], 5000)
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: unsafe, ContentType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
+	if err != nil || !bytes.Equal(data, unsafe) {
+		t.Fatalf("unsafe dimensions fallback = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	data, _, err = c.ArtworkSized(ctx, "film", "poster", 200)
+	if !errors.Is(err, context.Canceled) || !bytes.Equal(data, unsafe) {
+		t.Fatalf("cancel = %v", err)
+	}
+}
+
+func TestArtworkSizedInvalidatesDerivativeWhenOriginalChanges(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA := image.NewRGBA(image.Rect(0, 0, 800, 1200))
+	imageA.Set(1, 1, color.RGBA{R: 255, A: 255})
+	var first bytes.Buffer
+	if err := jpeg.Encode(&first, imageA, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: first.Bytes(), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA.Set(1, 1, color.RGBA{B: 255, A: 255})
+	var second bytes.Buffer
+	if err := jpeg.Encode(&second, imageA, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: second.Bytes(), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
+	if err != nil || bytes.Equal(before, after) {
+		t.Fatalf("replacement derivative stale: %v", err)
 	}
 }
 
@@ -118,4 +189,66 @@ func TestArtworkMaintenanceEvictsOnlyExpiredDerivatives(t *testing.T) {
 	if err != nil || string(data) != "durable" {
 		t.Fatalf("original = %q, %v", data, err)
 	}
+}
+
+func TestArtworkMaintenanceStopsOnShutdown(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status := c.ArtworkMaintenanceStatus(); status.Outcome != "complete" || status.LastRun.IsZero() {
+		t.Fatalf("maintenance status = %#v", status)
+	}
+}
+
+func BenchmarkArtworkSizedCold30Warm30(b *testing.B) {
+	db, err := sqlite.Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		b.Fatal(err)
+	}
+	sourceImage := image.NewRGBA(image.Rect(0, 0, 800, 1200))
+	var source bytes.Buffer
+	if err := jpeg.Encode(&source, sourceImage, nil); err != nil {
+		b.Fatal(err)
+	}
+	for i := range 30 {
+		if _, err := c.cacheArtwork(strconv.Itoa(i), "poster", Artwork{Bytes: source.Bytes(), ContentType: "image/jpeg"}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	run := func() {
+		for i := range 30 {
+			if _, _, err := c.ArtworkSized(context.Background(), strconv.Itoa(i), "poster", 240); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	b.Run("cold30", func(b *testing.B) {
+		for range b.N {
+			b.StopTimer()
+			_ = os.RemoveAll(filepath.Join(db.DataDir(), "artwork", "derivatives"))
+			b.StartTimer()
+			run()
+		}
+	})
+	b.Run("warm30", func(b *testing.B) {
+		run()
+		b.ResetTimer()
+		for range b.N {
+			run()
+		}
+	})
 }

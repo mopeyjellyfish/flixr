@@ -111,6 +111,11 @@ type ScanStatus struct {
 	Message    string `json:"message,omitempty"`
 }
 
+type ArtworkMaintenanceStatus struct {
+	LastRun time.Time
+	Outcome string
+}
+
 type Catalog struct {
 	demo              bool
 	demoSource        string
@@ -131,6 +136,13 @@ type Catalog struct {
 	artworkGroup      singleflight.Group
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
+	maintenanceStatus ArtworkMaintenanceStatus
+}
+
+func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	return c.maintenanceStatus
 }
 
 func New() *Catalog {

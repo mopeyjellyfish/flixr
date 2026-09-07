@@ -32,5 +32,5 @@ it('generates stable offline pictures and falls back when a supplied picture fai
 });
 it('requests a capped derivative for catalog artwork', () => {
   const { container } = render(<Artwork src="/api/v1/catalog/artwork/film/poster" width={210} />);
-  expect(container.querySelector('img')).toHaveAttribute('src', '/api/v1/catalog/artwork/film/poster?w=210');
+  expect(container.querySelector('img')).toHaveAttribute('src', '/api/v1/catalog/artwork/film/poster?w=240');
 });

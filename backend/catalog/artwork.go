@@ -3,12 +3,14 @@ package catalog
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,9 +24,13 @@ import (
 
 const (
 	maxArtworkWidth     = 1600
+	maxArtworkHeight    = 2400
+	maxArtworkPixels    = 12_000_000
+	maxArtworkSource    = 5 << 20
 	maxDerivativeBytes  = 128 << 20
 	derivativeMaxAge    = 7 * 24 * time.Hour
 	maintenanceMaxFiles = 64
+	maintenanceBatch    = 256
 )
 
 var artworkWork = make(chan struct{}, 2)
@@ -42,6 +48,7 @@ func (c *Catalog) startArtworkMaintenance() {
 		run := func() {
 			c.artworkMu.Lock()
 			c.cleanupDerivativesLocked(time.Now())
+			c.maintenanceStatus = ArtworkMaintenanceStatus{LastRun: time.Now(), Outcome: "complete"}
 			c.artworkMu.Unlock()
 		}
 		run()
@@ -64,8 +71,17 @@ func artworkURL(id, kind string) string {
 func artworkFile(dir, id, kind string) string {
 	return filepath.Join(dir, "artwork", id+"-"+kind)
 }
-func derivativeFile(dir, id, kind string, width int) string {
-	return filepath.Join(dir, "artwork", "derivatives", id+"-"+kind+"-"+strconv.Itoa(width)+".jpg")
+func derivativeFile(dir, id, kind, revision string, width int) string {
+	return filepath.Join(dir, "artwork", "derivatives", id+"-"+kind+"-"+revision+"-"+strconv.Itoa(width)+".jpg")
+}
+
+func derivativeWidth(width int) int {
+	for _, size := range [...]int{160, 240, 320, 480, 640, 960, 1280, maxArtworkWidth} {
+		if width <= size {
+			return size
+		}
+	}
+	return maxArtworkWidth
 }
 func allowedArtworkContentType(contentType string) bool {
 	switch strings.ToLower(strings.TrimSpace(contentType)) {
@@ -161,18 +177,17 @@ func (c *Catalog) Artwork(id, kind string) ([]byte, string, error) {
 
 // ArtworkSized returns a bounded JPEG derivative where possible. Originals remain
 // durable; any derivative failure falls back to the original cached artwork.
-func (c *Catalog) ArtworkSized(id, kind string, width int) ([]byte, string, error) {
+func (c *Catalog) ArtworkSized(ctx context.Context, id, kind string, width int) ([]byte, string, error) {
 	original, contentType, err := c.Artwork(id, kind)
 	if err != nil || width <= 0 {
 		return original, contentType, err
 	}
-	if width > maxArtworkWidth {
-		width = maxArtworkWidth
-	}
-	key := id + ":" + kind + ":" + strconv.Itoa(width)
-	value, err, _ := c.artworkGroup.Do(key, func() (any, error) {
+	width = derivativeWidth(width)
+	revision := fmt.Sprintf("%x", sha256.Sum256(original))[:16]
+	key := id + ":" + kind + ":" + revision + ":" + strconv.Itoa(width)
+	result := c.artworkGroup.DoChan(key, func() (any, error) {
 		c.artworkMu.Lock()
-		path := derivativeFile(c.db.DataDir(), id, kind, width)
+		path := derivativeFile(c.db.DataDir(), id, kind, revision, width)
 		if data, readErr := afero.ReadFile(c.fs, path); readErr == nil {
 			_ = c.fs.Chtimes(path, time.Now(), time.Now())
 			c.artworkMu.Unlock()
@@ -182,8 +197,19 @@ func (c *Catalog) ArtworkSized(id, kind string, width int) ([]byte, string, erro
 		select {
 		case artworkWork <- struct{}{}:
 			defer func() { <-artworkWork }()
-		default:
+		case <-time.After(100 * time.Millisecond):
 			return nil, errors.New("artwork resize busy")
+		}
+		if len(original) > maxArtworkSource {
+			return nil, errors.New("cached artwork exceeds resize limit")
+		}
+		config, _, configErr := image.DecodeConfig(bytes.NewReader(original))
+		if configErr != nil || config.Width < 1 || config.Height < 1 || config.Width > maxArtworkPixels/config.Height {
+			return nil, errors.New("cached artwork dimensions are unsafe")
+		}
+		height := max(1, config.Height*width/config.Width)
+		if height > maxArtworkHeight {
+			return nil, errors.New("artwork derivative dimensions are unsafe")
 		}
 		decoded, _, decodeErr := image.Decode(bytes.NewReader(original))
 		if decodeErr != nil {
@@ -193,7 +219,6 @@ func (c *Catalog) ArtworkSized(id, kind string, width int) ([]byte, string, erro
 		if bounds.Dx() <= width {
 			return sizedArtwork{original, contentType}, nil
 		}
-		height := max(1, bounds.Dy()*width/bounds.Dx())
 		resized := image.NewRGBA(image.Rect(0, 0, width, height))
 		draw.CatmullRom.Scale(resized, resized.Bounds(), decoded, bounds, draw.Over, nil)
 		var output bytes.Buffer
@@ -202,20 +227,22 @@ func (c *Catalog) ArtworkSized(id, kind string, width int) ([]byte, string, erro
 		}
 		c.artworkMu.Lock()
 		writeErr := c.writeDerivative(path, output.Bytes())
-		if writeErr == nil {
-			c.cleanupDerivativesLocked(time.Now())
-		}
 		c.artworkMu.Unlock()
 		if writeErr != nil {
 			return nil, writeErr
 		}
 		return sizedArtwork{output.Bytes(), "image/jpeg"}, nil
 	})
-	if err != nil {
-		return original, contentType, nil
+	select {
+	case <-ctx.Done():
+		return original, contentType, ctx.Err()
+	case completed := <-result:
+		if completed.Err != nil {
+			return original, contentType, nil
+		}
+		sized := completed.Val.(sizedArtwork)
+		return sized.data, sized.contentType, nil
 	}
-	sized := value.(sizedArtwork)
-	return sized.data, sized.contentType, nil
 }
 
 func (c *Catalog) writeDerivative(path string, data []byte) error {
@@ -244,8 +271,13 @@ func (c *Catalog) writeDerivative(path string, data []byte) error {
 
 func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 	dir := filepath.Join(c.db.DataDir(), "artwork", "derivatives")
-	entries, err := afero.ReadDir(c.fs, dir)
+	directory, err := c.fs.Open(dir)
 	if err != nil {
+		return
+	}
+	defer directory.Close()
+	entries, err := directory.Readdir(maintenanceBatch)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return
 	}
 	type candidate struct {

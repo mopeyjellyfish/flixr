@@ -416,7 +416,10 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	width, _ := strconv.Atoi(r.URL.Query().Get("w"))
-	data, contentType, err := s.catalog.ArtworkSized(r.PathValue("id"), r.PathValue("kind"), width)
+	data, contentType, err := s.catalog.ArtworkSized(r.Context(), r.PathValue("id"), r.PathValue("kind"), width)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_artwork_not_found")
 		return
