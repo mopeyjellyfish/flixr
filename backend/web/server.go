@@ -26,18 +26,18 @@ type Readiness struct {
 }
 type Build struct{ Version, Revision string }
 type Server struct {
-	house *household.Manager
-	catalog *catalog.Catalog
-	playback *playback.Manager
-	screens *screens.Manager
-	mux *http.ServeMux
-	lookPath func(string) (string, error)
-	readyMu sync.RWMutex
-	readiness Readiness
-	diagnostics *diagnostics.Log
+	house             *household.Manager
+	catalog           *catalog.Catalog
+	playback          *playback.Manager
+	screens           *screens.Manager
+	mux               *http.ServeMux
+	lookPath          func(string) (string, error)
+	readyMu           sync.RWMutex
+	readiness         Readiness
+	diagnostics       *diagnostics.Log
 	version, revision string
-	settingsLocks map[string]bool
-	settingsValues map[string]string
+	settingsLocks     map[string]bool
+	settingsValues    map[string]string
 }
 
 func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
@@ -49,7 +49,10 @@ func NewServerWithPlayback(h *household.Manager, c *catalog.Catalog, manager *pl
 }
 
 func NewServerWithScreens(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, builds ...Build) *Server {
-	build := Build{Version: "dev", Revision: "unknown"}; if len(builds) > 0 { build = builds[0] }
+	build := Build{Version: "dev", Revision: "unknown"}
+	if len(builds) > 0 {
+		build = builds[0]
+	}
 	return newServer(h, c, playbackManager, screenManager, nil, build)
 }
 
@@ -61,7 +64,10 @@ func NewServerWithConfiguration(h *household.Manager, c *catalog.Catalog, playba
 }
 
 func NewServerWithConfigurationValues(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, locks map[string]bool, values map[string]string, builds ...Build) *Server {
-	build := Build{Version: "dev", Revision: "unknown"}; if len(builds) > 0 { build = builds[0] }
+	build := Build{Version: "dev", Revision: "unknown"}
+	if len(builds) > 0 {
+		build = builds[0]
+	}
 	s := newServer(h, c, playbackManager, screenManager, locks, build)
 	s.settingsValues = values
 	return s

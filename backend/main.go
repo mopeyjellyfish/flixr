@@ -182,7 +182,6 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		}
 	}
 	screenManager := screens.New(time.Minute)
-<<<<<<< HEAD
 	application := web.NewServerWithConfigurationValues(h, c, p, screenManager, config.EnvironmentLocks(), cfg.NonSecretValues(), web.Build{Version: version, Revision: revision}).Handler()
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: application, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	inputOnly := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
