@@ -147,7 +147,7 @@ type Item struct {
 	probeRevision int
 }
 
-const mediaProbeRevision = 1
+const mediaProbeRevision = 2
 
 // Season is an ordered group of playable episode records.
 type Season struct {

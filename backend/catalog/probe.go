@@ -88,8 +88,8 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			Height        int               `json:"height"`
 			BitRate       string            `json:"bit_rate"`
 			AvgFrameRate  string            `json:"avg_frame_rate"`
-			BitsPerSample int               `json:"bits_per_sample"`
-			BitsPerRaw    int               `json:"bits_per_raw_sample"`
+			BitsPerSample json.Number       `json:"bits_per_sample"`
+			BitsPerRaw    json.Number       `json:"bits_per_raw_sample"`
 			ColorTransfer string            `json:"color_transfer"`
 			Tags          map[string]string `json:"tags"`
 			Disposition   struct {
@@ -111,7 +111,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 				media.VideoProfile = stream.Profile
 				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), stream.ColorTransfer
 				media.FrameRateMilli = frameRateMilli(stream.AvgFrameRate)
-				media.BitDepth = nonNegative(max(stream.BitsPerSample, stream.BitsPerRaw))
+				media.BitDepth = bitDepth(stream.BitsPerSample, stream.BitsPerRaw)
 				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
 					media.Bitrate = bitrate
 				}
@@ -123,6 +123,15 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		}
 	}
 	return media, nil
+}
+
+func bitDepth(values ...json.Number) int {
+	for _, value := range values {
+		if parsed, err := strconv.Atoi(value.String()); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func frameRateMilli(value string) int {

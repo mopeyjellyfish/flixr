@@ -12,15 +12,17 @@ async function browserCapabilities(media: CatalogItem): Promise<PlaybackCapabili
   const nativeHLS = probe.canPlayType('application/vnd.apple.mpegurl') !== '';
   const mediaSourceHLS = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.64001f, mp4a.40.2"');
 	const audio = media.audio?.[0];
-	const directType = media.container?.split(',').map((value) => value.trim()).includes('mov,mp4,m4a,3gp,3g2,mj2') || media.container === 'mp4'
+	const directType = media.container?.split(',').map((value) => value.trim()).includes('mp4')
 		? media.video_codec === 'h264' && audio?.codec === 'aac' && (media.video_profile === 'Baseline' || media.video_profile === 'Main' || media.video_profile === 'High')
-			? 'video/mp4; codecs="avc1.64001f, mp4a.40.2"' : ''
+			? 'video/mp4; codecs="avc1.64001f"' : ''
 		: '';
 	let direct = false;
 	if (directType) {
 		const config = { type: 'file' as const, video: { contentType: directType, width: media.width ?? 0, height: media.height ?? 0, bitrate: media.bitrate ?? 0, framerate: (media.frame_rate_milli ?? 0) / 1000 }, audio: { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: String(audio?.channels ?? ''), bitrate: 0, samplerate: 0 } };
-		if (navigator.mediaCapabilities) direct = (await navigator.mediaCapabilities.decodingInfo(config)).supported;
-		else direct = probe.canPlayType(directType) !== '';
+		try {
+			if (navigator.mediaCapabilities) direct = (await navigator.mediaCapabilities.decodingInfo(config)).supported;
+			else direct = probe.canPlayType(directType) !== '';
+		} catch { direct = false; }
 	}
 	return {
     containers: [...(mp4 ? ['mp4'] : []), ...(webm ? ['webm'] : [])],

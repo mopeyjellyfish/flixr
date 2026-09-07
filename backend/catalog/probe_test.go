@@ -57,7 +57,7 @@ func TestFFprobeRejectsMalformedOutput(t *testing.T) {
 }
 
 func TestFFprobeRecordsFrameRateAndBitDepth(t *testing.T) {
-	payload := `{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"2"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","avg_frame_rate":"30000/1001","bits_per_raw_sample":10},{"index":1,"codec_type":"audio","codec_name":"aac","channels":6}]}`
+	payload := `{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"2"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","avg_frame_rate":"30000/1001","bits_per_raw_sample":"10"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":6}]}`
 	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}
 	file, err := os.CreateTemp(t.TempDir(), "media")
 	if err != nil {

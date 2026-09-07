@@ -90,10 +90,22 @@ func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadi
 	if !ready.FFmpeg {
 		return Plan{}, ErrFFmpegUnavailable
 	}
+	if exceedsKnownLimits(media, client) {
+		return Plan{Kind: Unsupported}, ErrUnsupported
+	}
 	if codecCompatible(media, client) {
 		return Plan{Kind: Remux, Container: "fmp4-hls", VideoCodec: media.VideoCodec, AudioCodec: media.AudioCodec, Description: "Stream-copy fMP4 HLS"}, nil
 	}
 	return Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", AudioCodec: "aac", Description: "H.264/AAC compatibility stream"}, nil
+}
+
+func exceedsKnownLimits(media MediaProperties, client ClientCapabilities) bool {
+	return media.Width > 0 && client.MaxWidth > 0 && media.Width > client.MaxWidth ||
+		media.Height > 0 && client.MaxHeight > 0 && media.Height > client.MaxHeight ||
+		media.FrameRateMilli > 0 && client.MaxFrameRateMilli > 0 && media.FrameRateMilli > client.MaxFrameRateMilli ||
+		media.BitDepth > 0 && client.MaxBitDepth > 0 && media.BitDepth > client.MaxBitDepth ||
+		media.AudioChannels > 0 && client.MaxAudioChannels > 0 && media.AudioChannels > client.MaxAudioChannels ||
+		media.HDR != "" && len(client.HDR) > 0 && !containsFold(client.HDR, media.HDR)
 }
 
 func (client ClientCapabilities) Validate() error {
