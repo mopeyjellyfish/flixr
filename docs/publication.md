@@ -20,20 +20,24 @@ are documented in [releases](releases.md); do not create another publisher.
 ## Current qualification evidence
 
 On 7 September 2026, an unauthenticated download of the public `v0.3.0` source
-archive completed with HTTP 200. Source access is therefore available without a
-GitHub credential.
+archive completed with HTTP 200. A properly negotiated anonymous GHCR bearer-token
+request also read its image index; the earlier recorded manifest 401 was not a
+valid qualification result because it omitted the OCI manifest `Accept` header.
 
-The matching image did not qualify. The standard anonymous GHCR bearer-token flow
-returned a token after a request for `repository:mopeyjellyfish/flixr:pull`, but
-the subsequent manifest request for `ghcr.io/mopeyjellyfish/flixr:v0.3.0` returned HTTP 401. No
-anonymous image index or platform digest is available to record. This does not
-identify the package configuration causing the failure; it establishes that the
-documented anonymous pull cannot yet succeed.
-
-Until anonymous image access succeeds, native AMD64 and ARM64 pull/install checks
-remain blocked. Do not remove the README's registry-access limitation or close
-[#91](https://github.com/mopeyjellyfish/flixr/issues/91). No repository or package
-visibility was changed during this qualification.
+The first credential-free Docker-client pull was then proved on a native Linux
+AMD64 host for `v0.4.0`. It resolved to image-index digest
+`sha256:554dfba8c70bebe37a1061a726f40233bb7ce7f7be5bd65ee4983a31e1e775ca`.
+An isolated native AMD64 Compose installation also passed with fresh named volumes,
+an unclaimed setup status before and after restart, loopback-only access, and a
+read-only media bind. Its temporary container, network, volumes, client config,
+and files were removed after the check. This proves neither the ARM64 native pull
+nor its isolated Compose installation.
+A fresh Docker Desktop ARM64 client returned `denied`, although the registry's
+anonymous ARM64 manifest and blobs were readable over HTTPS; that client result
+does not establish a GHCR visibility problem. Repeat the pull on a clean native
+Linux ARM64 host. Keep [#91](https://github.com/mopeyjellyfish/flixr/issues/91)
+open until both remaining checks pass. No repository or package visibility was
+changed during qualification.
 
 ## Anonymous source and image checks
 
