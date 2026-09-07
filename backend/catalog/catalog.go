@@ -778,6 +778,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	}
 	for id, value := range series {
 		if previous, ok := previousSeries[id]; ok && (previous.ProviderID != "" || previous.OwnerUnmatch) {
+			value.Title = previous.Title
 			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly
 		} else if provider != nil && token != "" {
@@ -814,7 +815,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	if episodeProvider, ok := provider.(EpisodeProvider); ok && token != "" {
 		for id, item := range next {
 			parent, found := series[item.SeriesID]
-			if item.Kind != "episode" || !found || parent.ProviderID == "" || item.ProviderID != "" {
+			if item.Kind != "episode" || !found || parent.ProviderID == "" || (item.ProviderID != "" && (item.Poster != "" || item.Backdrop != "")) {
 				continue
 			}
 			enrichment, err := episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)

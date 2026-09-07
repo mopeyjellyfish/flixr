@@ -73,6 +73,31 @@ func (p metadataBlockingProvider) Lookup(context.Context, string, string, string
 	return catalog.Enrichment{}, nil
 }
 
+type retryEpisodeArtworkProvider struct {
+	episodeCalls int
+	artworkCalls int
+}
+
+func (p *retryEpisodeArtworkProvider) Lookup(_ context.Context, _ string, kind, _ string) (catalog.Enrichment, error) {
+	if kind == "series" {
+		return catalog.Enrichment{ProviderID: "series-id", Title: "Accurate Show"}, nil
+	}
+	return catalog.Enrichment{}, nil
+}
+
+func (p *retryEpisodeArtworkProvider) LookupEpisode(context.Context, string, string, int, int) (catalog.Enrichment, error) {
+	p.episodeCalls++
+	return catalog.Enrichment{ProviderID: "episode-id", Title: "Accurate Episode", Backdrop: "/still.jpg"}, nil
+}
+
+func (p *retryEpisodeArtworkProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	p.artworkCalls++
+	if p.artworkCalls == 1 {
+		return catalog.Artwork{}, errors.New("temporary artwork outage")
+	}
+	return catalog.Artwork{Bytes: []byte("episode image"), ContentType: "image/jpeg"}, nil
+}
+
 func TestScanRecordsProviderOutcomes(t *testing.T) {
 	t.Run("film and series no match", func(t *testing.T) {
 		films, tv, data := t.TempDir(), t.TempDir(), t.TempDir()
@@ -407,5 +432,36 @@ func TestNormalModeProviderSetupEnrichesUnchangedLibraryAndSurvivesRestart(t *te
 	}
 	if data, contentType, err := reopened.Artwork(episodeID, "backdrop"); err != nil || len(data) == 0 || contentType != "image/jpeg" {
 		t.Fatalf("persisted episode artwork = %q %q %v", data, contentType, err)
+	}
+}
+
+func TestUnchangedEpisodeRetriesMissingArtworkAndKeepsProviderSeriesTitle(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(tv, "Show", "Show.S01E01.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	provider := &retryEpisodeArtworkProvider{}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots("", tv) != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	seriesID := c.MetadataTargets()[0].ID
+	series, ok := c.Series(seriesID)
+	if !ok || series.Title != "Accurate Show" || series.Seasons[0].Episodes[0].Backdrop != "" || c.ScanStatus().Status != "partial" {
+		t.Fatalf("first enrichment = %#v status=%#v", series, c.ScanStatus())
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	series, ok = c.Series(seriesID)
+	if !ok || len(series.Seasons) != 1 || len(series.Seasons[0].Episodes) != 1 {
+		t.Fatalf("retried series = %#v", series)
+	}
+	episode := series.Seasons[0].Episodes[0]
+	if series.Title != "Accurate Show" || episode.Title != "Accurate Episode" || episode.Backdrop == "" || provider.episodeCalls != 2 || c.ScanStatus().Status != "complete" {
+		t.Fatalf("retried enrichment = %#v calls=%d status=%#v", series, provider.episodeCalls, c.ScanStatus())
+	}
+	if data, _, err := c.Artwork(episode.ID, "backdrop"); err != nil || string(data) != "episode image" {
+		t.Fatalf("retried artwork = %q, %v", data, err)
 	}
 }
