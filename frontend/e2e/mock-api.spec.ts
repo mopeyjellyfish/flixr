@@ -12,7 +12,8 @@ const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, syno
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
 
 async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue } | undefined) {
-  await page.unrouteAll();
+  // New routes take precedence. Keep interception installed while changing states
+  // so an in-flight request cannot escape to the real development proxy.
   await page.route('**/api/v1/**', (route) => {
     const request = route.request();
     const url = new URL(request.url());
