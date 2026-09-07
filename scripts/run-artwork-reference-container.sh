@@ -6,7 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 result_dir="${FLIXR_MEASURE_RESULT_DIR:-$repo_root/artwork-reference-results-$(date -u +%Y%m%d-%H%M%S)}"
 name="flixr-artwork-reference-$$"
 image="$name-image"
-source_sha="$(git -C "$repo_root" rev-parse HEAD)"
+source_sha="${FLIXR_MEASURE_SOURCE_SHA:-$(git -C "$repo_root" rev-parse HEAD)}"
 
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
