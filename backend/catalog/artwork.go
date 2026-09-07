@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -226,7 +225,14 @@ func (c *Catalog) ArtworkSized(ctx context.Context, id, kind string, width int) 
 			return nil, fmt.Errorf("encode artwork derivative: %w", encodeErr)
 		}
 		c.artworkMu.Lock()
-		writeErr := c.writeDerivative(path, output.Bytes())
+		var writeErr error
+		if c.derivativeReady && c.derivativeCount < maintenanceMaxFiles && c.derivativeBytes+int64(output.Len()) <= maxDerivativeBytes {
+			writeErr = c.writeDerivative(path, output.Bytes())
+			if writeErr == nil {
+				c.derivativeBytes += int64(output.Len())
+				c.derivativeCount++
+			}
+		}
 		c.artworkMu.Unlock()
 		if writeErr != nil {
 			return nil, writeErr
@@ -271,21 +277,18 @@ func (c *Catalog) writeDerivative(path string, data []byte) error {
 
 func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 	dir := filepath.Join(c.db.DataDir(), "artwork", "derivatives")
-	directory, err := c.fs.Open(dir)
-	if err != nil {
-		return
+	if c.maintenanceDir == nil {
+		directory, err := c.fs.Open(dir)
+		if err != nil {
+			c.derivativeReady = true
+			return
+		}
+		c.maintenanceDir, c.derivativeBytes, c.derivativeCount, c.derivativeReady = directory, 0, 0, false
 	}
-	defer directory.Close()
-	entries, err := directory.Readdir(maintenanceBatch)
+	entries, err := c.maintenanceDir.Readdir(maintenanceBatch)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return
 	}
-	type candidate struct {
-		path string
-		info os.FileInfo
-	}
-	files := make([]candidate, 0, len(entries))
-	var total int64
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -298,13 +301,16 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 		if !strings.HasSuffix(entry.Name(), ".jpg") {
 			continue
 		}
-		total += entry.Size()
-		files = append(files, candidate{path, entry})
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].info.ModTime().Before(files[j].info.ModTime()) })
-	for removed := 0; removed < len(files) && removed < maintenanceMaxFiles && (total > maxDerivativeBytes || len(files)-removed > maintenanceMaxFiles); removed++ {
-		if err := c.fs.Remove(files[removed].path); err == nil {
-			total -= files[removed].info.Size()
+		if c.derivativeCount >= maintenanceMaxFiles || c.derivativeBytes+entry.Size() > maxDerivativeBytes {
+			_ = c.fs.Remove(path)
+			continue
 		}
+		c.derivativeBytes += entry.Size()
+		c.derivativeCount++
+	}
+	if errors.Is(err, io.EOF) {
+		_ = c.maintenanceDir.Close()
+		c.maintenanceDir = nil
+		c.derivativeReady = true
 	}
 }

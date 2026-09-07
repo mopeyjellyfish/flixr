@@ -137,6 +137,10 @@ type Catalog struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceStatus ArtworkMaintenanceStatus
+	maintenanceDir    afero.File
+	derivativeBytes   int64
+	derivativeCount   int
+	derivativeReady   bool
 }
 
 func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {

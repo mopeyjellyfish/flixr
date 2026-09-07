@@ -221,6 +221,39 @@ func TestArtworkMaintenanceBoundsFreshCacheBeyondOneBatch(t *testing.T) {
 	}
 }
 
+func TestArtworkSizedRefusesCacheAdmissionAtEntryBudget(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.artworkMu.Lock()
+	c.derivativeReady = true
+	c.artworkMu.Unlock()
+	sourceImage := image.NewRGBA(image.Rect(0, 0, 400, 600))
+	var source bytes.Buffer
+	if err := jpeg.Encode(&source, sourceImage, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := range maintenanceMaxFiles + 6 {
+		id := strconv.Itoa(i)
+		if _, err := c.cacheArtwork(id, "poster", Artwork{Bytes: source.Bytes(), ContentType: "image/jpeg"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := c.ArtworkSized(context.Background(), id, "poster", 160); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(db.DataDir(), "artwork", "derivatives"))
+	if err != nil || len(entries) != maintenanceMaxFiles {
+		t.Fatalf("admitted derivatives = %d, %v", len(entries), err)
+	}
+}
+
 func TestArtworkMaintenanceStopsOnShutdown(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	if err != nil {
