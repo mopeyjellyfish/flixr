@@ -61,6 +61,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
+  const audioSwitchTask = useRef<Promise<void> | null>(null);
   const replacingSession = useRef<string | undefined>(undefined);
   const playback = useRef<PlaybackPlan | null>(null);
   const observation = useRef(0);
@@ -113,7 +114,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
-    if (!plan || finalizing.current || (endedPlayback.current && !ended)) return false;
+    if (!plan || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
     const positionMs = currentPosition();
     try {
       const acknowledgement = await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
@@ -296,6 +297,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
+    await audioSwitchTask.current;
     const plan = playback.current;
     if (plan) {
       try {
@@ -314,8 +316,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   };
 
   const complete = async () => {
-    const plan = playback.current;
-    if (!plan || finalizing.current || endedPlayback.current) return;
+    if (!playback.current || finalizing.current || endedPlayback.current) return;
     endedPlayback.current = true;
     setAudioLocked(true);
     const version = ++autoplayVersion.current;
@@ -323,10 +324,15 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const controller = new AbortController();
     autoplayRequest.current = controller;
     setAutoplay({ kind: 'resolving' });
-    const acknowledgement = heartbeat(true);
+    const acknowledgement = (async () => {
+      await audioSwitchTask.current;
+      return heartbeat(true);
+    })();
     completionAck.current = acknowledgement;
     const accepted = await acknowledgement;
     if (completionAck.current === acknowledgement) completionAck.current = null;
+    const plan = playback.current;
+    if (!plan) return;
     if (!accepted || controller.signal.aborted || version !== autoplayVersion.current) return;
     try {
       const next = await api.playbackNext(plan.session_id, false, controller.signal);
@@ -361,7 +367,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const changeAudio = async (value: string) => {
     const plan = playback.current;
     const element = video.current;
-    if (!plan || !element || switchingAudio || audioLocked || finalizing.current || endedPlayback.current) return;
+    if (!plan || !element || switchingAudio || audioSwitchTask.current || audioLocked || finalizing.current || endedPlayback.current) return;
     const [source, indexValue] = value.split(':', 2);
     const streamIndex = Number(indexValue);
     if ((source !== 'embedded' && source !== 'external') || !Number.isInteger(streamIndex) || streamIndex < 0) return;
@@ -372,18 +378,27 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     setSwitchingAudio(true);
     setTrackError(undefined);
     replacingSession.current = plan.session_id;
-    try {
-      const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
-      if (version !== sourceVersion.current || !video.current) {
-        void api.playbackStop(updated.session_id).catch(() => undefined);
-        return;
+    const performSwitch = async () => {
+      try {
+        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
+        if (version !== sourceVersion.current || !video.current) {
+          void api.playbackStop(updated.session_id).catch(() => undefined);
+          return;
+        }
+        await attach(updated);
+      } catch (error: unknown) {
+        if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
+      } finally {
+        if (replacingSession.current === plan.session_id) replacingSession.current = undefined;
+        if (switchVersion === audioSwitchVersion.current) setSwitchingAudio(false);
       }
-      await attach(updated);
-    } catch (error: unknown) {
-      if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
+    };
+    const task = performSwitch();
+    audioSwitchTask.current = task;
+    try {
+      await task;
     } finally {
-      if (replacingSession.current === plan.session_id) replacingSession.current = undefined;
-      if (switchVersion === audioSwitchVersion.current) setSwitchingAudio(false);
+      if (audioSwitchTask.current === task) audioSwitchTask.current = null;
     }
   };
 

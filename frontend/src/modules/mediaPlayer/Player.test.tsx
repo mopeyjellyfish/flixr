@@ -460,6 +460,46 @@ it('locks audio selection while completion and next-episode resolution use the c
   expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
 });
 
+it('waits for an in-flight audio replacement before completing its stable session', async () => {
+  let resolveAudio: ((response: Response) => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/episode-1.mp4',
+      heartbeat_url: '/heartbeat-1', seek_url: '/seek-1', stop_url: '/stop-1', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/audio')) return new Promise<Response>((resolve) => { resolveAudio = resolve; });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'end_of_series' }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const view = render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(resolveAudio).toBeTypeOf('function'));
+
+  fireEvent.ended(video);
+  expect(calls.some((path) => path.endsWith('/heartbeat'))).toBe(false);
+  await act(async () => { resolveAudio?.(new Response(JSON.stringify({
+    plan: { kind: 'direct', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/episode-1-french.mp4',
+    heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/stop-2', resume_ms: 10_000, stream_offset_ms: 0, expires_at: 9999999999,
+    audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+  }))); });
+
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+  expect(calls.some((path) => path.includes('session-1/heartbeat') || path.includes('session-1/next'))).toBe(false);
+  expect(calls.some((path) => path.includes('session-2/heartbeat'))).toBe(true);
+  expect(calls.some((path) => path.includes('session-2/next'))).toBe(true);
+  expect(screen.queryByRole('heading', { name: /playback stopped/i })).toBeNull();
+
+  view.unmount();
+  await waitFor(() => expect(calls.some((path) => path.includes('session-2/stop'))).toBe(true));
+});
+
 it('labels audio tracks and preserves source time when changing tracks', async () => {
   const requests: Array<{ path: string; body?: string }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
