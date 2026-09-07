@@ -426,7 +426,8 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	// Artwork is refreshed at a stable catalog URL, so a browser must revalidate it.
+	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

@@ -191,6 +191,36 @@ func TestArtworkMaintenanceEvictsOnlyExpiredDerivatives(t *testing.T) {
 	}
 }
 
+func TestArtworkMaintenanceBoundsFreshCacheBeyondOneBatch(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(db.DataDir(), "artwork", "derivatives")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range maintenanceBatch + 44 {
+		if err := os.WriteFile(filepath.Join(dir, "f-"+strconv.Itoa(i)+".jpg"), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 4 {
+		c.artworkMu.Lock()
+		c.cleanupDerivativesLocked(time.Now())
+		c.artworkMu.Unlock()
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > maintenanceMaxFiles {
+		t.Fatalf("fresh cache = %d, %v", len(entries), err)
+	}
+}
+
 func TestArtworkMaintenanceStopsOnShutdown(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	if err != nil {

@@ -302,7 +302,7 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 		files = append(files, candidate{path, entry})
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].info.ModTime().Before(files[j].info.ModTime()) })
-	for removed := 0; removed < len(files) && removed < maintenanceMaxFiles && (total > maxDerivativeBytes || (len(files)-removed > maintenanceMaxFiles && now.Sub(files[removed].info.ModTime()) > derivativeMaxAge)); removed++ {
+	for removed := 0; removed < len(files) && removed < maintenanceMaxFiles && (total > maxDerivativeBytes || len(files)-removed > maintenanceMaxFiles); removed++ {
 		if err := c.fs.Remove(files[removed].path); err == nil {
 			total -= files[removed].info.Size()
 		}
