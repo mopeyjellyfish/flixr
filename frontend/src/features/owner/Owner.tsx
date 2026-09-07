@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -23,6 +23,9 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [tmdbToken, setTMDBToken] = useState('');
   const [unmatched, setUnmatched] = useState<MetadataTarget[]>([]);
   const [candidates, setCandidates] = useState<Record<string, MetadataCandidate[]>>({});
+  const [identityRepairs, setIdentityRepairs] = useState<IdentityRepairs>();
+  const [identityError, setIdentityError] = useState('');
+  const [identityActionError, setIdentityActionError] = useState('');
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
   const [screens, setScreens] = useState<ScreenPresence[]>([]);
@@ -39,10 +42,20 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
     api.tmdbSettings().then(setTMDBSettings).catch(() => setNotice('TMDB settings are unavailable.'));
     api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
+    loadIdentityRepairs();
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
     api.ownerScreens().then((result) => setScreens(result.screens ?? [])).catch(() => setNotice('Connected screens are unavailable.'));
     api.settingsInventory().then((result) => setLocked(new Set((result.settings ?? []).filter((setting) => !setting.mutable).map((setting) => setting.key)))).catch(() => undefined);
+  };
+
+  const loadIdentityRepairs = (clearActionError = true) => {
+    setIdentityError('');
+    if (clearActionError) setIdentityActionError('');
+    api.identityRepairs().then((repairs) => setIdentityRepairs({ conflicts: repairs.conflicts ?? [], merges: repairs.merges ?? [] })).catch((error) => {
+      if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true);
+      else setIdentityError(error instanceof ApiError ? error.message : 'Identity repairs are unavailable.');
+    });
   };
 
   const recheck = () => api.recheck().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -104,6 +117,35 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const findMatches = async (item: MetadataTarget) => { try { const result = await api.metadataCandidates(item.kind, item.id); setCandidates((current) => ({ ...current, [item.id]: result.candidates })); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Matches are unavailable.'); } };
   const selectMatch = async (item: MetadataTarget, candidate: MetadataCandidate) => { try { const matched = await api.matchMetadata(item.kind, item.id, candidate.id); setUnmatched((current) => current.map((value) => value.id === item.id ? matched : value)); setCandidates((current) => { const next = { ...current }; delete next[item.id]; return next; }); setNotice(`Matched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save this match.'); } };
   const clearMatch = async (item: MetadataTarget) => { try { await api.unmatchMetadata(item.kind, item.id); setUnmatched((current) => current.map((value) => value.id === item.id ? { ...value, provider_id: '', owner_matched: false } : value)); setNotice(`Unmatched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to unmatch this title.'); } };
+  const mergeIdentity = async (conflict: IdentityConflict, survivorID: string) => {
+    const source = conflict.left.id === survivorID ? conflict.right : conflict.left;
+    setIdentityActionError('');
+    try {
+      const merge = await api.mergeIdentity(conflict.kind, survivorID, source.id);
+      setIdentityRepairs((current) => current && { conflicts: current.conflicts.filter((item) => item.id !== conflict.id), merges: [...current.merges.filter((item) => item.id !== merge.id), merge] });
+      setNotice(`Identity repair merged ${merge.survivor.title} and ${merge.source.title}. Affected titles: ${merge.survivor.title} and ${merge.source.title}.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true);
+      else if (error instanceof ApiError && error.code === 'identity_conflict') {
+        setIdentityActionError('The repair list changed before this merge. Refresh it to review the current titles and decisions.');
+        loadIdentityRepairs(false);
+      } else setIdentityActionError(error instanceof ApiError ? error.message : 'Unable to merge these titles.');
+    }
+  };
+  const unmergeIdentity = async (merge: IdentityMerge) => {
+    setIdentityActionError('');
+    try {
+      const result = await api.unmergeIdentity(merge.id);
+      setIdentityRepairs((current) => current && { ...current, merges: current.merges.map((item) => item.id === result.id ? result : item) });
+      setNotice(`Unmerged ${result.survivor.title} and ${result.source.title}. Review the retained-state decision below.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true);
+      else if (error instanceof ApiError && error.code === 'identity_conflict') {
+        setIdentityActionError('The repair list changed before this unmerge. Refresh it to review the current titles and decisions.');
+        loadIdentityRepairs(false);
+      } else setIdentityActionError(error instanceof ApiError ? error.message : 'Unable to unmerge these titles.');
+    }
+  };
   const savePlayback = async (event: FormEvent) => {
     event.preventDefault();
     if (!playbackSettings) return;
@@ -164,6 +206,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
             <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
+            <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />
           </section>
           <SettingsPanel onNotice={setNotice} />
           <section id="support" className="owner-section" aria-labelledby="support-title">
@@ -178,6 +221,50 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
 
 function MetadataRepair({ items, candidates, onFind, onSelect, onClear, onUpdate }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void>; onClear: (item: MetadataTarget) => Promise<void>; onUpdate: (item: MetadataTarget) => void }) {
   return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Title identification</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}{item.provider_id ? ' · matched' : ' · unmatched'}</span><button type="button" onClick={() => void onFind(item)}>{item.provider_id ? 'Change match' : 'Find matches'}</button>{item.provider_id && <button type="button" onClick={() => void onClear(item)}>Unmatch</button>}{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}<MetadataEditor item={item} onSaved={onUpdate} /></li>)}</ul>}</section>;
+}
+
+function conflictReason(reason: string) {
+  return ({ provider_identity: 'These titles claim the same provider identity.', replacement_evidence: 'Replacement evidence conflicts with the existing title identity.', ambiguous_duplicate: 'These files may be duplicates, but Flixr cannot safely decide.' } as Record<string, string>)[reason] ?? 'These titles have conflicting identities.';
+}
+
+function IdentityRepair({ repairs, error, actionError, onReload, onMerge, onUnmerge }: { repairs?: IdentityRepairs; error: string; actionError: string; onReload: () => void; onMerge: (conflict: IdentityConflict, survivorID: string) => Promise<void>; onUnmerge: (merge: IdentityMerge) => Promise<void> }) {
+  const [survivors, setSurvivors] = useState<Record<number, string>>({});
+  const [pending, setPending] = useState('');
+  const openConflicts = repairs?.conflicts.filter((conflict) => conflict.state === 'open') ?? [];
+  const merge = async (conflict: IdentityConflict) => {
+    const survivorID = survivors[conflict.id];
+    if (!survivorID) return;
+    const survivor = conflict.left.id === survivorID ? conflict.left : conflict.right;
+    const source = conflict.left.id === survivorID ? conflict.right : conflict.left;
+    if (!window.confirm(`Merge ${source.title} into ${survivor.title}? Their viewing history remains recoverable until you choose Unmerge.`)) return;
+    setPending(`merge-${conflict.id}`);
+    try { await onMerge(conflict, survivorID); } finally { setPending(''); }
+  };
+  const unmerge = async (item: IdentityMerge) => {
+    if (!window.confirm(`Unmerge ${item.survivor.title} and ${item.source.title}? Original identities are restored where newer viewing activity has not superseded them.`)) return;
+    setPending(`unmerge-${item.id}`);
+    try { await onUnmerge(item); } finally { setPending(''); }
+  };
+  return <section aria-labelledby="identity-repair-title" aria-busy={pending ? true : undefined}>
+    <h3 id="identity-repair-title">Identity repair</h3>
+    <p>Resolve conflicting title identities explicitly. Paths, fingerprints, and credentials are never shown here.</p>
+    {!repairs && !error && <p role="status">Loading identity repairs…</p>}
+    {!repairs && error && <div role="alert"><p>{error}</p><button type="button" onClick={onReload}>Retry identity repairs</button></div>}
+    {actionError && <div className="identity-repair-error" role="alert"><p>{actionError}</p><button type="button" onClick={onReload}>Refresh repair list</button></div>}
+    {openConflicts.map((conflict) => <article key={conflict.id} className="identity-repair">
+      <h4>Conflict: {conflict.kind}</h4><p>{conflictReason(conflict.reason)}</p>
+      <fieldset><legend>Choose the title to keep</legend>{[conflict.left, conflict.right].map((item) => <label key={item.id}><input type="radio" name={`identity-${conflict.id}`} checked={survivors[conflict.id] === item.id} onChange={() => setSurvivors((current) => ({ ...current, [conflict.id]: item.id }))} /> Keep {item.title}; merge {item.id === conflict.left.id ? conflict.right.title : conflict.left.title} into it</label>)}</fieldset>
+      <button type="button" disabled={!survivors[conflict.id] || pending === `merge-${conflict.id}`} onClick={() => void merge(conflict)}>{pending === `merge-${conflict.id}` ? 'Merging titles…' : 'Merge selected titles'}</button>
+    </article>)}
+    {repairs && openConflicts.length === 0 && <p>No identity conflicts need repair.</p>}
+    {repairs?.merges.length ? <section aria-labelledby="identity-merges-title"><h4 id="identity-merges-title">Identity repair history</h4>{repairs.merges.map((merge) => <article key={merge.id} className="identity-repair">
+      <p><strong>{merge.state === 'unmerged' ? 'Unmerged' : 'Active merge'}:</strong> {merge.survivor.title} keeps identity; {merge.source.title} is the source.</p>
+      <p>Affected titles: {merge.survivor.title} and {merge.source.title}.</p>
+      {merge.state === 'unmerged' && <p role="status">Unmerge retained the state described in the reconciliation decisions.</p>}
+      {merge.decisions.length > 0 && <ul aria-label={`Reconciliation decisions for ${merge.survivor.title} and ${merge.source.title}`}>{merge.decisions.map((decision) => <li key={decision}>{decision}</li>)}</ul>}
+      {merge.state === 'active' && <button type="button" disabled={pending === `unmerge-${merge.id}`} onClick={() => void unmerge(merge)}>{pending === `unmerge-${merge.id}` ? 'Unmerging titles…' : `Unmerge ${merge.survivor.title} and ${merge.source.title}`}</button>}
+    </article>)}</section> : null}
+  </section>;
 }
 
 const metadataInputs: Array<[MetadataField['field'], string, 'owner' | 'local']> = [['title', 'Title', 'owner'], ['synopsis', 'Synopsis', 'owner'], ['year', 'Release year', 'owner'], ['poster', 'Poster URL', 'owner'], ['backdrop', 'Backdrop URL', 'owner'], ['tags', 'Tags', 'local'], ['content_rating', 'Content rating', 'local']];

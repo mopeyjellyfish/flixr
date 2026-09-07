@@ -284,6 +284,9 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 			return Item{}, err
 		}
 	}
+	if err := detectProviderConflicts(tx); err != nil {
+		return Item{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Item{}, err
 	}

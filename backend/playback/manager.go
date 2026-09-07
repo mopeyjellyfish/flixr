@@ -39,6 +39,7 @@ type ManagerConfig struct {
 }
 
 type inputAuthority struct {
+	sourceKey string
 	catalogID string
 	expiresAt time.Time
 }
@@ -249,7 +250,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
-	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec)
+	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec, plan.SourceKey)
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
@@ -335,7 +336,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	}
 	m.generations[generationID] = gen
 	m.sessions[session.ID] = session
-	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, expiresAt: now.Add(settings.LeaseTTL)}
+	m.inputs[inputToken] = inputAuthority{sourceKey: plan.SourceKey, catalogID: catalogID, expiresAt: now.Add(settings.LeaseTTL)}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
 		if err := waitForFile(m.files.Fs, filepath.Join(dir, "index.m3u8"), gen.done, m.manifestWait); err != nil {
@@ -606,14 +607,19 @@ func (m *Manager) retireGeneration(ctx context.Context, gen *generation) {
 }
 
 func (m *Manager) InputCatalog(token string) (string, bool) {
+	id, _, ok := m.InputSource(token)
+	return id, ok
+}
+
+func (m *Manager) InputSource(token string) (string, string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	authority, ok := m.inputs[token]
 	if !ok || !time.Now().Before(authority.expiresAt) {
 		delete(m.inputs, token)
-		return "", false
+		return "", "", false
 	}
-	return authority.catalogID, true
+	return authority.catalogID, authority.sourceKey, true
 }
 
 func (m *Manager) OpenAsset(sessionID, profileID, name string) (afero.File, error) {

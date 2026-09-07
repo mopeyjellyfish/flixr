@@ -1,0 +1,108 @@
+{
+  "source_sha": "095e24da69fb4f3f183aa74c93d628c059844ebf",
+  "fixture": "/work/fixture/Long Duration Seek 2026.mkv",
+  "concurrent_scan_copies": 300,
+  "derivatives_after_cold": 24,
+  "resources": {
+    "sampling_interval_ms": 100,
+    "peak_cpu_percent": 512.3,
+    "peak_memory_kib": 1299384,
+    "memory_metric": "cgroup_memory_current",
+    "scope": "all processes in the cgroup-v2 measurement container"
+  },
+  "artwork_timings": {
+    "initial": {
+      "first_visible_decoded_ms": 408.2999999523163,
+      "visible_grid_30_decoded_ms": 1877,
+      "visible_decoded_images": 46,
+      "visible_artwork_images": 46
+    },
+    "repeat": {
+      "first_visible_decoded_ms": 360.5,
+      "visible_grid_30_decoded_ms": 968.6999999880791,
+      "visible_decoded_images": 46,
+      "visible_artwork_images": 46
+    }
+  },
+  "concurrent_visits": {
+    "cold": {
+      "visit": "cold",
+      "checked_at": "2026-09-07T16:48:45Z",
+      "scan": {
+        "scan": {
+          "id": "Cz5V9H50aOiaW1PJq-8_4gIvcQ7NlxeL7yVH0GN8tV8",
+          "started_at": 1788799722,
+          "status": "running",
+          "scanned": 0,
+          "failed": 0,
+          "unmatched": 0
+        }
+      },
+      "playback": {
+        "settings": {
+          "segment_dir": "/tmp/flixr-artwork-acceptance.z0ycf2/data/segments",
+          "generation_bytes": 268435456,
+          "global_bytes": 536870912,
+          "max_generations": 2
+        },
+        "generations": [
+          {
+            "id": "EWf1A_UqvvvjMY94mCaS5obavKuH-bld",
+            "catalog_id": "2f76ae0b65cba7fb85c778a244e2fab7",
+            "kind": "remux",
+            "start_ms": 0,
+            "leases": 1,
+            "bytes": 5196,
+            "running": true,
+            "started_at": 1788799718
+          }
+        ]
+      }
+    },
+    "warm": {
+      "visit": "warm",
+      "checked_at": "2026-09-07T16:48:48Z",
+      "scan": {
+        "scan": {
+          "id": "Cz5V9H50aOiaW1PJq-8_4gIvcQ7NlxeL7yVH0GN8tV8",
+          "started_at": 1788799722,
+          "status": "running",
+          "scanned": 0,
+          "failed": 0,
+          "unmatched": 0
+        }
+      },
+      "playback": {
+        "settings": {
+          "segment_dir": "/tmp/flixr-artwork-acceptance.z0ycf2/data/segments",
+          "generation_bytes": 268435456,
+          "global_bytes": 536870912,
+          "max_generations": 2
+        },
+        "generations": [
+          {
+            "id": "EWf1A_UqvvvjMY94mCaS5obavKuH-bld",
+            "catalog_id": "2f76ae0b65cba7fb85c778a244e2fab7",
+            "kind": "remux",
+            "start_ms": 0,
+            "leases": 1,
+            "bytes": 5196,
+            "running": true,
+            "started_at": 1788799718
+          }
+        ]
+      }
+    }
+  },
+  "scan": {
+    "scan": {
+      "id": "Cz5V9H50aOiaW1PJq-8_4gIvcQ7NlxeL7yVH0GN8tV8",
+      "started_at": 1788799722,
+      "finished_at": 1788799730,
+      "status": "complete",
+      "scanned": 301,
+      "failed": 0,
+      "unmatched": 0
+    }
+  }
+}

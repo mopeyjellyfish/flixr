@@ -8,6 +8,11 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "${FLIXR_BIND_ADDR:-127.0.0.1}:${FLIXR_PORT:-8787}:8787"
     env_file:

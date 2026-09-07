@@ -169,4 +169,72 @@ describe('owner operations', () => {
     fireEvent.click(screen.getByRole('button', { name: /save metadata/i }));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/metadata/film/film-1/fields', expect.objectContaining({ method: 'PUT' }));
   });
+
+  it('requires an explicit survivor before merging an identity conflict and reports its affected titles', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
+      if (path.includes('/owner/identity/repairs')) return new Response(JSON.stringify({ conflicts: [{ id: 7, kind: 'film', reason: 'The titles claim the same provider identity.', state: 'open', left: { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false }, right: { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false } }], merges: [] }));
+      if (path.endsWith('/owner/identity/merges') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'merge-7', kind: 'film', state: 'active', survivor: { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false }, source: { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false }, decisions: ['Preserved source history for unmerge.'] }));
+      return new Response(JSON.stringify({ profiles: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+
+    expect(await screen.findByRole('heading', { name: /identity repair/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /merge selected titles/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Merge Arrival (duplicate) into Arrival?'));
+    expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/identity/merges', expect.anything());
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
+
+    expect(await screen.findByText(/identity repair merged arrival and arrival \(duplicate\)/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/affected titles: arrival and arrival \(duplicate\)/i)).toHaveLength(2);
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/identity/merges', expect.objectContaining({ method: 'POST', body: JSON.stringify({ kind: 'film', survivor_id: 'film-a', source_id: 'film-b' }) }));
+  });
+
+  it('shows active merge decisions and makes unmerge an explicit action', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
+      if (path.includes('/owner/identity/repairs')) return new Response(JSON.stringify({ conflicts: [], merges: [{ id: 'merge-7', kind: 'film', state: 'active', survivor: { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false }, source: { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false }, decisions: ['Retained newer survivor progress.'] }] }));
+      if (path.endsWith('/owner/identity/merges/merge-7/unmerge') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'merge-7', kind: 'film', state: 'unmerged', survivor: { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false }, source: { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false }, decisions: ['Retained newer survivor progress.'] }));
+      return new Response(JSON.stringify({ profiles: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+
+    expect(await screen.findByText(/retained newer survivor progress/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Unmerge Arrival and Arrival (duplicate)?'));
+    expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/identity/merges/merge-7/unmerge', expect.anything());
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }));
+    expect(await screen.findByText(/unmerged arrival and arrival \(duplicate\)/i)).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/identity/merges/merge-7/unmerge', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('reports a stale identity repair after a version conflict and offers a refresh', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
+      if (path.includes('/owner/identity/repairs')) return new Response(JSON.stringify({ conflicts: [{ id: 7, kind: 'film', reason: 'provider_identity', state: 'open', left: { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false }, right: { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false } }], merges: [] }));
+      if (path.endsWith('/owner/identity/merges') && init?.method === 'POST') return new Response(JSON.stringify({ error: { code: 'identity_conflict' } }), { status: 409 });
+      return new Response(JSON.stringify({ profiles: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/repair list changed before this merge/i);
+    expect(screen.getByRole('button', { name: /refresh repair list/i })).toBeInTheDocument();
+  });
 });
