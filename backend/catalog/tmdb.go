@@ -25,6 +25,14 @@ type MetadataProvider interface {
 	Lookup(context.Context, string, string, string) (Enrichment, error)
 }
 
+type MetadataValidator interface {
+	Validate(context.Context, string) error
+}
+
+type EpisodeProvider interface {
+	LookupEpisode(context.Context, string, string, int, int) (Enrichment, error)
+}
+
 // ArtworkProvider supplies bounded image bytes for an enrichment image path.
 type ArtworkProvider interface {
 	FetchArtwork(context.Context, string) (Artwork, error)
@@ -40,6 +48,8 @@ type Enrichment struct {
 	Year                       int
 	Synopsis, Poster, Backdrop string
 }
+
+var ErrInvalidCredential = errors.New("metadata provider credential is invalid")
 
 type TMDB struct {
 	client                 *http.Client
@@ -58,6 +68,35 @@ func NewTMDBWithOrigins(client *http.Client, apiOrigin, imageOrigin string) *TMD
 	api, _ := url.Parse(apiOrigin)
 	image, _ := url.Parse(imageOrigin)
 	return &TMDB{client: client, apiOrigin: api, imageOrigin: image}
+}
+
+func (t *TMDB) Validate(ctx context.Context, token string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if t.apiOrigin == nil {
+		return errors.New("tmdb API origin is invalid")
+	}
+	u := *t.apiOrigin
+	u.Path = path.Join(u.Path, "/3/authentication")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := t.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ErrInvalidCredential
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("tmdb status %d", resp.StatusCode)
+	}
+	return nil
 }
 func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichment, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -242,6 +281,52 @@ func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, regi
 		name = x.Name
 	}
 	return Enrichment{ProviderID: fmt.Sprint(x.ID), Title: name, Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}, nil
+}
+
+func (t *TMDB) LookupEpisode(ctx context.Context, token, seriesID string, season, episode int) (Enrichment, error) {
+	if !regexp.MustCompile(`^[0-9]+$`).MatchString(seriesID) || season < 0 || episode < 1 {
+		return Enrichment{}, errors.New("invalid episode identifier")
+	}
+	if t.apiOrigin == nil {
+		return Enrichment{}, errors.New("tmdb API origin is invalid")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	u := *t.apiOrigin
+	u.Path = path.Join(u.Path, "/3/tv", seriesID, "season", strconv.Itoa(season), "episode", strconv.Itoa(episode))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return Enrichment{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := t.do(req)
+	if err != nil {
+		return Enrichment{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return Enrichment{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+	}
+	var value struct {
+		ID        int    `json:"id"`
+		Name      string `json:"name"`
+		Overview  string `json:"overview"`
+		AirDate   string `json:"air_date"`
+		StillPath string `json:"still_path"`
+	}
+	if err := decodeLimitedJSON(resp.Body, &value); err != nil {
+		return Enrichment{}, err
+	}
+	if value.ID <= 0 {
+		return Enrichment{}, errors.New("provider response has no identifier")
+	}
+	year := 0
+	if len(value.AirDate) >= 4 {
+		year, _ = strconv.Atoi(value.AirDate[:4])
+	}
+	return Enrichment{ProviderID: strconv.Itoa(value.ID), Title: value.Name, Year: year, Synopsis: value.Overview, Backdrop: value.StillPath}, nil
 }
 
 type tmdbSearch struct {

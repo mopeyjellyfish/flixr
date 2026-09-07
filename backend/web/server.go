@@ -630,7 +630,7 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+		write(w, http.StatusOK, s.catalog.MetadataStatus())
 		return
 	}
 	var v struct {
@@ -644,9 +644,22 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err := s.catalog.SetTMDBToken(strings.TrimSpace(v.Token)); err != nil {
+	token := strings.TrimSpace(v.Token)
+	if token != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		if err := s.catalog.ValidateTMDBToken(ctx, token); err != nil {
+			if errors.Is(err, catalog.ErrInvalidCredential) {
+				fail(w, http.StatusBadRequest, "metadata_invalid_credential")
+			} else {
+				fail(w, http.StatusServiceUnavailable, "metadata_unavailable")
+			}
+			return
+		}
+	}
+	if err := s.catalog.SetTMDBToken(token); err != nil {
 		fail(w, http.StatusInternalServerError, "settings_failed")
 		return
 	}
-	write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+	write(w, http.StatusOK, s.catalog.MetadataStatus())
 }

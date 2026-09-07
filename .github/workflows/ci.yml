@@ -79,7 +79,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with: { go-version: '1.27.1' }
+        with: { go-version: '1.27.1', cache-dependency-path: backend/go.sum }
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium firefox webkit
@@ -94,6 +94,17 @@ jobs:
         with:
           name: flixr-mocked-matrix-evidence
           path: frontend/test-results
+          if-no-files-found: warn
+      - name: Accept configured metadata through the reverse proxy
+        run: |
+          bash scripts/metadata-acceptance.test.sh
+          bash scripts/metadata-acceptance.sh
+      - name: Upload metadata acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flixr-metadata-acceptance-evidence
+          path: output/playwright/metadata
           if-no-files-found: warn
       - name: Build and accept the production binary
         working-directory: backend

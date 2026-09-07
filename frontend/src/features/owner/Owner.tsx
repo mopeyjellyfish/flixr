@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -19,7 +19,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [scan, setScan] = useState<Scan>();
   const [films, setFilms] = useState('');
   const [tv, setTV] = useState('');
-  const [tmdbConfigured, setTMDBConfigured] = useState(false);
+  const [tmdbSettings, setTMDBSettings] = useState<TMDBSettings>();
   const [tmdbToken, setTMDBToken] = useState('');
   const [unmatched, setUnmatched] = useState<MetadataTarget[]>([]);
   const [candidates, setCandidates] = useState<Record<string, MetadataCandidate[]>>({});
@@ -40,7 +40,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
     api.scanStatus().then((result) => setScan(result.scan.status ? result.scan : undefined)).catch(() => undefined);
     api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
-    api.tmdbSettings().then((settings) => setTMDBConfigured(settings.configured)).catch(() => setNotice('TMDB settings are unavailable.'));
+    api.tmdbSettings().then(setTMDBSettings).catch(() => setNotice('TMDB settings are unavailable.'));
     api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
     loadIdentityRepairs();
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
@@ -70,7 +70,10 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   useEffect(load, []);
   useEffect(() => {
     if (scan?.status !== 'running') return;
-    const timer = window.setInterval(() => api.scanStatus().then((result) => setScan(result.scan)).catch(() => undefined), 1500);
+    const timer = window.setInterval(() => api.scanStatus().then((result) => {
+      setScan(result.scan);
+      if (result.scan.status !== 'running') void api.tmdbSettings().then(setTMDBSettings).catch(() => undefined);
+    }).catch(() => undefined), 1500);
     return () => clearInterval(timer);
   }, [scan?.status]);
 
@@ -87,9 +90,16 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     event.preventDefault();
     try {
       const settings = await api.saveTMDBToken(tmdbToken);
-      setTMDBConfigured(settings.configured);
+      setTMDBSettings(settings);
       setTMDBToken('');
-      setNotice('TMDB credential saved.');
+      try {
+        const result = await api.scan();
+        setScan(result.scan);
+        setTMDBSettings({ ...settings, state: 'running', message: 'Metadata enrichment is running with the library scan.' });
+        setNotice('TMDB credential verified and saved. Metadata enrichment is running.');
+      } catch (error) {
+        setNotice(error instanceof ApiError ? `TMDB credential verified and saved. ${error.message} Start a scan from Libraries when ready.` : 'TMDB credential verified and saved. Start a scan from Libraries when ready.');
+      }
     } catch (error) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to save TMDB credential.');
     }
@@ -97,7 +107,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const removeTMDB = async () => {
     try {
       const settings = await api.removeTMDBToken();
-      setTMDBConfigured(settings.configured);
+      setTMDBSettings(settings);
       setTMDBToken('');
       setNotice('TMDB credential removed.');
     } catch (error) {
@@ -194,7 +204,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           </section>
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
-            <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
+            <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
             <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />
           </section>
@@ -317,12 +327,15 @@ function ScanPanel({ scan, onStart }: { scan?: Scan; onStart: () => Promise<void
   );
 }
 
-function TMDBForm({ configured, token, onTokenChange, onSave, onRemove, locked }: { configured: boolean; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void>; locked: boolean }) {
+function TMDBForm({ settings, token, onTokenChange, onSave, onRemove, locked }: { settings?: TMDBSettings; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void>; locked: boolean }) {
+  const configured = settings?.configured ?? false;
   return (
     <PendingForm onSubmit={onSave}>
       <h2>TMDB metadata</h2>
-      <p>{configured ? 'Credential configured. Enter a replacement token to change it.' : 'No credential configured.'}</p>
-      {locked && <p>Managed by the server environment.</p>}<label>TMDB access token<input disabled={locked} type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
+      <p><strong>Provider status: {settings?.state ?? (configured ? 'configured' : 'unavailable')}</strong></p>
+      <p>{settings?.message ?? (configured ? 'Credential configured. Enter a replacement token to change it.' : 'No credential configured. Add an API Read Access Token to download artwork and descriptions.')}</p>
+      <p><a href="https://www.themoviedb.org/settings/api">Get your TMDB API Read Access Token</a>. Flixr verifies it before saving it.</p>
+      {locked && <p>Managed by the server environment.</p>}<label>TMDB API Read Access Token<input disabled={locked} type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
       <div className="actions">
         <button className="primary" disabled={locked}>Save TMDB credential</button>
         {configured && <button disabled={locked} type="button" onClick={() => void onRemove()}>Remove credential</button>}

@@ -92,7 +92,7 @@ describe('Flixr routes', () => {
     const libraries = await screen.findByRole('heading', { name: /libraries/i });
     await waitFor(() => expect(libraries).toHaveFocus());
     expect(screen.queryByText(/owner operations/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/tmdb/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/TMDB API Read Access Token/i)).not.toBeRequired();
     fireEvent.change(screen.getByLabelText(/films library/i), { target: { value: '/media/films' } });
     fireEvent.click(screen.getByRole('button', { name: /save libraries/i }));
     const profile = await screen.findByRole('heading', { name: /profile/i });

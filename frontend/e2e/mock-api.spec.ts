@@ -75,7 +75,7 @@ for (const viewport of viewports) {
     await page.getByLabel(/owner password/i).fill('safe owner password');
     await page.getByRole('button', { name: /secure this server/i }).click();
     await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
-    await expect(page.getByLabel(/tmdb/i)).toHaveCount(0);
+    await expect(page.getByLabel(/TMDB API Read Access Token/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /save libraries/i })).toBeVisible();
     await check(page, errors);
     await page.getByLabel(/films library/i).fill('/media/films');
@@ -165,7 +165,7 @@ for (const viewport of viewports) {
     await open(page, '/owner');
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
     await expect(page.getByText(/partial: 2 scanned/i)).toBeVisible();
-    await expect(page.getByLabel(/TMDB access token/i)).toHaveValue('');
+    await expect(page.getByLabel(/TMDB API Read Access Token/i)).toHaveValue('');
     await page.getByText('Edit metadata').click();
     await expect(page.getByLabel('Tags')).toHaveValue('family');
     await page.getByRole('button', { name: /preview provider refresh/i }).click();

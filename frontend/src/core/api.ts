@@ -34,7 +34,7 @@ export type EpisodeSequence =
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
-export type TMDBSettings = { configured: boolean };
+export type TMDBSettings = { provider: 'tmdb'; configured: boolean; state: 'unavailable' | 'configured' | 'running' | 'failed'; message: string };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
 export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
 export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };
@@ -55,7 +55,7 @@ export type ApiErrorCode =
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
@@ -94,6 +94,7 @@ export function messageFor(code: string): string {
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
     scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
+    metadata_invalid_credential: 'That TMDB API Read Access Token is not valid.',
     metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     metadata_busy: 'Wait for the current scan to finish, then retry metadata repair.',
     metadata_not_found: 'That title is no longer available for identity repair.',

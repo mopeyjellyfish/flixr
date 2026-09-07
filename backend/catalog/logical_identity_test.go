@@ -1212,6 +1212,69 @@ func TestIdentitySeriesUnmergeNewEpisode(t *testing.T) {
 		t.Fatalf("new source episode remains assigned to survivor %s, want original source %s", got, source)
 	}
 }
+
+func TestIdentitySeriesMergeKeepsEpisodeArtworkRetryBoundToCurrentParent(t *testing.T) {
+	tv, data := t.TempDir(), t.TempDir()
+	for _, name := range []string{"First Show", "Second Show"} {
+		if err := os.Mkdir(filepath.Join(tv, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tv, name, "S01E01.mp4"), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots("", tv); err != nil || c.Scan(t.Context(), 1) != nil {
+		t.Fatalf("seed series: %v", err)
+	}
+	rows, err := db.Query("SELECT id,series_id FROM catalog_items ORDER BY relative_path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var survivor, source, sourceEpisode string
+	for rows.Next() {
+		var episode, series string
+		if err := rows.Scan(&episode, &series); err != nil {
+			t.Fatal(err)
+		}
+		if survivor == "" {
+			survivor = series
+		} else {
+			source, sourceEpisode = series, episode
+		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE catalog_series SET provider_id='101' WHERE id=?", survivor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE catalog_series SET provider_id='202' WHERE id=?", source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE catalog_items SET provider_id='303' WHERE id=?", sourceEpisode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_artwork_retries(catalog_kind,catalog_id,artwork_kind,provider_id,parent_catalog_id,parent_provider_id,provider_path) VALUES('episode',?,'backdrop','303',?,'202','/still.jpg')`, sourceEpisode, source); err != nil {
+		t.Fatal(err)
+	}
+	merge, err := c.MergeIdentity("series", survivor, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parent, provider string
+	if err := db.QueryRow("SELECT parent_catalog_id,parent_provider_id FROM catalog_artwork_retries WHERE catalog_id=?", sourceEpisode).Scan(&parent, &provider); err != nil || parent != survivor || provider != "101" {
+		t.Fatalf("merged retry parent = %q/%q, %v", parent, provider, err)
+	}
+	if _, err := c.UnmergeIdentity(merge.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT parent_catalog_id,parent_provider_id FROM catalog_artwork_retries WHERE catalog_id=?", sourceEpisode).Scan(&parent, &provider); err != nil || parent != source || provider != "202" {
+		t.Fatalf("unmerged retry parent = %q/%q, %v", parent, provider, err)
+	}
+}
+
 func TestIdentitySeriesMergeSafeEpisodeReplacement(t *testing.T) {
 	tv, data := t.TempDir(), t.TempDir()
 	for _, name := range []string{"First Show", "Second Show"} {
