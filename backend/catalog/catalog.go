@@ -333,28 +333,38 @@ func (c *Catalog) SetRoots(film, tv string) error {
 	if err := c.ValidateRoots(film, tv); err != nil {
 		return err
 	}
+	nextFilm, nextTV := film, tv
+	var err error
+	if nextFilm != "" {
+		nextFilm, err = filepath.Abs(nextFilm)
+		if err != nil {
+			return err
+		}
+	}
+	if nextTV != "" {
+		nextTV, err = filepath.Abs(nextTV)
+		if err != nil {
+			return err
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var err error
-	if film != "" {
-		c.film, err = filepath.Abs(film)
-		if err != nil {
-			return err
-		}
-	}
-	if tv != "" {
-		c.tv, err = filepath.Abs(tv)
-		if err != nil {
-			return err
-		}
-	}
 	if c.db != nil {
-		for k, v := range map[string]string{"film_root": c.film, "tv_root": c.tv} {
-			if _, err := c.db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v); err != nil {
+		tx, err := c.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for _, setting := range []struct{ key, value string }{{"film_root", nextFilm}, {"tv_root", nextTV}} {
+			if _, err := tx.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", setting.key, setting.value); err != nil {
 				return err
 			}
 		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
+	c.film, c.tv = nextFilm, nextTV
 	return nil
 }
 
