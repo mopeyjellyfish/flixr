@@ -49,6 +49,10 @@ func TestEndedRealMediaPersistsPerProfileAcrossReopen(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("real media scan: %#v %v", items, err)
 	}
+	playable, err := library.PlaybackItem(items[0].ID)
+	if err != nil || len(playable.Audio) == 0 {
+		t.Fatalf("real media playback properties: %#v %v", playable, err)
+	}
 	h, err := household.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +89,7 @@ func TestEndedRealMediaPersistsPerProfileAcrossReopen(t *testing.T) {
 	}
 	plan := func(token string) string {
 		t.Helper()
-		w := request("POST", "/api/v1/playback/plans", token, fmt.Sprintf(`{"catalog_id":%q,"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High","Main","Baseline","Constrained Baseline"],"audio_codecs":["aac"]}}`, items[0].ID))
+		w := request("POST", "/api/v1/playback/plans", token, fmt.Sprintf(`{"catalog_id":%q,"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_direct":true,"max_width":%d,"max_height":%d,"max_frame_rate_milli":%d,"max_bit_depth":%d,"max_audio_channels":%d}}`, items[0].ID, playable.Width, playable.Height, playable.FrameRateMilli, playable.BitDepth, playable.Audio[0].Channels))
 		if w.Code != 201 {
 			t.Fatalf("real media plan: %d %s", w.Code, w.Body)
 		}
@@ -104,10 +108,6 @@ func TestEndedRealMediaPersistsPerProfileAcrossReopen(t *testing.T) {
 	}
 	onePlayback, twoPlayback := plan(oneToken), plan(twoToken)
 	// Ended at a position below 90% proves the ended HTTP path, not just threshold completion.
-	playable, err := library.PlaybackItem(items[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
 	position := playable.DurationMS / 4
 	if position <= 0 {
 		t.Fatalf("missing real duration: %d", playable.DurationMS)

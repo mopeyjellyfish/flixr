@@ -87,7 +87,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if err := afero.WriteFile(afero.NewOsFs(), filepath.Join(root, "film.mkv"), media, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High','[{"codec":"aac"}]','[]',0)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_width,video_height,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High',320,180,24000,8,'[{"codec":"aac","channels":2}]','[]',0)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
@@ -125,7 +125,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	server.readyMu.Unlock()
 	handler := server.Handler()
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true}}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -199,7 +199,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	}
 	// A different plan cannot fit beside the active HLS generation. Admission
 	// failure must leave the original session's progress authority intact.
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"video_profiles":["Baseline"],"supports_fmp4_hls":true}}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"video_profiles":["Baseline"],"supports_fmp4_hls":true,"supports_transcode":true}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -256,7 +256,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -278,7 +278,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	executor.onStart = cancel
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`)).WithContext(ctx)
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`)).WithContext(ctx)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
