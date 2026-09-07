@@ -9,6 +9,11 @@ This is local evidence for issue #56, not reference-host qualification.
 - Warm 30: 0.405 s.
 - Server RSS: 161,824 KiB before requests and 171,792 KiB after them.
 
+Chromium against the same isolated server selected Alex through the rendered
+profile page and reached its first rendered artwork card in 2,073 ms and the
+30th rendered card in 2,110 ms. These are DOM visibility times, not image
+`decode()` completion or a device-first-paint metric.
+
 Reproduce from a disposable checkout with a populated local `.demo` cache:
 
 ```sh
