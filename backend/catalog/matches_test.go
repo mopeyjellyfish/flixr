@@ -11,7 +11,10 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 )
 
-type ownerMatchProvider struct{ outage bool }
+type ownerMatchProvider struct {
+	outage bool
+	poster string
+}
 
 func (p ownerMatchProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
 	if p.outage {
@@ -23,7 +26,10 @@ func (p ownerMatchProvider) Candidates(context.Context, string, string, string, 
 	return []catalog.Candidate{{Provider: "tmdb", ID: "42", Title: "The Right Film", Year: 2024, Confidence: 1}}, nil
 }
 func (p ownerMatchProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
-	return catalog.Enrichment{ProviderID: "42", Year: 2024, Synopsis: "owner choice"}, nil
+	return catalog.Enrichment{ProviderID: "42", Year: 2024, Synopsis: "owner choice", Poster: "/poster"}, nil
+}
+func (p ownerMatchProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	return catalog.Artwork{Bytes: []byte(p.poster), ContentType: "image/jpeg"}, nil
 }
 
 func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
@@ -48,9 +54,7 @@ func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
 	if err != nil || !matched.OwnerMatch || matched.ProviderID != "42" || matched.Language != "en" || matched.Region != "GB" {
 		t.Fatalf("match = %#v, %v", matched, err)
 	}
-	if err := os.WriteFile(path, []byte("changed"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeMedia(t, filepath.Join(films, "Other.mp4"))
 	c.SetProvider(ownerMatchProvider{outage: true})
 	if err := c.Scan(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -196,5 +200,72 @@ func TestOwnerSeriesMatchSurvivesRestart(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("series owner match did not persist")
+	}
+}
+
+type busyMatchProvider struct {
+	ownerMatchProvider
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p busyMatchProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	close(p.started)
+	<-p.release
+	return catalog.Enrichment{}, nil
+}
+
+func TestBusyMatchDoesNotReplaceExistingArtwork(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	path := filepath.Join(films, "Film.mp4")
+	writeMedia(t, path)
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	c.SetProvider(ownerMatchProvider{poster: "old"})
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	item := c.MetadataTargets()[0]
+	if _, err := c.Match(context.Background(), "film", item.ID, "42", "en", "GB"); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := c.Artwork(item.ID, "poster")
+	if err != nil || string(before) != "old" {
+		t.Fatalf("initial artwork = %q, %v", before, err)
+	}
+	p := busyMatchProvider{ownerMatchProvider: ownerMatchProvider{poster: "new"}, started: make(chan struct{}), release: make(chan struct{})}
+	c.SetProvider(p)
+	writeMedia(t, filepath.Join(films, "Other.mp4"))
+	if err := c.StartScan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	<-p.started
+	if _, err := c.Match(context.Background(), "film", item.ID, "42", "en", "GB"); !errors.Is(err, catalog.ErrMetadataBusy) {
+		t.Fatalf("busy match = %v", err)
+	}
+	after, _, err := c.Artwork(item.ID, "poster")
+	if err != nil || string(after) != "old" {
+		t.Fatalf("busy match replaced artwork = %q, %v", after, err)
+	}
+	close(p.release)
+}
+
+func TestCancelledMatchDoesNotApply(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	c.SetProvider(ownerMatchProvider{poster: "new"})
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	item := c.MetadataTargets()[0]
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Match(ctx, "film", item.ID, "42", "en", "GB"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled match = %v", err)
+	}
+	if got := c.MetadataTargets()[0]; got.ProviderID != "" {
+		t.Fatalf("cancelled match changed metadata: %#v", got)
 	}
 }

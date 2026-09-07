@@ -91,8 +91,82 @@ func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, reg
 	if enrichment.ProviderID == "" {
 		return Item{}, ErrProviderUnavailable
 	}
-	c.cacheEnrichmentArtwork(ctx, id, &enrichment)
-	return c.saveMatch(kind, id, enrichment, language, region, true)
+	artwork := c.stageMatchArtwork(ctx, enrichment)
+	if err := ctx.Err(); err != nil {
+		return Item{}, err
+	}
+	// Provider paths are never published. They become local URLs only after this owner choice commits.
+	enrichment.Poster, enrichment.Backdrop = "", ""
+	matched, err := c.saveMatch(kind, id, enrichment, language, region, true)
+	if err != nil {
+		return Item{}, err
+	}
+	c.publishMatchArtwork(kind, id, enrichment.ProviderID, artwork)
+	return matched, nil
+}
+
+func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) map[string]Artwork {
+	c.mu.RLock()
+	provider, ok := c.provider.(ArtworkProvider)
+	c.mu.RUnlock()
+	if !ok || c.db == nil {
+		return nil
+	}
+	out := map[string]Artwork{}
+	for kind, imagePath := range map[string]string{"poster": enrichment.Poster, "backdrop": enrichment.Backdrop} {
+		if imagePath == "" || ctx.Err() != nil {
+			continue
+		}
+		if art, err := provider.FetchArtwork(ctx, imagePath); err == nil && len(art.Bytes) > 0 && allowedArtworkContentType(art.ContentType) {
+			out[kind] = art
+		}
+	}
+	return out
+}
+
+func (c *Catalog) publishMatchArtwork(kind, id, providerID string, artwork map[string]Artwork) {
+	if len(artwork) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	item, ok := c.metadataTarget(kind, id)
+	if !ok || !item.OwnerMatch || item.ProviderID != providerID {
+		return
+	}
+	for imageKind, art := range artwork {
+		url, err := c.cacheArtwork(id, imageKind, art)
+		if err != nil || url == "" {
+			continue
+		}
+		if imageKind == "poster" {
+			item.Poster = url
+		} else {
+			item.Backdrop = url
+		}
+	}
+	if err := c.updateArtworkReferences(kind, item); err != nil {
+		return
+	}
+	if kind == "film" {
+		c.items[id] = item
+		return
+	}
+	series := c.series[id]
+	series.Poster, series.Backdrop = item.Poster, item.Backdrop
+	c.series[id] = series
+}
+
+func (c *Catalog) updateArtworkReferences(kind string, item Item) error {
+	if c.db == nil {
+		return nil
+	}
+	table := "catalog_items"
+	if kind == "series" {
+		table = "catalog_series"
+	}
+	_, err := c.db.Exec(`UPDATE `+table+` SET poster=?,backdrop=? WHERE id=?`, item.Poster, item.Backdrop, item.ID)
+	return err
 }
 
 func (c *Catalog) Unmatch(kind, id string) (Item, error) {
