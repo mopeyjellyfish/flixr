@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import type { ViewingEvent } from '../../core/api';
+import { ApiError, type ViewingEvent } from '../../core/api';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
 
 export function History({ onBrowse, onExit }: { onBrowse: () => void; onExit: () => void }) {
   const [events, setEvents] = useState<ViewingEvent[]>([]);
   const [next, setNext] = useState('');
-  const [undo, setUndo] = useState('');
+  const [undo, setUndo] = useState<{ id: string; undo_until: number }>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [changing, setChanging] = useState(false);
@@ -38,6 +38,12 @@ export function History({ onBrowse, onExit }: { onBrowse: () => void; onExit: ()
     return invalidate;
   }, [load, invalidate]);
 
+  useEffect(() => {
+    if (!undo) return;
+    const timer = window.setTimeout(() => setUndo(undefined), Math.max(0, undo.undo_until - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [undo]);
+
   const changeHistory = async (restore: boolean) => {
     if (mutation.current) return;
     mutation.current = true;
@@ -48,9 +54,10 @@ export function History({ onBrowse, onExit }: { onBrowse: () => void; onExit: ()
     setError('');
     try {
       if (restore) {
-        await api.undoHistoryClear(undo);
+        if (!undo) return;
+        await api.undoHistoryClear(undo.id);
         if (request !== version.current) return;
-        setUndo('');
+        setUndo(undefined);
         const page = await api.history();
         if (request !== version.current) return;
         setEvents(page.events);
@@ -58,12 +65,16 @@ export function History({ onBrowse, onExit }: { onBrowse: () => void; onExit: ()
       } else {
         const action = await api.clearHistory();
         if (request !== version.current) return;
-        setUndo(action.id);
+        setUndo(action);
         setEvents([]);
         setNext('');
       }
-    } catch {
-      if (request === version.current) setError(restore ? 'Flixr could not restore history. Try loading it again.' : 'Flixr could not clear history.');
+    } catch (failure) {
+      if (request === version.current) {
+        const expired = restore && failure instanceof ApiError && failure.status === 404;
+        if (expired) setUndo(undefined);
+        setError(expired ? 'The clear can no longer be undone.' : restore ? 'Flixr could not restore history. Try again.' : 'Flixr could not clear history.');
+      }
     } finally {
       if (request === version.current) { mutation.current = false; setChanging(false); }
     }
@@ -85,5 +96,6 @@ function HistoryDate({ event }: { event: ViewingEvent }) {
   const timestamp = event.provenance === 'local' ? event.recorded_at : event.source_time;
   if (timestamp === null) return <span>Date unknown</span>;
   const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return <span>Date unavailable</span>;
   return <time dateTime={date.toISOString()}>{date.toLocaleDateString()}</time>;
 }

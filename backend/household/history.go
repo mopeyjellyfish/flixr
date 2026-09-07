@@ -12,6 +12,9 @@ import (
 const historyPageMax = 100
 const historyUndoWindow = 5 * time.Minute
 
+// JavaScript Date supports at most 100 million days from the Unix epoch.
+const maxSourceTime = int64(8_640_000_000_000_000)
+
 type EventType string
 
 const (
@@ -78,7 +81,7 @@ type eventWriter interface {
 }
 
 func validViewingEvent(event ViewingEvent) bool {
-	return event.CatalogID != "" && strings.TrimSpace(event.Title) != "" && event.Kind != "" && (event.Type == EventCompleted || event.Type == EventSummary) && validProvenance(event.Provenance) && !(event.Provenance == ProvenanceLocal && event.SourceTime != nil) && (event.SourceTime == nil || *event.SourceTime >= 0)
+	return event.CatalogID != "" && strings.TrimSpace(event.Title) != "" && event.Kind != "" && (event.Type == EventCompleted || event.Type == EventSummary) && validProvenance(event.Provenance) && !(event.Provenance == ProvenanceLocal && event.SourceTime != nil) && (event.SourceTime == nil || (*event.SourceTime >= 0 && *event.SourceTime <= maxSourceTime))
 }
 func (m *Manager) recordViewingEvent(db eventWriter, profileID string, event ViewingEvent) error {
 	if !validViewingEvent(event) {

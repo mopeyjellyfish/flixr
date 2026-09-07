@@ -293,3 +293,26 @@ func TestCompletionSurvivesCatalogRemovalAndRewatch(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryRejectsSourceTimesOutsideDisplayableRange(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := h.CreateProfile("One", "")
+	for _, timestamp := range []int64{-1, 8640000000000001, 9223372036854775807} {
+		event := household.ViewingEvent{CatalogID: "film", Title: "Film", Kind: "film", Type: household.EventSummary, Provenance: household.ProvenanceImport, SourceTime: &timestamp}
+		if err := h.RecordViewingEvent(p.ID, event); !errors.Is(err, household.ErrInvalidHistory) {
+			t.Fatalf("timestamp %d accepted: %v", timestamp, err)
+		}
+	}
+	page, err := h.History(p.ID, 10, "")
+	if err != nil || len(page.Events) != 0 {
+		t.Fatalf("invalid events persisted: %+v %v", page, err)
+	}
+}
