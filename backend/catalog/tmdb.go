@@ -84,7 +84,7 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := t.client.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return Enrichment{}, err
 	}
@@ -141,6 +141,160 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 	return match, nil
 }
 
+func (t *TMDB) Candidates(ctx context.Context, token, kind, title, language, region string) ([]Candidate, error) {
+	body, err := t.search(ctx, token, kind, title, language, region)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Candidate, 0, len(body.Results))
+	for _, x := range body.Results {
+		if x.ID <= 0 {
+			continue
+		}
+		name, date := x.Title, x.ReleaseDate
+		if kind == "series" {
+			name, date = x.Name, x.FirstAirDate
+		}
+		if name == "" {
+			name = x.OriginalTitle
+			if kind == "series" {
+				name = x.OriginalName
+			}
+		}
+		year := 0
+		if len(date) >= 4 {
+			year, _ = strconv.Atoi(date[:4])
+		}
+		out = append(out, Candidate{Provider: "tmdb", ID: fmt.Sprint(x.ID), Title: name, Year: year, Language: language, Region: region, Confidence: titleConfidence(title, name)})
+	}
+	return out, nil
+}
+
+func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, region string) (Enrichment, error) {
+	if !regexp.MustCompile(`^[0-9]+$`).MatchString(providerID) {
+		return Enrichment{}, errors.New("invalid provider identifier")
+	}
+	if t.apiOrigin == nil {
+		return Enrichment{}, errors.New("tmdb API origin is invalid")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	u := *t.apiOrigin
+	route := "/3/movie/"
+	if kind == "series" {
+		route = "/3/tv/"
+	}
+	u.Path = path.Join(u.Path, route, providerID)
+	q := u.Query()
+	if language != "" {
+		q.Set("language", language)
+	}
+	if region != "" {
+		q.Set("region", region)
+	}
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return Enrichment{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := t.do(req)
+	if err != nil {
+		return Enrichment{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return Enrichment{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+	}
+	var x struct {
+		ID           int    `json:"id"`
+		Overview     string `json:"overview"`
+		ReleaseDate  string `json:"release_date"`
+		FirstAirDate string `json:"first_air_date"`
+		PosterPath   string `json:"poster_path"`
+		BackdropPath string `json:"backdrop_path"`
+	}
+	if err := decodeLimitedJSON(resp.Body, &x); err != nil {
+		return Enrichment{}, err
+	}
+	if x.ID <= 0 {
+		return Enrichment{}, errors.New("provider response has no identifier")
+	}
+	date := x.ReleaseDate
+	if kind == "series" {
+		date = x.FirstAirDate
+	}
+	year := 0
+	if len(date) >= 4 {
+		year, _ = strconv.Atoi(date[:4])
+	}
+	return Enrichment{ProviderID: fmt.Sprint(x.ID), Year: year, Synopsis: x.Overview, Poster: x.PosterPath, Backdrop: x.BackdropPath}, nil
+}
+
+type tmdbSearch struct {
+	Results []struct {
+		ID            int    `json:"id"`
+		Title         string `json:"title"`
+		Name          string `json:"name"`
+		OriginalTitle string `json:"original_title"`
+		OriginalName  string `json:"original_name"`
+		ReleaseDate   string `json:"release_date"`
+		FirstAirDate  string `json:"first_air_date"`
+	} `json:"results"`
+}
+
+func (t *TMDB) search(ctx context.Context, token, kind, title, language, region string) (tmdbSearch, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if t.apiOrigin == nil {
+		return tmdbSearch{}, errors.New("tmdb API origin is invalid")
+	}
+	u := *t.apiOrigin
+	route := "/3/search/movie"
+	if kind == "series" {
+		route = "/3/search/tv"
+	}
+	u.Path = path.Join(u.Path, route)
+	q := u.Query()
+	q.Set("query", title)
+	if language != "" {
+		q.Set("language", language)
+	}
+	if region != "" {
+		q.Set("region", region)
+	}
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return tmdbSearch{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := t.do(req)
+	if err != nil {
+		return tmdbSearch{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return tmdbSearch{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+	}
+	var body tmdbSearch
+	if err := decodeLimitedJSON(resp.Body, &body); err != nil {
+		return tmdbSearch{}, err
+	}
+	return body, nil
+}
+
+func titleConfidence(query, candidate string) float64 {
+	if normalizedTitle(query) == normalizedTitle(candidate) {
+		return 1
+	}
+	return 0.5
+}
+
 var metadataYearRE = regexp.MustCompile(`(?:\s+|\s*\()((?:19|20)\d{2})\)?$`)
 
 func normalizedTitle(value string) string {
@@ -176,7 +330,7 @@ func (t *TMDB) FetchArtwork(ctx context.Context, imagePath string) (Artwork, err
 	if err != nil {
 		return Artwork{}, err
 	}
-	resp, err := t.client.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return Artwork{}, err
 	}
@@ -197,6 +351,29 @@ func (t *TMDB) FetchArtwork(ctx context.Context, imagePath string) (Artwork, err
 		return Artwork{}, errors.New("provider image too large")
 	}
 	return Artwork{Bytes: bytes.Clone(data), ContentType: contentType}, nil
+}
+
+// do gives a rate-limited provider one bounded retry while preserving cancellation.
+func (t *TMDB) do(req *http.Request) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := t.client.Do(req)
+		if err != nil || resp.StatusCode != http.StatusTooManyRequests || attempt == 1 {
+			return resp, err
+		}
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		delay := time.Second
+		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds >= 0 && seconds < 1 {
+			delay = time.Duration(seconds) * time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-req.Context().Done():
+			timer.Stop()
+			return nil, req.Context().Err()
+		case <-timer.C:
+		}
+	}
 }
 func validImagePath(value string) bool {
 	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#\\") {

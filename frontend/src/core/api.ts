@@ -31,6 +31,8 @@ export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
 export type TMDBSettings = { configured: boolean };
+export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
+export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
 export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
@@ -43,7 +45,7 @@ export type ApiErrorCode =
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed'
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
@@ -80,6 +82,7 @@ export function messageFor(code: string): string {
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
     scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
+    metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     playback_unsupported: 'This title is not compatible with this browser.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
     playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
