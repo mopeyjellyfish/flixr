@@ -284,8 +284,8 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) error {
 	if c.maintenanceDir == nil {
 		directory, err := c.fs.Open(dir)
 		if err != nil {
-			c.derivativeReady = true
 			if errors.Is(err, os.ErrNotExist) {
+				c.derivativeReady = true
 				return nil
 			}
 			return err
@@ -302,14 +302,18 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) error {
 		}
 		path := filepath.Join(dir, entry.Name())
 		if strings.HasPrefix(entry.Name(), ".tmp-") && now.Sub(entry.ModTime()) > time.Hour {
-			_ = c.fs.Remove(path)
+			if err := c.fs.Remove(path); err != nil {
+				return err
+			}
 			continue
 		}
 		if !strings.HasSuffix(entry.Name(), ".jpg") {
 			continue
 		}
 		if now.Sub(entry.ModTime()) > derivativeMaxAge || c.derivativeCount >= maintenanceMaxFiles || c.derivativeBytes+entry.Size() > maxDerivativeBytes {
-			_ = c.fs.Remove(path)
+			if err := c.fs.Remove(path); err != nil {
+				return err
+			}
 			continue
 		}
 		c.derivativeBytes += entry.Size()

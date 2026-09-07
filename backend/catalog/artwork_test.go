@@ -16,7 +16,26 @@ import (
 	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
+	"github.com/spf13/afero"
 )
+
+type failingArtworkFS struct {
+	afero.Fs
+	openErr, removeErr error
+}
+
+func (f failingArtworkFS) Open(name string) (afero.File, error) {
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return f.Fs.Open(name)
+}
+func (f failingArtworkFS) Remove(name string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	return f.Fs.Remove(name)
+}
 
 func TestArtworkSizedDeduplicatesAndKeepsOriginal(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
@@ -269,6 +288,30 @@ func TestArtworkMaintenanceStopsOnShutdown(t *testing.T) {
 	}
 	if status := c.ArtworkMaintenanceStatus(); status.Outcome != "complete" || status.LastRun.IsZero() {
 		t.Fatalf("maintenance status = %#v", status)
+	}
+}
+
+func TestArtworkMaintenanceDoesNotAdmitAfterInventoryErrors(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.fs = failingArtworkFS{Fs: afero.NewOsFs(), openErr: os.ErrPermission}
+	c.artworkMu.Lock()
+	c.derivativeReady = false
+	err = c.cleanupDerivativesLocked(time.Now())
+	ready := c.derivativeReady
+	c.artworkMu.Unlock()
+	if err == nil || ready {
+		t.Fatalf("inventory error admitted cache: %v ready=%v", err, ready)
 	}
 }
 
