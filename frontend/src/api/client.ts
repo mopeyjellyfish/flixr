@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type MetadataCandidate, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -34,8 +34,16 @@ export const api = {
   tmdbSettings: () => request<TMDBSettings>('/owner/settings/tmdb'),
   saveTMDBToken: (token: string) => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token }) }),
   removeTMDBToken: () => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token: '' }) }),
+  settingsInventory: () => request<SettingsInventory>('/owner/settings'),
+  settingsExport: () => request<{ version: number; settings: Record<string, string> }>('/owner/settings/export'),
+  settingsImportPreview: (data: { version: number; settings: Record<string, string> }) => request<{ changes: Record<string, { from: string; to: string }>; requires_review: boolean; restart_required?: boolean }>('/owner/settings/import/preview', { method: 'POST', body: JSON.stringify(data) }),
+  settingsImport: (data: { version: number; settings: Record<string, string> }) => request<{ imported: boolean; restart_required?: boolean }>('/owner/settings/import', { method: 'POST', body: JSON.stringify(data) }),
   scan: () => request<{ scan: Scan }>('/owner/scan', { method: 'POST' }),
   scanStatus: () => request<{ scan: Scan }>('/owner/scan/status'),
+  unmatchedMetadata: () => request<{ items: MetadataTarget[] }>('/owner/metadata/unmatched'),
+  metadataCandidates: (kind: string, id: string) => request<{ candidates: MetadataCandidate[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/candidates`),
+  matchMetadata: (kind: string, id: string, providerID: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/match`, { method: 'PUT', body: JSON.stringify({ provider_id: providerID, language: 'en-US', region: 'US' }) }),
+  unmatchMetadata: (kind: string, id: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/match`, { method: 'DELETE' }),
   recheck: () => request<SetupStatus>('/owner/readiness/recheck', { method: 'POST' }),
   playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),

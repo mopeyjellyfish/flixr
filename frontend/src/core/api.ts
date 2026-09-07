@@ -38,6 +38,8 @@ export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number 
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
 export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
 export type PlaybackStatus = { settings: PlaybackSettings; generations: PlaybackGeneration[] };
+export type EffectiveSetting = { key: string; category: string; scope: string; default: string; environment: string; file_secret: string; persistence: string; restart: string; valid: string; secret: boolean; advanced: boolean; value: string; source: 'default' | 'saved' | 'environment'; mutable: boolean };
+export type SettingsInventory = { settings: EffectiveSetting[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; failed: number; unmatched: number; message?: string; finished_at?: number };
 export type ApiErrorCode =
   | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'pin_rate_limited'
@@ -50,7 +52,7 @@ export type ApiErrorCode =
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
-  | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'session_not_found' | 'session_failed';
+  | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string };
@@ -93,6 +95,8 @@ export function messageFor(code: string): string {
     invalid_playback_settings: 'Playback limits are invalid. Check the directory and byte limits.',
     playback_active: 'Stop active compatibility streams before changing playback limits.',
     playback_settings_failed: 'Flixr could not save playback settings.',
+    environment_locked: 'This value is managed by the server environment and cannot be changed here.',
+    import_requires_review: 'Import one supported setting scope at a time. Network and access settings require review.',
     playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }
