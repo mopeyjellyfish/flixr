@@ -557,11 +557,18 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	}
 	c.status.FinishedAt = time.Now().Unix()
 	status := c.status
+	c.mu.Unlock()
+
+	// Keep the scan active until its terminal report is persisted. Otherwise a
+	// new scan can publish its running report first and the older scan's
+	// retention transaction can prune that active row.
+	c.saveStatus(status)
+
+	c.mu.Lock()
 	c.scanning, c.cancel = false, nil
 	close(c.done)
 	c.done = nil
 	c.mu.Unlock()
-	c.saveStatus(status)
 }
 
 func (c *Catalog) scanError() error {
