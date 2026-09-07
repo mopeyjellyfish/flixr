@@ -80,3 +80,38 @@ func TestTMDBTVUsesFirstAirYearAndOriginalName(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
+
+func TestTMDBRetriesRateLimitOnce(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[{"id":7,"title":"Film","release_date":"2024-01-01"}]}`))
+	}))
+	defer server.Close()
+	got, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).Lookup(context.Background(), "test", "film", "Film")
+	if err != nil || got.ProviderID != "7" || requests != 2 {
+		t.Fatalf("got %+v, requests=%d, err=%v", got, requests, err)
+	}
+}
+
+func TestTMDBLookupHonorsCancellation(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() }))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).Lookup(ctx, "test", "film", "Film")
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("cancelled lookup succeeded")
+	}
+}

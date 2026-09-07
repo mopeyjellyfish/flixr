@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
+import { ApiError, type MetadataCandidate, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -20,6 +20,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [tv, setTV] = useState('');
   const [tmdbConfigured, setTMDBConfigured] = useState(false);
   const [tmdbToken, setTMDBToken] = useState('');
+  const [unmatched, setUnmatched] = useState<MetadataTarget[]>([]);
+  const [candidates, setCandidates] = useState<Record<string, MetadataCandidate[]>>({});
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
   const [screens, setScreens] = useState<ScreenPresence[]>([]);
@@ -34,6 +36,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.scanStatus().then((result) => setScan(result.scan.status ? result.scan : undefined)).catch(() => undefined);
     api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
     api.tmdbSettings().then((settings) => setTMDBConfigured(settings.configured)).catch(() => setNotice('TMDB settings are unavailable.'));
+    api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
     api.ownerScreens().then((result) => setScreens(result.screens ?? [])).catch(() => setNotice('Connected screens are unavailable.'));
@@ -85,6 +88,9 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to remove TMDB credential.');
     }
   };
+  const findMatches = async (item: MetadataTarget) => { try { const result = await api.metadataCandidates(item.kind, item.id); setCandidates((current) => ({ ...current, [item.id]: result.candidates })); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Matches are unavailable.'); } };
+  const selectMatch = async (item: MetadataTarget, candidate: MetadataCandidate) => { try { const matched = await api.matchMetadata(item.kind, item.id, candidate.id); setUnmatched((current) => current.map((value) => value.id === item.id ? matched : value)); setCandidates((current) => { const next = { ...current }; delete next[item.id]; return next; }); setNotice(`Matched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save this match.'); } };
+  const clearMatch = async (item: MetadataTarget) => { try { await api.unmatchMetadata(item.kind, item.id); setUnmatched((current) => current.map((value) => value.id === item.id ? { ...value, provider_id: '', owner_matched: false } : value)); setNotice(`Unmatched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to unmatch this title.'); } };
   const savePlayback = async (event: FormEvent) => {
     event.preventDefault();
     if (!playbackSettings) return;
@@ -144,6 +150,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
             <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
+            <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} />
           </section>
           <section id="support" className="owner-section" aria-labelledby="support-title">
             <h2 id="support-title">Support diagnostics</h2><p>Download a local ZIP with versions, runtime health, and recent failure IDs. It never includes media names, paths, passwords, or tokens.</p>
@@ -153,6 +160,10 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       </div>
     </main>
   );
+}
+
+function MetadataRepair({ items, candidates, onFind, onSelect, onClear }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void>; onClear: (item: MetadataTarget) => Promise<void> }) {
+  return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Title identification</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}{item.provider_id ? ' · matched' : ' · unmatched'}</span><button type="button" onClick={() => void onFind(item)}>{item.provider_id ? 'Change match' : 'Find matches'}</button>{item.provider_id && <button type="button" onClick={() => void onClear(item)}>Unmatch</button>}{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}</li>)}</ul>}</section>;
 }
 
 function OwnerHeader({ onBrowse, onLogout }: OwnerProps) {
