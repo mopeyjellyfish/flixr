@@ -64,6 +64,7 @@ export const api = {
   playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, capabilities }) }),
   playbackHeartbeat: (sessionID: string, positionMs: number, observation: number, ended = false) => request<{ expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs, observation, ended }) }),
   playbackSeek: (sessionID: string, positionMs: number, observation: number) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs, observation }) }),
+  playbackAudio: (sessionID: string, audioStreamIndex: number, audioExternal: boolean, positionMs: number, observation: number, capabilities: PlaybackCapabilities) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/audio`, { method: 'POST', body: JSON.stringify({ audio_stream_index: audioStreamIndex, audio_external: audioExternal, position_ms: positionMs, observation, capabilities }) }),
   playbackStop: (sessionID: string) => request<{ stopped: boolean }>(`/playback/sessions/${encodeURIComponent(sessionID)}/stop`, { method: 'POST' }),
   screens: () => request<{ screens: ScreenPresence[] }>('/screens'),
   advertiseScreen: (name: string) => request<{ screen: ScreenPresence; ticket: string }>('/screens/presence', { method: 'POST', body: JSON.stringify({ name }) }),

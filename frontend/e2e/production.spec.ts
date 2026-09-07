@@ -84,6 +84,9 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /series signal/i }).click();
   await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
   await expectPlayback(page);
+  const audio = page.getByRole('combobox', { name: /audio track/i });
+  await expect(audio).toBeVisible();
+  await expect(audio.locator('option')).toHaveText([/English/, /French/, /Director Commentary.*Japanese.*External/]);
   const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
   await page.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
@@ -91,6 +94,20 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
     media.dispatchEvent(new Event('seeked', { bubbles: true }));
   });
   expect((await seekResponse).ok()).toBeTruthy();
+  const frenchResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/audio'));
+  await audio.selectOption('embedded:2');
+  const french = await frenchResponse;
+  expect(french.ok()).toBeTruthy();
+  const frenchPlan = await french.json() as { plan: { audio_stream_index: number }; resume_ms: number };
+  expect(frenchPlan.plan.audio_stream_index).toBe(2);
+  expect(frenchPlan.resume_ms).toBeGreaterThanOrEqual(100);
+  await expect.poll(() => page.locator('video').evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
+  const externalResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/audio'));
+  await audio.selectOption('external:3');
+  const external = await externalResponse;
+  expect(external.ok()).toBeTruthy();
+  const externalPlan = await external.json() as { plan: { audio_stream_index: number; audio_external: boolean } };
+  expect(externalPlan.plan).toMatchObject({ audio_stream_index: 3, audio_external: true });
   await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: /back to library/i }).click();
 

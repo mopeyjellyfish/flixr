@@ -90,6 +90,20 @@ cannot always be distinguished from an intentionally emptied library; ensure the
 share is available before scanning. Unreadable or missing roots fail scans without
 replacing the last catalog.
 
+### External audio tracks
+
+Put an external audio file beside its film or episode and start its name with the
+complete video filename stem. Add a language tag and an optional label before the
+audio extension. For example, `Signal S01E01.jpn.Director Commentary.m4a` belongs
+to `Signal S01E01.mkv`. Flixr recognizes AAC, FLAC, M4A, MP3, Ogg, Opus and WAV
+sidecars. The language tag may use a two- or three-letter code, with optional
+hyphenated subtags.
+
+The player labels embedded and external tracks, including default and commentary
+metadata. Choosing a track with a known language remembers that language for the
+active profile and prefers it on the next episode. Unlabeled languages remain
+selectable without replacing the last known preference.
+
 ## Environment and secrets
 
 Compose `environment` and `env_file` are the supported ways to inject settings.

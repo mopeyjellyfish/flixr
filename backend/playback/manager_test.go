@@ -48,6 +48,7 @@ type fakeExecutor struct {
 	processes    []*fakeProcess
 	commands     [][]string
 	ignoreSignal bool
+	startErr     error
 }
 
 func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
@@ -56,6 +57,12 @@ func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, 
 	}
 	process := newFakeProcess(e.ignoreSignal)
 	e.mu.Lock()
+	if e.startErr != nil {
+		err := e.startErr
+		e.startErr = nil
+		e.mu.Unlock()
+		return nil, err
+	}
 	e.processes = append(e.processes, process)
 	e.commands = append(e.commands, append([]string(nil), args...))
 	e.mu.Unlock()
@@ -328,15 +335,100 @@ func TestCleanupOrphansRefusesUnownedNonEmptyDirectory(t *testing.T) {
 
 func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	dir := t.TempDir()
-	name, args, err := ffmpegCommand(Transcode, "http://127.0.0.1:8787/api/v1/playback/input/server-token", dir, time.Second, time.Minute)
+	name, args, err := ffmpegCommand(Transcode, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", 2, dir, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "ffmpeg" || !strings.Contains(strings.Join(args, " "), "libx264") {
+	command := strings.Join(args, " ")
+	if name != "ffmpeg" || !strings.Contains(command, "libx264") || !strings.Contains(command, "-map 0:2") {
 		t.Fatalf("unexpected command: %s %v", name, args)
 	}
-	if _, _, err := ffmpegCommand(Remux, "https://media.example/file", dir, 0, time.Minute); err == nil {
+	if _, _, err := ffmpegCommand(Remux, "https://media.example/file", "", 1, dir, 0, time.Minute); err == nil {
 		t.Fatal("accepted a non-loopback input")
+	}
+	_, externalArgs, err := ffmpegCommand(Remux, "http://127.0.0.1:8787/api/v1/playback/input/video", "http://127.0.0.1:8787/api/v1/playback/input/audio", 0, dir, 23*time.Second, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := strings.Join(externalArgs, " ")
+	if strings.Count(external, "-ss 23.000") != 2 || !strings.Contains(external, "-map 1:0") {
+		t.Fatalf("external audio command is not source-relative: %v", externalArgs)
+	}
+}
+
+func TestManagerAudioReplacementUsesDistinctJobAtGenerationLimit(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	firstPlan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	first, err := manager.Create("profile-a", "film-1", firstPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan := firstPlan
+	secondPlan.AudioStreamIndex = 2
+	second, err := manager.Replace(first.ID, "profile-a", secondPlan, 12_345)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Lookup(first.ID, "profile-a", false); ok {
+		t.Fatal("replacement kept old session")
+	}
+	if second.PositionMS != 12_345 || second.GenerationID == first.GenerationID || len(executor.processes) != 2 || !executor.processes[0].signaled.Load() {
+		t.Fatalf("replacement = %#v, processes = %d", second, len(executor.processes))
+	}
+}
+
+func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	first, err := manager.Create("profile-a", "film-1", plan, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	executor.startErr = errors.New("synthetic startup failure")
+	executor.mu.Unlock()
+	plan.AudioStreamIndex = 2
+	if _, err := manager.Replace(first.ID, "profile-a", plan, 12_345); err == nil {
+		t.Fatal("replacement succeeded")
+	}
+	if current, ok := manager.Lookup(first.ID, "profile-a", false); !ok || current.PositionMS != 0 || current.ProgressGeneration != 7 {
+		t.Fatalf("failed replacement removed old session: %#v, %v", current, ok)
+	}
+	if len(executor.processes) != 1 || executor.processes[0].signaled.Load() {
+		t.Fatal("failed replacement interrupted old generation")
+	}
+}
+
+func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	session, err := manager.Create("profile-a", "film-1", plan, 4_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) != 1 {
+		t.Fatalf("commands = %d", len(executor.commands))
+	}
+	var tokens []string
+	for index, arg := range executor.commands[0] {
+		if arg == "-i" && index+1 < len(executor.commands[0]) {
+			tokens = append(tokens, filepath.Base(executor.commands[0][index+1]))
+		}
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("input tokens = %v", tokens)
+	}
+	if catalogID, audioIndex, external, ok := manager.Input(tokens[1]); !ok || catalogID != "film-1" || audioIndex != 2 || !external {
+		t.Fatalf("audio authority = %q %d %v %v", catalogID, audioIndex, external, ok)
+	}
+	if !manager.Stop(session.ID, "profile-a") {
+		t.Fatal("stop failed")
+	}
+	if _, _, _, ok := manager.Input(tokens[1]); ok {
+		t.Fatal("external audio authority survived generation stop")
 	}
 }
 

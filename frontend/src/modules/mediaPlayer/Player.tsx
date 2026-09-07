@@ -1,9 +1,29 @@
 import type Hls from 'hls.js';
-import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { screenCoordinator } from '../screenCoordinator/runtime';
+
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
+
+function languageLabel(language?: string): string {
+  if (!language) return 'Unknown language';
+  try {
+    return languageNames.of(language) ?? language;
+  } catch {
+    return language;
+  }
+}
+
+function audioLabel(track: NonNullable<PlaybackPlan['audio_tracks']>[number]): string {
+  const language = languageLabel(track.language);
+  const parts = [track.title || language];
+  if (track.title && track.title.toLocaleLowerCase() !== language.toLocaleLowerCase()) parts.push(language);
+  if (track.default) parts.push('Default');
+  if (track.external) parts.push('External');
+  return parts.join(' · ');
+}
 
 function browserCapabilities(): PlaybackCapabilities {
   const probe = document.createElement('video');
@@ -22,10 +42,13 @@ function browserCapabilities(): PlaybackCapabilities {
 
 export function Player({ catalogID, startPositionMS, active = true, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
+  const [trackError, setTrackError] = useState<string>();
+  const [switchingAudio, setSwitchingAudio] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
+  const audioSwitchVersion = useRef(0);
   const playback = useRef<PlaybackPlan | null>(null);
   const observation = useRef(0);
   const initializingPosition = useRef(false);
@@ -113,6 +136,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     window.addEventListener('pagehide', pageHide);
     return () => {
       active = false;
+      audioSwitchVersion.current += 1;
       sourceVersion.current += 1;
       window.clearInterval(timer);
       window.removeEventListener('pagehide', pageHide);
@@ -188,6 +212,33 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     }
   };
 
+  const changeAudio = async (value: string) => {
+    const plan = playback.current;
+    const element = video.current;
+    if (!plan || !element || switchingAudio) return;
+    const [source, indexValue] = value.split(':', 2);
+    const streamIndex = Number(indexValue);
+    if ((source !== 'embedded' && source !== 'external') || !Number.isInteger(streamIndex) || streamIndex < 0) return;
+    const version = sourceVersion.current;
+    const switchVersion = ++audioSwitchVersion.current;
+    const positionMs = currentPosition();
+    autoStart.current = !element.paused;
+    setSwitchingAudio(true);
+    setTrackError(undefined);
+    try {
+      const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
+      if (version !== sourceVersion.current || !video.current) {
+        void api.playbackStop(updated.session_id).catch(() => undefined);
+        return;
+      }
+      await attach(updated);
+    } catch (error: unknown) {
+      if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
+    } finally {
+      if (switchVersion === audioSwitchVersion.current) setSwitchingAudio(false);
+    }
+  };
+
   const statusLabel = state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
 
   return <main className="player">
@@ -240,11 +291,22 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
         </div>
         <div className="player-toolbar">
           <p role="status" className="player-status"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
+          {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
+            <select
+              aria-busy={switchingAudio}
+              disabled={switchingAudio}
+              value={`${playback.current?.plan.audio_external ? 'external' : 'embedded'}:${playback.current?.plan.audio_stream_index ?? ''}`}
+              onChange={(event) => { void changeAudio(event.target.value); }}
+            >
+              {playback.current?.audio_tracks?.map((track) => <option key={`${track.external ? 'external' : 'embedded'}:${track.index}`} value={`${track.external ? 'external' : 'embedded'}:${track.index}`}>{audioLabel(track)}</option>)}
+            </select>
+          </label>}
           <div className="player-actions">
             <button className="primary" onClick={() => void play()}>Play</button>
             <button onClick={() => video.current?.pause()}>Pause</button>
           </div>
         </div>
+        {trackError && <p className="player-track-error" role="alert">{trackError}</p>}
         <p className="player-hint">Progress stays with this profile across your local devices.</p>
       </section>}
   </main>;

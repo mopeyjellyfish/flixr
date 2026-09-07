@@ -18,11 +18,16 @@ var (
 
 // MediaProperties is the path-free media description consumed by the planner.
 type MediaProperties struct {
-	Container    string   `json:"container"`
-	VideoCodec   string   `json:"video_codec"`
-	VideoProfile string   `json:"video_profile,omitempty"`
-	AudioCodec   string   `json:"audio_codec"`
-	Subtitles    []string `json:"subtitles,omitempty"`
+	Container              string   `json:"container"`
+	VideoCodec             string   `json:"video_codec"`
+	VideoProfile           string   `json:"video_profile,omitempty"`
+	AudioCodec             string   `json:"audio_codec"`
+	AudioStreamIndex       int      `json:"audio_stream_index"`
+	AudioSourceStreamIndex int      `json:"-"`
+	AudioExternal          bool     `json:"audio_external,omitempty"`
+	AudioSelected          bool     `json:"-"`
+	RequiresAudioMapping   bool     `json:"-"`
+	Subtitles              []string `json:"subtitles,omitempty"`
 }
 
 // ClientCapabilities declares exact original-media and fMP4 HLS support.
@@ -49,34 +54,46 @@ const (
 
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
-	Kind        Kind   `json:"kind"`
-	Container   string `json:"container,omitempty"`
-	VideoCodec  string `json:"video_codec,omitempty"`
-	AudioCodec  string `json:"audio_codec,omitempty"`
-	Description string `json:"description,omitempty"`
+	Kind                   Kind   `json:"kind"`
+	Container              string `json:"container,omitempty"`
+	VideoCodec             string `json:"video_codec,omitempty"`
+	AudioCodec             string `json:"audio_codec,omitempty"`
+	AudioStreamIndex       int    `json:"audio_stream_index"`
+	AudioSourceStreamIndex int    `json:"-"`
+	AudioExternal          bool   `json:"audio_external,omitempty"`
+	AudioSelected          bool   `json:"-"`
+	Description            string `json:"description,omitempty"`
 }
 
 // PlanFor selects the least expensive compatible path from recorded plain values.
 func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadiness) (Plan, error) {
-	if directCompatible(media, client) {
+	selection := Plan{AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected}
+	if !media.RequiresAudioMapping && directCompatible(media, client) {
 		return Plan{
-			Kind:        Direct,
-			Container:   media.Container,
-			VideoCodec:  media.VideoCodec,
-			AudioCodec:  media.AudioCodec,
-			Description: "Original media",
+			Kind:                   Direct,
+			Container:              media.Container,
+			VideoCodec:             media.VideoCodec,
+			AudioCodec:             media.AudioCodec,
+			AudioStreamIndex:       media.AudioStreamIndex,
+			AudioSourceStreamIndex: media.AudioSourceStreamIndex,
+			AudioExternal:          media.AudioExternal,
+			AudioSelected:          media.AudioSelected,
+			Description:            "Original media",
 		}, nil
 	}
 	if !fallbackCompatible(client) {
-		return Plan{Kind: Unsupported}, ErrUnsupported
+		selection.Kind = Unsupported
+		return selection, ErrUnsupported
 	}
 	if !ready.FFmpeg {
-		return Plan{}, ErrFFmpegUnavailable
+		return selection, ErrFFmpegUnavailable
 	}
 	if codecCompatible(media, client) {
-		return Plan{Kind: Remux, Container: "fmp4-hls", VideoCodec: media.VideoCodec, AudioCodec: media.AudioCodec, Description: "Stream-copy fMP4 HLS"}, nil
+		selection.Kind, selection.Container, selection.VideoCodec, selection.AudioCodec, selection.Description = Remux, "fmp4-hls", media.VideoCodec, media.AudioCodec, "Stream-copy fMP4 HLS"
+		return selection, nil
 	}
-	return Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", AudioCodec: "aac", Description: "H.264/AAC compatibility stream"}, nil
+	selection.Kind, selection.Container, selection.VideoCodec, selection.AudioCodec, selection.Description = Transcode, "fmp4-hls", "h264", "aac", "H.264/AAC compatibility stream"
+	return selection, nil
 }
 
 func directCompatible(media MediaProperties, client ClientCapabilities) bool {

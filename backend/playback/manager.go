@@ -39,8 +39,10 @@ type ManagerConfig struct {
 }
 
 type inputAuthority struct {
-	catalogID string
-	expiresAt time.Time
+	catalogID        string
+	audioStreamIndex int
+	external         bool
+	expiresAt        time.Time
 }
 
 type generation struct {
@@ -49,7 +51,7 @@ type generation struct {
 	kind            Kind
 	startMS         int64
 	dir             string
-	input           string
+	inputs          []string
 	leases          map[string]time.Time
 	process         Process
 	done            chan struct{}
@@ -119,6 +121,7 @@ type Manager struct {
 	inputs       map[string]inputAuthority
 	starting     int
 	pendingJobs  map[string]struct{}
+	replacements map[string]struct{}
 	startWG      sync.WaitGroup
 	cancel       context.CancelFunc
 	janitorDone  chan struct{}
@@ -128,12 +131,13 @@ type Manager struct {
 // NewDirectManager creates a no-goroutine manager for direct-only tests and callers.
 func NewDirectManager() *Manager {
 	return &Manager{
-		settings:    DefaultSettings(os.TempDir()),
-		files:       afero.Afero{Fs: afero.NewOsFs()},
-		sessions:    map[string]Session{},
-		generations: map[string]*generation{},
-		inputs:      map[string]inputAuthority{},
-		pendingJobs: map[string]struct{}{},
+		settings:     DefaultSettings(os.TempDir()),
+		files:        afero.Afero{Fs: afero.NewOsFs()},
+		sessions:     map[string]Session{},
+		generations:  map[string]*generation{},
+		inputs:       map[string]inputAuthority{},
+		pendingJobs:  map[string]struct{}{},
+		replacements: map[string]struct{}{},
 	}
 }
 
@@ -173,6 +177,7 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		generations:  map[string]*generation{},
 		inputs:       map[string]inputAuthority{},
 		pendingJobs:  map[string]struct{}{},
+		replacements: map[string]struct{}{},
 		cancel:       cancel,
 		janitorDone:  make(chan struct{}),
 	}
@@ -212,6 +217,10 @@ func CleanupOrphans(fs afero.Fs, segmentDir string) error {
 }
 
 func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
+	return m.create(profileID, catalogID, plan, positionMS, "", progressGeneration...)
+}
+
+func (m *Manager) create(profileID, catalogID string, plan Plan, positionMS int64, replacingGeneration string, progressGeneration ...int64) (Session, error) {
 	if profileID == "" || catalogID == "" {
 		return Session{}, ErrSessionInvalid
 	}
@@ -249,17 +258,18 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
-	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec)
+	audioSelectionIndex := -1
+	if plan.AudioSelected {
+		audioSelectionIndex = plan.AudioStreamIndex
+	}
+	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%t", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec, audioSelectionIndex, plan.AudioExternal)
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
 		session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
 		existing.leases[session.ID] = session.ExpiresAt
 		m.sessions[session.ID] = session
-		if authority, ok := m.inputs[existing.input]; ok {
-			authority.expiresAt = session.ExpiresAt
-			m.inputs[existing.input] = authority
-		}
+		m.renewInputsLocked(existing, session.ExpiresAt)
 		m.mu.Unlock()
 		return session, nil
 	}
@@ -267,8 +277,18 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		m.mu.Unlock()
 		return Session{}, ErrPreparing
 	}
-	reserved := len(m.generations) + m.starting + 1
+	replacementCredit := 0
+	if gen := m.generations[replacingGeneration]; gen != nil && len(gen.leases) == 1 {
+		if _, replacing := m.replacements[replacingGeneration]; !replacing {
+			replacementCredit = 1
+			m.replacements[replacingGeneration] = struct{}{}
+		}
+	}
+	reserved := len(m.generations) + m.starting + 1 - replacementCredit
 	if reserved > m.settings.MaxGenerations || int64(reserved)*m.settings.GenerationBytes > m.settings.GlobalBytes {
+		if replacementCredit == 1 {
+			delete(m.replacements, replacingGeneration)
+		}
 		m.mu.Unlock()
 		return Session{}, ErrCapacity
 	}
@@ -282,6 +302,9 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	releaseReservation := func(clearPending bool) {
 		m.mu.Lock()
 		m.starting--
+		if replacementCredit == 1 {
+			delete(m.replacements, replacingGeneration)
+		}
 		if clearPending {
 			delete(m.pendingJobs, jobKey)
 		}
@@ -303,7 +326,23 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		return Session{}, fmt.Errorf("create generation directory: %w", err)
 	}
 	inputURL := m.inputBase + "/api/v1/playback/input/" + inputToken
-	name, args, err := ffmpegCommand(plan.Kind, inputURL, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
+	inputTokens := []string{inputToken}
+	audioInputURL := ""
+	if plan.AudioExternal {
+		audioToken, tokenErr := randomToken()
+		if tokenErr != nil {
+			releaseReservation(true)
+			_ = m.files.RemoveAll(dir)
+			return Session{}, tokenErr
+		}
+		inputTokens = append(inputTokens, audioToken)
+		audioInputURL = m.inputBase + "/api/v1/playback/input/" + audioToken
+	}
+	audioSourceStreamIndex := -1
+	if plan.AudioSelected {
+		audioSourceStreamIndex = plan.AudioSourceStreamIndex
+	}
+	name, args, err := ffmpegCommand(plan.Kind, inputURL, audioInputURL, audioSourceStreamIndex, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
 	if err != nil {
 		releaseReservation(true)
 		_ = m.files.RemoveAll(dir)
@@ -319,7 +358,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
 	gen := &generation{
 		id: generationID, jobKey: jobKey, kind: plan.Kind, startMS: positionMS, dir: dir,
-		input: inputToken, leases: map[string]time.Time{session.ID: session.ExpiresAt},
+		inputs: inputTokens, leases: map[string]time.Time{session.ID: session.ExpiresAt},
 		process: process, done: make(chan struct{}), startedAt: now, log: log,
 		ready:           m.manifestWait == 0,
 		segmentDuration: map[uint64]int64{},
@@ -327,6 +366,9 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	go m.waitGeneration(gen, process)
 	m.mu.Lock()
 	m.starting--
+	if replacementCredit == 1 {
+		delete(m.replacements, replacingGeneration)
+	}
 	if m.closed {
 		delete(m.pendingJobs, jobKey)
 		m.mu.Unlock()
@@ -335,7 +377,10 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	}
 	m.generations[generationID] = gen
 	m.sessions[session.ID] = session
-	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, expiresAt: now.Add(settings.LeaseTTL)}
+	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, audioStreamIndex: -1, expiresAt: now.Add(settings.LeaseTTL)}
+	if plan.AudioExternal {
+		m.inputs[inputTokens[1]] = inputAuthority{catalogID: catalogID, audioStreamIndex: plan.AudioStreamIndex, external: true, expiresAt: now.Add(settings.LeaseTTL)}
+	}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
 		if err := waitForFile(m.files.Fs, filepath.Join(dir, "index.m3u8"), gen.done, m.manifestWait); err != nil {
@@ -481,10 +526,7 @@ func (m *Manager) Lookup(id, profileID string, touch bool) (Session, bool) {
 		m.sessions[id] = session
 		if gen := m.generations[session.GenerationID]; gen != nil {
 			gen.leases[id] = session.ExpiresAt
-			if authority, exists := m.inputs[gen.input]; exists {
-				authority.expiresAt = session.ExpiresAt
-				m.inputs[gen.input] = authority
-			}
+			m.renewInputsLocked(gen, session.ExpiresAt)
 		}
 	}
 	m.mu.Unlock()
@@ -509,10 +551,7 @@ func (m *Manager) Heartbeat(id, profileID string, positionMS int64) (Session, er
 	m.sessions[id] = session
 	if gen := m.generations[session.GenerationID]; gen != nil {
 		gen.leases[id] = session.ExpiresAt
-		if authority, exists := m.inputs[gen.input]; exists {
-			authority.expiresAt = session.ExpiresAt
-			m.inputs[gen.input] = authority
-		}
+		m.renewInputsLocked(gen, session.ExpiresAt)
 	}
 	m.mu.Unlock()
 	return session, nil
@@ -538,6 +577,27 @@ func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) 
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
 	replacement, err := m.Create(profileID, catalogID, plan, positionMS, session.ProgressGeneration)
+	if err != nil {
+		return Session{}, err
+	}
+	if !m.Stop(id, profileID) {
+		_ = m.Stop(replacement.ID, profileID)
+		return Session{}, ErrSessionInvalid
+	}
+	return replacement, nil
+}
+
+// Replace creates a new rendition before releasing the existing session.
+func (m *Manager) Replace(id, profileID string, plan Plan, positionMS int64) (Session, error) {
+	m.mu.Lock()
+	session, ok := m.sessions[id]
+	if !ok || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
+		m.mu.Unlock()
+		return Session{}, ErrSessionInvalid
+	}
+	catalogID := session.CatalogID
+	m.mu.Unlock()
+	replacement, err := m.create(profileID, catalogID, plan, positionMS, session.GenerationID, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
@@ -576,7 +636,9 @@ func (m *Manager) detachGenerationLocked(id string) *generation {
 		return nil
 	}
 	delete(m.generations, id)
-	delete(m.inputs, gen.input)
+	for _, token := range gen.inputs {
+		delete(m.inputs, token)
+	}
 	for sessionID := range gen.leases {
 		delete(m.sessions, sessionID)
 	}
@@ -605,15 +667,26 @@ func (m *Manager) retireGeneration(ctx context.Context, gen *generation) {
 	_ = m.files.RemoveAll(gen.dir)
 }
 
-func (m *Manager) InputCatalog(token string) (string, bool) {
+func (m *Manager) Input(token string) (catalogID string, audioStreamIndex int, external, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	authority, ok := m.inputs[token]
 	if !ok || !time.Now().Before(authority.expiresAt) {
 		delete(m.inputs, token)
-		return "", false
+		return "", 0, false, false
 	}
-	return authority.catalogID, true
+	return authority.catalogID, authority.audioStreamIndex, authority.external, true
+}
+
+func (m *Manager) renewInputsLocked(gen *generation, expiresAt time.Time) {
+	for _, token := range gen.inputs {
+		authority, exists := m.inputs[token]
+		if !exists {
+			continue
+		}
+		authority.expiresAt = expiresAt
+		m.inputs[token] = authority
+	}
 }
 
 func (m *Manager) OpenAsset(sessionID, profileID, name string) (afero.File, error) {

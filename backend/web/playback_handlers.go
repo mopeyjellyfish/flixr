@@ -14,8 +14,18 @@ import (
 )
 
 type playbackPlanRequest struct {
-	CatalogID    string                      `json:"catalog_id"`
-	Capabilities playback.ClientCapabilities `json:"capabilities"`
+	CatalogID        string                      `json:"catalog_id"`
+	Capabilities     playback.ClientCapabilities `json:"capabilities"`
+	AudioStreamIndex *int                        `json:"audio_stream_index"`
+	AudioExternal    bool                        `json:"audio_external,omitempty"`
+}
+
+type playbackAudioRequest struct {
+	Capabilities     playback.ClientCapabilities `json:"capabilities"`
+	AudioStreamIndex *int                        `json:"audio_stream_index"`
+	AudioExternal    bool                        `json:"audio_external,omitempty"`
+	PositionMS       int64                       `json:"position_ms"`
+	Observation      int64                       `json:"observation"`
 }
 
 type playbackPositionRequest struct {
@@ -32,16 +42,81 @@ type playbackSettingsRequest struct {
 	MaxGenerations  int    `json:"max_generations"`
 }
 
-func mediaProperties(item catalog.Item) playback.MediaProperties {
-	audio := ""
-	if len(item.Audio) > 0 {
-		audio = item.Audio[0].Codec
-	}
+func mediaProperties(item catalog.Item, selected catalog.AudioTrack, hasAudio bool) playback.MediaProperties {
 	subtitles := make([]string, 0, len(item.Subtitles))
 	for _, track := range item.Subtitles {
 		subtitles = append(subtitles, track.Codec)
 	}
-	return playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, AudioCodec: audio, Subtitles: subtitles}
+	properties := playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, AudioStreamIndex: -1, AudioSourceStreamIndex: -1, Subtitles: subtitles}
+	if hasAudio {
+		properties.AudioCodec = selected.Codec
+		properties.AudioStreamIndex = selected.Index
+		properties.AudioSourceStreamIndex = selected.SourceStreamIndex()
+		properties.AudioExternal = selected.External
+		properties.AudioSelected = true
+		properties.RequiresAudioMapping = !sourceDefaultAudio(item.Audio, selected)
+	}
+	return properties
+}
+
+func selectedAudio(tracks []catalog.AudioTrack, requested *int, external bool, preferredLanguage string) (catalog.AudioTrack, bool) {
+	if requested != nil {
+		for _, track := range tracks {
+			if track.Index == *requested && track.External == external && track.Index >= 0 {
+				return track, true
+			}
+		}
+		return catalog.AudioTrack{}, false
+	}
+	if external || len(tracks) == 0 {
+		return catalog.AudioTrack{}, false
+	}
+	var preferred *catalog.AudioTrack
+	bestScore := -1
+	for index := range tracks {
+		track := tracks[index]
+		if preferredLanguage == "" || !strings.EqualFold(track.Language, preferredLanguage) {
+			continue
+		}
+		score := 0
+		if !strings.Contains(strings.ToLower(track.Title), "commentary") {
+			score += 2
+		}
+		if track.Default {
+			score++
+		}
+		if score > bestScore {
+			candidate := track
+			preferred = &candidate
+			bestScore = score
+		}
+	}
+	if preferred != nil {
+		return *preferred, true
+	}
+	for _, track := range tracks {
+		if !track.External && track.Default {
+			return track, true
+		}
+	}
+	return tracks[0], true
+}
+
+func sourceDefaultAudio(tracks []catalog.AudioTrack, selected catalog.AudioTrack) bool {
+	if selected.External {
+		return false
+	}
+	for _, track := range tracks {
+		if !track.External && track.Default {
+			return track.Index == selected.Index
+		}
+	}
+	for _, track := range tracks {
+		if !track.External {
+			return track.Index == selected.Index
+		}
+	}
+	return false
 }
 
 func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
@@ -69,12 +144,22 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 	s.readyMu.RLock()
 	readiness := playback.ServerReadiness{FFmpeg: s.readiness.FFmpeg}
 	s.readyMu.RUnlock()
-	plan, err := playback.PlanFor(mediaProperties(item), body.Capabilities, readiness)
+	profile, _ := s.house.Profile(s.session(r))
+	preferredLanguage, err := s.house.AudioLanguage(profile.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
+	}
+	track, hasAudio := selectedAudio(item.Audio, body.AudioStreamIndex, body.AudioExternal, preferredLanguage)
+	if body.AudioStreamIndex != nil && !hasAudio {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	plan, err := playback.PlanFor(mediaProperties(item, track, hasAudio), body.Capabilities, readiness)
 	if err != nil {
 		playbackFailure(w, err)
 		return
 	}
-	profile, _ := s.house.Profile(s.session(r))
 	position, generation, err := s.house.ProgressState(s.session(r), item.ID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
@@ -101,10 +186,17 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	write(w, http.StatusCreated, playbackResponse(session))
+	if body.AudioStreamIndex != nil && track.Language != "" {
+		if err := s.house.SaveAudioLanguage(profile.ID, track.Language); err != nil {
+			s.playback.Stop(session.ID, profile.ID)
+			fail(w, http.StatusInternalServerError, "playback_failed")
+			return
+		}
+	}
+	write(w, http.StatusCreated, playbackResponse(session, item.Audio))
 }
 
-func playbackResponse(session playback.Session) map[string]any {
+func playbackResponse(session playback.Session, tracks []catalog.AudioTrack) map[string]any {
 	base := "/api/v1/playback/sessions/" + session.ID
 	mediaURL := base + "/media"
 	if session.Plan.Kind == playback.Remux || session.Plan.Kind == playback.Transcode {
@@ -121,6 +213,7 @@ func playbackResponse(session playback.Session) map[string]any {
 		"resume_ms":           session.PositionMS,
 		"stream_offset_ms":    session.StreamOffsetMS,
 		"expires_at":          session.ExpiresAt.Unix(),
+		"audio_tracks":        tracks,
 	}
 }
 
@@ -276,7 +369,63 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	write(w, http.StatusOK, playbackResponse(updated))
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio))
+}
+
+func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	session, ok := s.playbackSession(w, r, false)
+	if !ok {
+		return
+	}
+	var body playbackAudioRequest
+	if !decode(r, &body) || body.AudioStreamIndex == nil || body.PositionMS < 0 || body.Observation < 0 {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	item, err := s.catalog.PlaybackItem(session.CatalogID)
+	if err != nil {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	track, found := selectedAudio(item.Audio, body.AudioStreamIndex, body.AudioExternal, "")
+	if !found {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	s.readyMu.RLock()
+	readiness := playback.ServerReadiness{FFmpeg: s.readiness.FFmpeg}
+	s.readyMu.RUnlock()
+	plan, err := playback.PlanFor(mediaProperties(item, track, true), body.Capabilities, readiness)
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	profile, _ := s.house.Profile(s.session(r))
+	accepted, err := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "progress_failed")
+		return
+	}
+	if !accepted {
+		fail(w, http.StatusConflict, "progress_conflict")
+		return
+	}
+	updated, err := s.playback.Replace(session.ID, profile.ID, plan, body.PositionMS)
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	if track.Language != "" {
+		if err := s.house.SaveAudioLanguage(profile.ID, track.Language); err != nil {
+			s.playback.Stop(updated.ID, profile.ID)
+			fail(w, http.StatusInternalServerError, "playback_failed")
+			return
+		}
+	}
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio))
 }
 
 func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {
@@ -304,12 +453,12 @@ func (s *Server) playbackInput(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "playback_input_forbidden")
 		return
 	}
-	catalogID, ok := s.playback.InputCatalog(r.PathValue("token"))
+	catalogID, audioStreamIndex, external, ok := s.playback.Input(r.PathValue("token"))
 	if !ok {
 		fail(w, http.StatusForbidden, "playback_input_invalid")
 		return
 	}
-	file, err := s.catalog.Open(catalogID)
+	file, err := s.catalog.OpenAudio(catalogID, audioStreamIndex, external)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return

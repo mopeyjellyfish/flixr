@@ -172,3 +172,64 @@ it('orders seek, ended, pagehide and final observations without the device clock
   unmount();
   expect([...observations.slice(0, 2), JSON.parse(beaconText).observation, observations[2]]).toEqual([1, 2, 3, 4]);
 });
+it('labels audio tracks and preserves source time when changing tracks', async () => {
+  const requests: Array<{ path: string; body?: string }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    requests.push({ path, body: init?.body as string | undefined });
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+      heartbeat_url: '/heartbeat-1', seek_url: '/seek-1', stop_url: '/stop-1', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [
+        { index: 1, codec: 'aac', language: 'eng', title: 'English', default: true },
+        { index: 3, codec: 'aac', title: 'Director Commentary' },
+        { index: 4, codec: 'aac', language: 'not_a_language' },
+      ],
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({
+      plan: { kind: 'transcode', audio_stream_index: 3 }, session_id: 'session-2', media_url: '/selected.m3u8',
+      heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/stop-2', resume_ms: 12_500, stream_offset_ms: 10_000, expires_at: 9999999999,
+      audio_tracks: [
+        { index: 1, codec: 'aac', language: 'eng', title: 'English', default: true },
+        { index: 3, codec: 'aac', title: 'Director Commentary' },
+        { index: 4, codec: 'aac', language: 'not_a_language' },
+      ],
+    }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  expect(screen.getByRole('option', { name: /English.*Default/i })).toBeVisible();
+  expect(screen.getByRole('option', { name: /Director Commentary.*Unknown language/i })).toBeVisible();
+  expect(screen.getByRole('option', { name: 'not_a_language' })).toBeVisible();
+  video.currentTime = 12.5;
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:3' } });
+  await waitFor(() => expect(hls.attached).toBe(1));
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+  const switchRequest = requests.find((request) => request.path.endsWith('/audio'));
+  expect(switchRequest?.body).toContain('"audio_stream_index":3');
+  expect(switchRequest?.body).toContain('"position_ms":12500');
+  expect(switchRequest?.body).toContain('"observation":1');
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(2.5);
+});
+
+it('keeps the active source when an audio change fails', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+      heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng', default: true }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ error: { code: 'playback_capacity' } }), { status: 503 });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  expect(await screen.findByRole('alert')).toHaveTextContent(/playback limit/i);
+  expect(video).toHaveAttribute('src', '/original.mp4');
+});
