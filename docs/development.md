@@ -131,6 +131,16 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
+The committed media acceptance corpus is generated locally, with no downloads:
+
+```bash
+bash backend/scripts/generate-media-fixtures.sh
+cd backend
+FLIXR_REQUIRE_MEDIA_INTEGRATION=1 go test -tags=media_integration ./playback
+```
+
+Review `backend/testdata/media/manifest.json` after regeneration. Its hashes describe the committed bytes from FFmpeg 8.0.1; a different generator version may preserve the declared streams while changing bytes.
+
 Run the mocked browser matrix after Playwright Chromium is available:
 
 ```bash
