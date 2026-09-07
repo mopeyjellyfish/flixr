@@ -133,7 +133,7 @@ sample_resources() {
       sleep 0.1
       current_cpu="$(awk '/usage_usec/ {print $2}' "$cgroup_root/cpu.stat")"
       current_ns="$(date +%s%N)"
-      cpu_percent="$(awk -v used="$((current_cpu - previous_cpu))" -v elapsed="$((current_ns - previous_ns))" 'BEGIN { if (elapsed > 0) printf "%.1f", 100000000 * used / elapsed; else print "0.0" }')"
+      cpu_percent="$(awk -v used="$((current_cpu - previous_cpu))" -v elapsed="$((current_ns - previous_ns))" 'BEGIN { if (elapsed > 0) printf "%.1f", 100000 * used / elapsed; else print "0.0" }')"
       memory_kib="$(( $(cat "$cgroup_root/memory.current") / 1024 ))"
       printf '%s cpu_percent=%s memory_kib=%s scope=container-cgroup-v2\n' "$(date -u +%FT%TZ)" "$cpu_percent" "$memory_kib" >>"$result_dir/resources.log"
       previous_cpu="$current_cpu"
