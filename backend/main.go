@@ -34,6 +34,13 @@ func main() {
 		fmt.Printf("Flixr %s (%s)\n", version, revision)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "recover-owner" {
+		if err := recoverOwner(os.Args[2:], os.Stdout); err != nil {
+			slog.Error("recover owner", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load Flixr configuration", "err", err)

@@ -26,6 +26,7 @@ var (
 	ErrRateLimited     = errors.New("pin attempts rate limited")
 	ErrHashSaturated   = errors.New("credential hashing saturated")
 	ErrCredentials     = errors.New("invalid credentials")
+	ErrRecovery        = errors.New("owner recovery unavailable")
 )
 
 type Profile struct {
@@ -173,6 +174,59 @@ func (m *Manager) Login(password string) (string, error) {
 	}
 	m.ownerAttempts = 0
 	return m.issueLocked("owner")
+}
+
+// RecoverOwner replaces the claimed owner's password from host-local recovery.
+// It is intentionally unavailable without durable storage: a recovery must
+// survive process interruption and revoke persisted owner sessions atomically.
+func (m *Manager) RecoverOwner(password string) error {
+	if password == "" || m.db == nil {
+		return ErrRecovery
+	}
+	m.mu.Lock()
+	claimed := len(m.ownerHash) > 0
+	m.mu.Unlock()
+	if !claimed {
+		return ErrRecovery
+	}
+	s, err := salt()
+	if err != nil {
+		return fmt.Errorf("generate owner recovery salt: %w", err)
+	}
+	h, err := m.derive(password, s)
+	if err != nil {
+		return err
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin owner recovery: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("UPDATE owner SET password_hash=?,salt=? WHERE id=1", h, s)
+	if err != nil {
+		return fmt.Errorf("replace owner credential: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("replace owner credential: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("replace owner credential: %w", ErrRecovery)
+	}
+	if _, err := tx.Exec("UPDATE sessions SET revoked=1 WHERE subject='owner' AND revoked=0"); err != nil {
+		return fmt.Errorf("revoke owner sessions: %w", err)
+	}
+	if _, err := tx.Exec("INSERT INTO audit_events(action,recorded_at) VALUES('owner_recovered',?)", time.Now().Unix()); err != nil {
+		return fmt.Errorf("audit owner recovery: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit owner recovery: %w", err)
+	}
+	m.mu.Lock()
+	m.ownerHash, m.salt = h, s
+	m.ownerAttempts, m.ownerLockedUntil = 0, time.Time{}
+	m.mu.Unlock()
+	return nil
 }
 func tokenHash(token string) []byte { s := sha256.Sum256([]byte(token)); return s[:] }
 func (m *Manager) issue(subject string) (string, error) {

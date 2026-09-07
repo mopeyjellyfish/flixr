@@ -16,10 +16,7 @@ type Bootstrap struct {
 }
 
 func Load() (Bootstrap, error) {
-	d := os.Getenv("FLIXR_DATA_DIR")
-	if d == "" {
-		d = filepath.Join(".", "flixr-data")
-	}
+	d := DataDir()
 	a := os.Getenv("FLIXR_LISTEN_ADDR")
 	if a == "" {
 		a = "127.0.0.1:8787"
@@ -33,6 +30,13 @@ func Load() (Bootstrap, error) {
 		return Bootstrap{}, err
 	}
 	return Bootstrap{Environment: environment, DataDir: d, ListenAddr: a, TLSCert: os.Getenv("FLIXR_TLS_CERT"), TLSKey: os.Getenv("FLIXR_TLS_KEY"), Demo: demo}, nil
+}
+
+func DataDir() string {
+	if d := os.Getenv("FLIXR_DATA_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(".", "flixr-data")
 }
 
 // Validate rejects incomplete or unreadable TLS configuration before serving.

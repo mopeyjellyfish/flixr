@@ -172,6 +172,36 @@ Never run old and new containers against the same config or segment directory.
 Existing source/demo Compose files continue mounting their previous `/data` volumes
 and explicitly set `FLIXR_DATA_DIR`; no automatic data migration is performed.
 
+### Recover a forgotten owner password
+
+Recovery is a host-local command. It has no HTTP API, needs no network access, and
+requires write access to the existing protected `/config` volume. Stop Flixr first
+so the command can take its data lock. Put the replacement password in a regular
+file readable only by the container user; do not put it in a command line or log.
+
+```sh
+docker compose stop flixr
+docker compose run --rm -T --no-deps \
+  -v "$PWD/owner-password:/run/secrets/owner-password:ro" \
+  flixr recover-owner --password-file /run/secrets/owner-password
+docker compose up -d --wait
+```
+
+The command replaces the password through the normal Argon2 hashing path, records
+an `owner_recovered` audit event in SQLite, and atomically revokes every owner
+browser session. Profiles and their sessions remain available. Remove the temporary
+password file with your normal secret-handling process after a successful recovery.
+If the command reports a failure before success, the database transaction leaves the
+previous credential intact. If the host or command was interrupted and the outcome is
+unknown, try the replacement password first, then the previous password; rerun local
+recovery if neither works. Do not assume an interrupted command rolled back after it
+committed.
+
+For a native install, stop its service and run
+`./flixr recover-owner --password-file /path/to/owner-password`; add
+`--data-dir /path/to/flixr-data` when it differs from `FLIXR_DATA_DIR` or the
+default `./flixr-data`.
+
 ## HTTPS on the LAN
 
 Use a certificate trusted by household devices for the server hostname. Mount its
