@@ -993,7 +993,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	if sqlLimit <= 0 {
 		sqlLimit = -1
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_hdr,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
@@ -1003,7 +1003,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 		var x Item
 		var local, playable, demo int
 		var audio, subtitles, genres string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.HDR, &audio, &subtitles, &genres, &x.AddedAt, &playable, &demo); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.FrameRateMilli, &x.BitDepth, &x.HDR, &audio, &subtitles, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, fmt.Errorf("scan catalog item: %w", err)
 		}
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {

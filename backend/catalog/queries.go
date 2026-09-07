@@ -102,7 +102,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		return Series{}, false
 	}
 	out.Kind, out.LocalOnly, out.Playable, out.Demo = "series", local != 0, playable != 0, demo != 0
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_hdr,audio_json,subtitle_json,series_id,provider_id,year,synopsis,poster,backdrop,season_id,genres_json,added_at,playable,demo FROM catalog_items WHERE series_id=? ORDER BY season_id, id`, seriesID)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,series_id,provider_id,year,synopsis,poster,backdrop,season_id,genres_json,added_at,playable,demo FROM catalog_items WHERE series_id=? ORDER BY season_id, id`, seriesID)
 	if err != nil {
 		return Series{}, false
 	}
@@ -112,7 +112,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		var x Item
 		var local, playable, demo int
 		var audio, subtitles, seasonID, genres string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.HDR, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &seasonID, &genres, &x.AddedAt, &playable, &demo); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.FrameRateMilli, &x.BitDepth, &x.HDR, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &seasonID, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return Series{}, false
 		}
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {

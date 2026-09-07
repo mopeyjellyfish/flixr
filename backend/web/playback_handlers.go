@@ -117,6 +117,8 @@ func playbackFailure(w http.ResponseWriter, err error) {
 		fail(w, http.StatusForbidden, "playback_session_invalid")
 	case errors.Is(err, playback.ErrInvalidCapabilities):
 		fail(w, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, playback.ErrUnknownCapability):
+		fail(w, http.StatusUnprocessableEntity, "playback_capability_unknown")
 	default:
 		fail(w, http.StatusInternalServerError, "playback_failed")
 	}

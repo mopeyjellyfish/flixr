@@ -15,6 +15,7 @@ var (
 	ErrInvalidSettings     = errors.New("playback settings are invalid")
 	ErrRestartRequired     = errors.New("playback setting requires restart")
 	ErrInvalidCapabilities = errors.New("playback capabilities are invalid")
+	ErrUnknownCapability   = errors.New("playback capability is unknown")
 )
 
 // MediaProperties is the path-free media description consumed by the planner.
@@ -72,7 +73,8 @@ type Plan struct {
 
 // PlanFor selects the least expensive compatible path from recorded plain values.
 func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadiness) (Plan, error) {
-	if err := client.Validate(); err != nil {
+	var err error
+	if client, err = client.Normalized(); err != nil {
 		return Plan{}, err
 	}
 	if directCompatible(media, client) {
@@ -108,23 +110,62 @@ func exceedsKnownLimits(media MediaProperties, client ClientCapabilities) bool {
 		media.HDR != "" && len(client.HDR) > 0 && !containsFold(client.HDR, media.HDR)
 }
 
-func (client ClientCapabilities) Validate() error {
+func (client ClientCapabilities) Normalized() (ClientCapabilities, error) {
 	for _, values := range [][]string{client.Containers, client.VideoCodecs, client.VideoProfiles, client.AudioCodecs, client.HDR} {
 		if len(values) > 16 {
-			return ErrInvalidCapabilities
+			return ClientCapabilities{}, ErrInvalidCapabilities
 		}
 		for _, value := range values {
 			if value == "" || len(value) > 64 {
-				return ErrInvalidCapabilities
+				return ClientCapabilities{}, ErrInvalidCapabilities
 			}
 		}
 	}
 	for _, value := range []int{client.MaxWidth, client.MaxHeight, client.MaxFrameRateMilli, client.MaxBitDepth, client.MaxAudioChannels} {
 		if value < 0 || value > 100000000 {
-			return ErrInvalidCapabilities
+			return ClientCapabilities{}, ErrInvalidCapabilities
 		}
 	}
-	return nil
+	var err error
+	if client.Containers, err = normalizeValues(client.Containers, containerNames); err != nil {
+		return ClientCapabilities{}, err
+	}
+	if client.VideoCodecs, err = normalizeValues(client.VideoCodecs, videoCodecNames); err != nil {
+		return ClientCapabilities{}, err
+	}
+	if client.VideoProfiles, err = normalizeValues(client.VideoProfiles, videoProfileNames); err != nil {
+		return ClientCapabilities{}, err
+	}
+	if client.AudioCodecs, err = normalizeValues(client.AudioCodecs, audioCodecNames); err != nil {
+		return ClientCapabilities{}, err
+	}
+	if client.HDR, err = normalizeValues(client.HDR, hdrNames); err != nil {
+		return ClientCapabilities{}, err
+	}
+	return client, nil
+}
+
+// Validate retains the shape-only public check for callers that do not plan media.
+func (client ClientCapabilities) Validate() error { _, err := client.Normalized(); return err }
+
+var (
+	containerNames    = map[string]string{"mp4": "mp4", "mov": "mp4", "m4a": "mp4", "3gp": "mp4", "3g2": "mp4", "mj2": "mp4", "webm": "webm", "matroska": "matroska", "mkv": "matroska"}
+	videoCodecNames   = map[string]string{"h264": "h264", "avc": "h264", "avc1": "h264", "vp9": "vp9", "hevc": "hevc", "h265": "hevc", "mpeg4": "mpeg4", "mpeg2video": "mpeg2video"}
+	videoProfileNames = map[string]string{"baseline": "Baseline", "main": "Main", "high": "High"}
+	audioCodecNames   = map[string]string{"aac": "aac", "mp4a": "aac", "opus": "opus", "mp3": "mp3", "mp2": "mp2"}
+	hdrNames          = map[string]string{"smpte2084": "smpte2084", "arib-std-b67": "arib-std-b67"}
+)
+
+func normalizeValues(values []string, known map[string]string) ([]string, error) {
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		canonical, ok := known[strings.ToLower(strings.TrimSpace(value))]
+		if !ok {
+			return nil, ErrUnknownCapability
+		}
+		normalized = append(normalized, canonical)
+	}
+	return normalized, nil
 }
 
 func directCompatible(media MediaProperties, client ClientCapabilities) bool {

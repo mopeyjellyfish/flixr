@@ -44,3 +44,38 @@ func TestPlanFor(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanForRejectsEachKnownLimitBeforeStreamCopy(t *testing.T) {
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRateMilli: 30000, MaxBitDepth: 8, MaxAudioChannels: 2, HDR: []string{"smpte2084"}}
+	base := MediaProperties{Container: "matroska", VideoCodec: "h264", AudioCodec: "aac", Width: 1920, Height: 1080, FrameRateMilli: 30000, BitDepth: 8, AudioChannels: 2, HDR: "smpte2084"}
+	for name, change := range map[string]func(*MediaProperties){
+		"width": func(m *MediaProperties) { m.Width = 1921 }, "height": func(m *MediaProperties) { m.Height = 1081 },
+		"frame rate": func(m *MediaProperties) { m.FrameRateMilli = 30001 }, "bit depth": func(m *MediaProperties) { m.BitDepth = 9 },
+		"audio channels": func(m *MediaProperties) { m.AudioChannels = 3 }, "hdr": func(m *MediaProperties) { m.HDR = "arib-std-b67" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			media := base
+			change(&media)
+			plan, err := PlanFor(media, client, ServerReadiness{FFmpeg: true})
+			if plan.Kind != Unsupported || !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("plan = %#v, err = %v", plan, err)
+			}
+		})
+	}
+	plan, err := PlanFor(base, client, ServerReadiness{FFmpeg: true})
+	if err != nil || plan.Kind != Remux {
+		t.Fatalf("boundary plan = %#v, err = %v", plan, err)
+	}
+}
+
+func TestClientCapabilitiesNormalizesAliasesAndRejectsUnknownValues(t *testing.T) {
+	client, err := (ClientCapabilities{Containers: []string{"mov"}, VideoCodecs: []string{"avc1"}, VideoProfiles: []string{"high"}, AudioCodecs: []string{"mp4a"}, HDR: []string{"smpte2084"}}).Normalized()
+	if err != nil || client.Containers[0] != "mp4" || client.VideoCodecs[0] != "h264" || client.AudioCodecs[0] != "aac" {
+		t.Fatalf("normalized = %#v, err = %v", client, err)
+	}
+	for _, client := range []ClientCapabilities{{Containers: []string{"unknown"}}, {VideoCodecs: []string{"unknown"}}, {VideoProfiles: []string{"unknown"}}, {AudioCodecs: []string{"unknown"}}, {HDR: []string{"unknown"}}} {
+		if _, err := client.Normalized(); !errors.Is(err, ErrUnknownCapability) {
+			t.Fatalf("error = %v", err)
+		}
+	}
+}

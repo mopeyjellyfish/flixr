@@ -52,6 +52,7 @@ export type ApiErrorCode =
   | 'credential_busy' | 'login_rate_limited'
   | 'ffprobe_unavailable' | 'owner_required' | 'profile_required' | 'request_failed'
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
+  | 'playback_capability_unknown'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
   | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable' | 'metadata_busy'

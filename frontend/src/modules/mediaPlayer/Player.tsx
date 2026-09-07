@@ -1,44 +1,10 @@
 import type Hls from 'hls.js';
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type CatalogItem, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
+import { ApiError, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { screenCoordinator } from '../screenCoordinator/runtime';
-
-async function browserCapabilities(media: CatalogItem): Promise<PlaybackCapabilities> {
-	const probe = document.createElement('video');
-	const mp4 = probe.canPlayType('video/mp4; codecs="avc1.64001f, mp4a.40.2"') !== '';
-  const webm = probe.canPlayType('video/webm; codecs="vp9, opus"') !== '';
-  const nativeHLS = probe.canPlayType('application/vnd.apple.mpegurl') !== '';
-  const mediaSourceHLS = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.64001f, mp4a.40.2"');
-	const audio = media.audio?.[0];
-	const directType = media.container?.split(',').map((value) => value.trim()).includes('mp4')
-		? media.video_codec === 'h264' && audio?.codec === 'aac' && (media.video_profile === 'Baseline' || media.video_profile === 'Main' || media.video_profile === 'High')
-			? 'video/mp4; codecs="avc1.64001f"' : ''
-		: '';
-	let direct = false;
-	if (directType) {
-		const config = { type: 'file' as const, video: { contentType: directType, width: media.width ?? 0, height: media.height ?? 0, bitrate: media.bitrate ?? 0, framerate: (media.frame_rate_milli ?? 0) / 1000 }, audio: { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: String(audio?.channels ?? ''), bitrate: 0, samplerate: 0 } };
-		try {
-			if (navigator.mediaCapabilities) direct = (await navigator.mediaCapabilities.decodingInfo(config)).supported;
-			else direct = probe.canPlayType(directType) !== '';
-		} catch { direct = false; }
-	}
-	return {
-    containers: [...(mp4 ? ['mp4'] : []), ...(webm ? ['webm'] : [])],
-    video_codecs: [...(mp4 ? ['h264'] : []), ...(webm ? ['vp9'] : [])],
-    video_profiles: mp4 ? ['Baseline', 'Main', 'High'] : [],
-    audio_codecs: [...(mp4 ? ['aac'] : []), ...(webm ? ['opus'] : [])],
-		supports_fmp4_hls: nativeHLS || mediaSourceHLS,
-		supports_direct: direct,
-		max_width: direct ? media.width : undefined,
-		max_height: direct ? media.height : undefined,
-		max_frame_rate_milli: direct ? media.frame_rate_milli : undefined,
-		max_bit_depth: direct ? media.bit_depth : undefined,
-		max_audio_channels: direct ? audio?.channels : undefined,
-		hdr: direct && media.hdr ? [media.hdr] : [],
-	};
-}
+import { browserCapabilities } from './capabilities';
 
 export function Player({ catalogID, startPositionMS, active = true, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);

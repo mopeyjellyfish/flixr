@@ -51,6 +51,13 @@ func TestPlaybackPlanAndDirectRangeAreProfileBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := web.NewServer(h, c).Handler()
+	invalid := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["unknown"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`))
+	invalid.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusUnprocessableEntity || !bytes.Contains(invalidResponse.Body.Bytes(), []byte(`"playback_capability_unknown"`)) {
+		t.Fatalf("unknown capability = %d: %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
 	plan := func(token, id string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"`+id+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`))
 		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
