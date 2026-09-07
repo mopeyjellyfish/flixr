@@ -256,6 +256,7 @@ export function ProfileManager({ version = 0 }: { version?: number }) {
 function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; name: string; protected: boolean }; onSaved: () => void; onNotice: (value: string) => void }) {
   const [name, setName] = useState(profile.name);
   const [pin, setPin] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const save = async (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -275,7 +276,11 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
       <label>New PIN<input type="password" value={pin} onChange={(event) => setPin(event.target.value)} /></label>
       <div className="actions">
         <button>Save</button>
-        <button type="button" onClick={() => void api.deleteProfile(profile.id).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to delete profile.'))}>Delete profile</button>
+        <button type="button" disabled={deleting} onClick={() => {
+          if (!window.confirm(`Delete ${profile.name}? This permanently removes this profile's viewing history and My List.`)) return;
+          setDeleting(true);
+          void api.deleteProfile(profile.id).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to delete profile.')).finally(() => setDeleting(false));
+        }}>{deleting ? 'Deleting…' : 'Delete profile'}</button>
         {profile.protected && <button type="button" onClick={() => void api.updateProfile(profile.id, { unprotect: true }).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to remove PIN.'))}>Remove PIN</button>}
       </div>
     </PendingForm>

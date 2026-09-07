@@ -68,3 +68,21 @@ func TestPINChangeRevokesProfileSessions(t *testing.T) {
 		t.Fatal("PIN change left prior session valid")
 	}
 }
+
+func TestDeleteProfileFailureKeepsProfileAndSession(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	m, err := Open(db)
+	require.NoError(t, err)
+	p, err := m.CreateProfile("Ada", "")
+	require.NoError(t, err)
+	token, err := m.Select(p.ID, "")
+	require.NoError(t, err)
+	_, err = db.Exec("CREATE TRIGGER fail_profile_delete BEFORE DELETE ON profiles BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+	require.NoError(t, err)
+	require.Error(t, m.DeleteProfile(p.ID))
+	if _, ok := m.Profile(token); !ok {
+		t.Fatal("failed deletion revoked session")
+	}
+}
