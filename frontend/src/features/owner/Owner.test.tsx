@@ -51,6 +51,23 @@ describe('owner operations', () => {
     expect(screen.queryByText(/token-/i)).not.toBeInTheDocument();
   });
 
+  it('keeps an unlocked library root editable when the other root is environment-managed', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '/media/tv' }));
+      if (path.endsWith('/owner/settings')) return new Response(JSON.stringify({ settings: [
+        { key: 'library.films_root', mutable: false }, { key: 'library.tv_root', mutable: true },
+      ] }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ scan: {}, configured: false, screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    expect(await screen.findByDisplayValue('/media/films')).toBeDisabled();
+    expect(screen.getByDisplayValue('/media/tv')).toBeEnabled();
+    expect(screen.getByRole('button', { name: /save roots/i })).toBeEnabled();
+  });
+
   it('shows the explicit initial scan state', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);

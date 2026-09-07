@@ -3,7 +3,6 @@ package web
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,7 +59,7 @@ func TestSettingsInventoryRedactsSecretsAndMarksEnvironmentLocks(t *testing.T) {
 	}
 }
 
-func TestEnvironmentLockedRootRejectsAtomicUpdate(t *testing.T) {
+func TestEnvironmentLockedRootAllowsOtherRootAndRejectsLockedChange(t *testing.T) {
 	house, err := household.New()
 	if err != nil {
 		t.Fatal(err)
@@ -70,19 +69,37 @@ func TestEnvironmentLockedRootRejectsAtomicUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	library := catalog.New()
+	filmsDir, tvDir, nextTV := filepath.Join(t.TempDir(), "films"), filepath.Join(t.TempDir(), "tv"), filepath.Join(t.TempDir(), "next-tv")
+	for _, dir := range []string{filmsDir, tvDir, nextTV} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := library.SetRoots(filmsDir, tvDir); err != nil {
+		t.Fatal(err)
+	}
 	s := NewServerWithConfiguration(house, library, playback.NewDirectManager(), map[string]bool{"library.films_root": true})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/owner/roots", nil)
-	r.Header.Set("Content-Type", "application/json")
-	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
-	r.Body = io.NopCloser(strings.NewReader(`{"films":"/media/films","tv":"/media/tv"}`))
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	request := func(films, tv string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/owner/roots", strings.NewReader(fmt.Sprintf(`{"films":%q,"tv":%q}`, films, tv)))
+		r.Header.Set("Content-Type", "application/json")
+		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	if w := request(filmsDir, nextTV); w.Code != http.StatusOK {
+		t.Fatalf("unlocked root update = %d: %s", w.Code, w.Body.String())
 	}
 	films, tv := library.Roots()
-	if films != "" || tv != "" {
-		t.Fatalf("partial root update: %q %q", films, tv)
+	if films != filmsDir || tv != nextTV {
+		t.Fatalf("roots = %q %q", films, tv)
+	}
+	if w := request(filepath.Join(t.TempDir(), "other-films"), tvDir); w.Code != http.StatusConflict {
+		t.Fatalf("locked root update = %d: %s", w.Code, w.Body.String())
+	}
+	films, tv = library.Roots()
+	if films != filmsDir || tv != nextTV {
+		t.Fatalf("locked update changed roots: %q %q", films, tv)
 	}
 }
 

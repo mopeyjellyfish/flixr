@@ -138,7 +138,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked.has('library.films_root') || locked.has('library.tv_root')} /><ScanPanel scan={scan} onStart={startScan} /></div>
+            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked} /><ScanPanel scan={scan} onStart={startScan} /></div>
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -190,13 +190,13 @@ function ReadinessControls({ readiness, onRecheck }: { readiness: Readiness; onR
   );
 }
 
-function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit, locked }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void; locked: boolean }) {
+function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit, locked }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void; locked: Set<string> }) {
   return (
     <PendingForm onSubmit={onSubmit}>
       <h2>Library roots</h2>
-      {locked && <p>Managed by the server environment.</p>}<label>Films root<input disabled={locked} value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
-      <label>TV root<input disabled={locked} value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
-      <button className="primary" disabled={locked}>Save roots</button>
+      {(locked.has('library.films_root') || locked.has('library.tv_root')) && <p>Environment-managed fields are read-only.</p>}<label>Films root<input disabled={locked.has('library.films_root')} value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
+      <label>TV root<input disabled={locked.has('library.tv_root')} value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
+      <button className="primary" disabled={locked.has('library.films_root') && locked.has('library.tv_root')}>Save roots</button>
     </PendingForm>
   );
 }

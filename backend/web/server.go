@@ -514,11 +514,16 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		Films string `json:"films"`
 		TV    string `json:"tv"`
 	}
-	if s.settingsLocks["library.films_root"] || s.settingsLocks["library.tv_root"] {
+	if !decode(r, &v) {
+		fail(w, 400, "invalid_roots")
+		return
+	}
+	films, tv := s.catalog.Roots()
+	if (s.settingsLocks["library.films_root"] && v.Films != films) || (s.settingsLocks["library.tv_root"] && v.TV != tv) {
 		fail(w, http.StatusConflict, "environment_locked")
 		return
 	}
-	if !decode(r, &v) || s.catalog.SetRoots(v.Films, v.TV) != nil {
+	if s.catalog.SetRoots(v.Films, v.TV) != nil {
 		fail(w, 400, "invalid_roots")
 		return
 	}
