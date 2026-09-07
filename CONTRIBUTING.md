@@ -5,7 +5,9 @@ see [SUPPORT.md](SUPPORT.md); for security vulnerabilities, see [SECURITY.md](SE
 
 ## Setup and checks
 
-Use Go 1.27.1, Node.js 22 with npm, and FFmpeg/ffprobe. From a fresh checkout:
+Use Go 1.27.1, Node.js 22.19 or newer, or Node.js 24.10 or newer, with npm,
+and FFmpeg/ffprobe. The root release tooling does not support Node.js 23; CI runs
+its release check on Node.js 24. From a fresh checkout:
 
 ```sh
 npm --prefix frontend ci
