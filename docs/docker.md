@@ -7,6 +7,7 @@ checkout is needed at runtime. Images target Linux AMD64 and ARM64.
 The GHCR image currently requires registry access. If pulling it returns an access
 error, use the source-build setup below. Package visibility and anonymous-pull
 verification are tracked in [#91](https://github.com/mopeyjellyfish/flixr/issues/91).
+See the [public-release verification procedure](publication.md) for the remaining checks.
 
 ## Start
 
