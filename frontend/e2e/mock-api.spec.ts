@@ -318,7 +318,7 @@ test('bright artwork keeps the shared hero scrim above artwork and below content
 async function mockMediaSource(page: Page) {
   // These tests drive media events explicitly. Native decoding is covered by production acceptance.
   await page.context().addInitScript(() => {
-    Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, set() {} });
+    Object.defineProperty(HTMLMediaElement.prototype, 'src', { configurable: true, set(value) { document.documentElement.dataset.mockMediaSource = String(value); } });
   });
 }
 test('mocked playback planning and capacity error states', async ({ page }, testInfo) => {
@@ -392,8 +392,12 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
   await mock(page, handler);
 
   await page.goto('/play/film-1');
-  await expect(page.locator('video')).toBeVisible();
-  await page.locator('video').dispatchEvent('waiting');
+  const firstVideo = page.locator('video');
+  await expect(firstVideo).toBeVisible();
+  // The video element mounts before the playback-plan request finishes. Wait for
+  // its source so this event exercises media buffering, not plan initialization.
+  await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
+  await firstVideo.dispatchEvent('waiting');
   await expect(page.getByRole('status')).toContainText(/buffering/i);
   const seekedTo = await page.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
