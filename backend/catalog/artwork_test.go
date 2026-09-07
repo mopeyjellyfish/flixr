@@ -127,9 +127,11 @@ func TestArtworkSizedRejectsUnsafeDimensionsAndCancelledWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	data, _, err = c.ArtworkSized(ctx, "film", "poster", 200)
-	if !errors.Is(err, context.Canceled) || !bytes.Equal(data, unsafe) {
-		t.Fatalf("cancel = %v", err)
+	for _, width := range []int{0, 200} {
+		data, _, err = c.ArtworkSized(ctx, "film", "poster", width)
+		if !errors.Is(err, context.Canceled) || !bytes.Equal(data, unsafe) {
+			t.Fatalf("cancel at width %d = %v", width, err)
+		}
 	}
 }
 

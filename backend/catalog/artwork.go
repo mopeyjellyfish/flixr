@@ -182,6 +182,9 @@ func (c *Catalog) Artwork(id, kind string) ([]byte, string, error) {
 // durable; any derivative failure falls back to the original cached artwork.
 func (c *Catalog) ArtworkSized(ctx context.Context, id, kind string, width int) ([]byte, string, error) {
 	original, contentType, err := c.Artwork(id, kind)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return original, contentType, cancelErr
+	}
 	if err != nil || width <= 0 {
 		return original, contentType, err
 	}
@@ -247,6 +250,9 @@ func (c *Catalog) ArtworkSized(ctx context.Context, id, kind string, width int) 
 	case <-ctx.Done():
 		return original, contentType, ctx.Err()
 	case completed := <-result:
+		if err := ctx.Err(); err != nil {
+			return original, contentType, err
+		}
 		if completed.Err != nil {
 			return original, contentType, nil
 		}
