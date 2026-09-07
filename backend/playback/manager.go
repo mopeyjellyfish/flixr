@@ -27,11 +27,13 @@ var (
 )
 
 type ManagerConfig struct {
-	Settings     Settings
-	FS           afero.Fs
-	DB           *sqlite.DB
-	InputBase    string
-	Executor     Executor
+	Settings  Settings
+	FS        afero.Fs
+	DB        *sqlite.DB
+	InputBase string
+	Executor  Executor
+	// Deprecated: progress is persisted by authenticated observation handlers.
+	// Teardown never writes cached positions. This callback is not invoked.
 	SaveProgress func(profileID, catalogID string, positionMS int64) error
 	ManifestWait time.Duration
 }
@@ -110,7 +112,6 @@ type Manager struct {
 	db           *sqlite.DB
 	files        afero.Afero
 	inputBase    string
-	saveProgress func(profileID, catalogID string, positionMS int64) error
 	executor     Executor
 	manifestWait time.Duration
 	sessions     map[string]Session
@@ -169,7 +170,6 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		executor:     config.Executor,
 		manifestWait: config.ManifestWait,
 		sessions:     map[string]Session{},
-		saveProgress: config.SaveProgress,
 		generations:  map[string]*generation{},
 		inputs:       map[string]inputAuthority{},
 		pendingJobs:  map[string]struct{}{},
@@ -211,12 +211,16 @@ func CleanupOrphans(fs afero.Fs, segmentDir string) error {
 	return nil
 }
 
-func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64) (Session, error) {
+func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
 	if profileID == "" || catalogID == "" {
 		return Session{}, ErrSessionInvalid
 	}
 	if positionMS < 0 {
 		positionMS = 0
+	}
+	progress := int64(0)
+	if len(progressGeneration) > 0 {
+		progress = progressGeneration[0]
 	}
 	now := time.Now()
 	sessionID, err := randomToken()
@@ -224,7 +228,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		return Session{}, err
 	}
 	if plan.Kind == Direct {
-		session := Session{ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, ExpiresAt: now.Add(directSessionTTL)}
+		session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, ExpiresAt: now.Add(directSessionTTL)}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if m.closed {
@@ -249,7 +253,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
-		session := Session{ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
+		session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
 		existing.leases[session.ID] = session.ExpiresAt
 		m.sessions[session.ID] = session
 		if authority, ok := m.inputs[existing.input]; ok {
@@ -312,7 +316,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		_ = m.files.RemoveAll(dir)
 		return Session{}, fmt.Errorf("start FFmpeg: %w", err)
 	}
-	session := Session{ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
+	session := Session{ProgressGeneration: progress, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
 	gen := &generation{
 		id: generationID, jobKey: jobKey, kind: plan.Kind, startMS: positionMS, dir: dir,
 		input: inputToken, leases: map[string]time.Time{session.ID: session.ExpiresAt},
@@ -533,7 +537,7 @@ func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) 
 	}
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
-	replacement, err := m.Create(profileID, catalogID, plan, positionMS)
+	replacement, err := m.Create(profileID, catalogID, plan, positionMS, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}

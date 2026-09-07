@@ -173,6 +173,36 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if position, err := house.Position(oneToken, "film"); err != nil || position != 1234 {
 		t.Fatalf("position = %d, %v", position, err)
 	}
+	// A delayed seek must not move either durable progress or the live HLS lease.
+	for _, event := range []struct{ route, body string }{{"heartbeat", `{"position_ms":3000,"observation":3}`}, {"seek", `{"position_ms":1000,"observation":2}`}} {
+		request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/"+event.route, bytes.NewBufferString(event.body))
+		request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != 200 {
+			t.Fatalf("ordered %s: %d %s", event.route, response.Code, response.Body)
+		}
+	}
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 3000 {
+		t.Fatalf("delayed seek position=%d %v", position, err)
+	}
+	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 3000 {
+		t.Fatalf("delayed seek changed lease: %+v", current)
+	}
+	if err := house.SetWatched(one.ID, []string{"film"}, true); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":1000,"observation":4}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		t.Fatalf("stale manual seek: %d", response.Code)
+	}
+	var completed int
+	if err := db.QueryRow(`SELECT completed FROM progress WHERE profile_id=? AND catalog_id='film'`, one.ID).Scan(&completed); err != nil || completed != 1 {
+		t.Fatalf("seek undid manual watched: %d %v", completed, err)
+	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/stop", nil)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()

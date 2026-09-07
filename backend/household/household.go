@@ -423,36 +423,6 @@ func (m *Manager) Progress(session, catalogID string, position int64) error {
 	return m.ProgressForProfile(m.subject(session), catalogID, position)
 }
 
-// ProgressForProfile persists progress when a profile-bound playback lease
-// expires without an HTTP session cookie.
-func (m *Manager) ProgressForProfile(profileID, catalogID string, position int64) error {
-	return m.RecordProgress(profileID, catalogID, position, time.Now().UnixMilli(), false)
-}
-
-// RecordProgress preserves a newer client observation when delayed requests arrive.
-func (m *Manager) RecordProgress(profileID, catalogID string, position, observedAt int64, completed bool) error {
-	m.mu.Lock()
-	_, ok := m.profiles[profileID]
-	m.mu.Unlock()
-	if !ok || profileID == "" || catalogID == "" || position < 0 {
-		return ErrCredentials
-	}
-	if m.db == nil {
-		return nil
-	}
-	if observedAt <= 0 {
-		observedAt = time.Now().UnixMilli()
-	}
-	completedAt := int64(0)
-	if completed {
-		completedAt = observedAt
-	}
-	_, err := m.db.Exec(`INSERT INTO progress(profile_id,catalog_id,position_ms,updated_at,completed,completed_at) VALUES(?,?,?,?,?,?)
-		ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms,updated_at=excluded.updated_at,completed=excluded.completed,completed_at=excluded.completed_at
-		WHERE excluded.updated_at > progress.updated_at`, profileID, catalogID, position, observedAt, boolInt(completed), completedAt)
-	return err
-}
-
 // SetWatched applies one explicit profile action atomically across its items.
 func (m *Manager) SetWatched(profileID string, catalogIDs []string, watched bool) error {
 	if profileID == "" || len(catalogIDs) == 0 || m.db == nil {
@@ -472,7 +442,7 @@ func (m *Manager) SetWatched(profileID string, catalogIDs []string, watched bool
 		if watched {
 			position, completed = 1<<62, 1
 		}
-		if _, err := tx.Exec(`INSERT INTO progress(profile_id,catalog_id,position_ms,updated_at,completed,completed_at) VALUES(?,?,?,?,?,?) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms,updated_at=excluded.updated_at,completed=excluded.completed,completed_at=excluded.completed_at`, profileID, id, position, now, completed, map[bool]int64{true: now, false: 0}[watched]); err != nil {
+		if _, err := tx.Exec(`INSERT INTO progress(profile_id,catalog_id,position_ms,updated_at,completed,completed_at,generation) VALUES(?,?,?,?,?,?,1) ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms,updated_at=excluded.updated_at,completed=excluded.completed,completed_at=excluded.completed_at,generation=progress.generation+1,observation=0`, profileID, id, position, now, completed, map[bool]int64{true: now, false: 0}[watched]); err != nil {
 			return fmt.Errorf("save watched state: %w", err)
 		}
 	}
@@ -486,21 +456,23 @@ func boolInt(value bool) int {
 	return 0
 }
 func (m *Manager) Position(session, catalogID string) (int64, error) {
+	position, _, err := m.ProgressState(session, catalogID)
+	return position, err
+}
+
+// ProgressState reads position and its legacy write token in one snapshot.
+func (m *Manager) ProgressState(session, catalogID string) (int64, int64, error) {
 	id := m.subject(session)
 	if id == "" || id == "owner" {
-		return 0, ErrCredentials
+		return 0, 0, ErrCredentials
 	}
 	if m.db == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
-	var p int64
-	var completed int
-	err := m.db.QueryRow("SELECT position_ms,completed FROM progress WHERE profile_id=? AND catalog_id=?", id, catalogID).Scan(&p, &completed)
+	var position, generation int64
+	err := m.db.QueryRow(`SELECT CASE WHEN completed=1 THEN 0 ELSE position_ms END,generation FROM progress WHERE profile_id=? AND catalog_id=?`, id, catalogID).Scan(&position, &generation)
 	if err == sql.ErrNoRows {
-		return 0, nil
+		return 0, 0, nil
 	}
-	if err == nil && completed != 0 {
-		return 0, nil
-	}
-	return p, err
+	return position, generation, err
 }

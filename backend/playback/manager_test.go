@@ -181,7 +181,7 @@ func TestManagerEnforcesConcurrencyAndSeekWindow(t *testing.T) {
 func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 	manager, executor := testManager(t, nil)
 	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
-	first, err := manager.Create("profile-a", "film-1", plan, 0)
+	first, err := manager.Create("profile-a", "film-1", plan, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +192,9 @@ func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 	replacement, err := manager.Seek(first.ID, "profile-a", 90_000)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if replacement.ProgressGeneration != 7 {
+		t.Fatalf("seek lost progress generation: %d", replacement.ProgressGeneration)
 	}
 	if replacement.GenerationID == first.GenerationID || len(executor.processes) != 2 {
 		t.Fatal("out-of-window seek did not create a replacement generation")

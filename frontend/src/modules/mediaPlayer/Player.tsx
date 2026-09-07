@@ -27,6 +27,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
   const playback = useRef<PlaybackPlan | null>(null);
+  const observation = useRef(0);
   const initializingPosition = useRef(false);
   const finalizing = useRef(false);
   const autoStart = useRef(startPositionMS !== undefined);
@@ -75,7 +76,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     if (!plan || finalizing.current) return;
     const positionMs = currentPosition();
     try {
-      await api.playbackHeartbeat(plan.session_id, positionMs, ended);
+      await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
     } catch (error: unknown) {
       playback.current = null;
       dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
@@ -89,10 +90,11 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
       if (!active) { void api.playbackStop(initial.session_id); return; }
       let plan = initial;
       playback.current = initial;
+      observation.current = 0;
       if (startPositionMS !== undefined) {
         plan = initial.plan.kind === 'direct'
           ? { ...initial, resume_ms: startPositionMS }
-          : await api.playbackSeek(initial.session_id, startPositionMS);
+          : await api.playbackSeek(initial.session_id, startPositionMS, ++observation.current);
       }
       if (!active) return;
       void attach(plan);
@@ -105,7 +107,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     const pageHide = () => {
       const plan = playback.current;
       if (!plan || finalizing.current) return;
-      const body = new Blob([JSON.stringify({ position_ms: currentPosition(), observed_at: Date.now() })], { type: 'application/json' });
+      const body = new Blob([JSON.stringify({ position_ms: currentPosition(), observation: ++observation.current })], { type: 'application/json' });
       navigator.sendBeacon(plan.heartbeat_url, body);
     };
     window.addEventListener('pagehide', pageHide);
@@ -118,7 +120,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
       hls.current = null;
       const plan = playback.current;
       if (plan && !finalizing.current) {
-        void api.playbackHeartbeat(plan.session_id, currentPosition()).catch(() => undefined).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
+        void api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined).then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
   }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
@@ -130,7 +132,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     if (plan.plan.kind === 'direct') { element.currentTime = target / 1000; return; }
     const version = sourceVersion.current;
     try {
-      const updated = await api.playbackSeek(plan.session_id, target);
+      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
       if (version !== sourceVersion.current || !video.current) return;
       if (updated.media_url !== plan.media_url || updated.session_id !== plan.session_id) {
         autoStart.current = !element.paused;
@@ -164,7 +166,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     if (plan) {
       try {
         // A failed progress write must not leave an FFmpeg session running.
-        await api.playbackHeartbeat(plan.session_id, currentPosition()).catch(() => undefined);
+        await api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
         await api.playbackStop(plan.session_id);
       } catch {
         // The durable progress write is best-effort during an explicit exit.
@@ -175,10 +177,11 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
 
   const seeked = async () => {
     const plan = playback.current;
-    if (!plan || plan.plan.kind === 'direct') return;
+    if (!plan) return;
+    if (plan.plan.kind === 'direct') { await heartbeat(); return; }
     const target = currentPosition();
     try {
-      const updated = await api.playbackSeek(plan.session_id, target);
+      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
       if (updated.session_id !== plan.session_id || updated.media_url !== plan.media_url) void attach(updated);
     } catch (error: unknown) {
       dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });

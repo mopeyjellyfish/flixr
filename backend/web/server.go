@@ -450,15 +450,16 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		p, e := s.house.Position(s.session(r), r.PathValue("id"))
+		p, generation, e := s.house.ProgressState(s.session(r), r.PathValue("id"))
 		if e != nil {
 			fail(w, 500, "progress_failed")
 			return
 		}
-		write(w, 200, map[string]int64{"position_ms": p})
+		write(w, 200, map[string]int64{"position_ms": p, "generation": generation})
 		return
 	}
 	var v struct {
+		Generation int64 `json:"generation"`
 		Position   int64 `json:"position_ms"`
 		ObservedAt int64 `json:"observed_at"`
 	}
@@ -467,7 +468,11 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
-	if e := s.house.RecordProgress(profile.ID, r.PathValue("id"), v.Position, v.ObservedAt, false); e != nil {
+	if e := s.house.RecordProgress(profile.ID, r.PathValue("id"), v.Position, v.ObservedAt, false, v.Generation); e != nil {
+		if errors.Is(e, household.ErrProgressConflict) {
+			fail(w, http.StatusConflict, "progress_conflict")
+			return
+		}
 		fail(w, 500, "progress_failed")
 		return
 	}
