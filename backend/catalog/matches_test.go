@@ -26,10 +26,14 @@ func (p ownerMatchProvider) Candidates(context.Context, string, string, string, 
 	return []catalog.Candidate{{Provider: "tmdb", ID: "42", Title: "The Right Film", Year: 2024, Confidence: 1}}, nil
 }
 func (p ownerMatchProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
-	return catalog.Enrichment{ProviderID: "42", Year: 2024, Synopsis: "owner choice", Poster: "/poster"}, nil
+	return catalog.Enrichment{ProviderID: "42", Year: 2024, Synopsis: "owner choice", Poster: "/poster", Backdrop: "/backdrop"}, nil
 }
 func (p ownerMatchProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
-	return catalog.Artwork{Bytes: []byte(p.poster), ContentType: "image/jpeg"}, nil
+	bytes := p.poster
+	if bytes == "" {
+		bytes = "image"
+	}
+	return catalog.Artwork{Bytes: []byte(bytes), ContentType: "image/jpeg"}, nil
 }
 
 func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
@@ -51,7 +55,7 @@ func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
 		t.Fatalf("candidates = %#v, %v", candidates, err)
 	}
 	matched, err := c.Match(context.Background(), "film", queue[0].ID, "42", "en", "GB")
-	if err != nil || !matched.OwnerMatch || matched.ProviderID != "42" || matched.Language != "en" || matched.Region != "GB" {
+	if err != nil || !matched.OwnerMatch || matched.ProviderID != "42" || matched.Language != "en" || matched.Region != "GB" || matched.Poster == "" || matched.Backdrop == "" {
 		t.Fatalf("match = %#v, %v", matched, err)
 	}
 	writeMedia(t, filepath.Join(films, "Other.mp4"))
@@ -183,8 +187,12 @@ func TestOwnerSeriesMatchSurvivesRestart(t *testing.T) {
 	if series.ID == "" {
 		t.Fatal("missing series target")
 	}
-	if _, err := c.Match(context.Background(), "series", series.ID, "42", "en", "GB"); err != nil {
-		t.Fatal(err)
+	matched, err := c.Match(context.Background(), "series", series.ID, "42", "en", "GB")
+	if err != nil || matched.Poster == "" || matched.Backdrop == "" {
+		t.Fatalf("series match = %#v, %v", matched, err)
+	}
+	if image, _, err := c.Artwork(series.ID, "poster"); err != nil || len(image) == 0 {
+		t.Fatalf("series poster = %q, %v", image, err)
 	}
 	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
 		return catalog.MediaProperties{}, nil
@@ -194,7 +202,7 @@ func TestOwnerSeriesMatchSurvivesRestart(t *testing.T) {
 	}
 	found := false
 	for _, item := range reopened.MetadataTargets() {
-		if item.ID == series.ID && item.OwnerMatch && item.ProviderID == "42" {
+		if item.ID == series.ID && item.OwnerMatch && item.ProviderID == "42" && item.Poster != "" && item.Backdrop != "" {
 			found = true
 		}
 	}

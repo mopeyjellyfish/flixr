@@ -101,8 +101,8 @@ func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, reg
 	if err != nil {
 		return Item{}, err
 	}
-	c.publishMatchArtwork(kind, id, enrichment.ProviderID, artwork)
-	return matched, nil
+	c.publishMatchArtwork(kind, id, enrichment.ProviderID, language, region, artwork)
+	return c.metadataResult(kind, id, matched), nil
 }
 
 func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) map[string]Artwork {
@@ -124,14 +124,14 @@ func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) 
 	return out
 }
 
-func (c *Catalog) publishMatchArtwork(kind, id, providerID string, artwork map[string]Artwork) {
+func (c *Catalog) publishMatchArtwork(kind, id, providerID, language, region string, artwork map[string]Artwork) {
 	if len(artwork) == 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	item, ok := c.metadataTarget(kind, id)
-	if !ok || !item.OwnerMatch || item.ProviderID != providerID {
+	if !ok || !item.OwnerMatch || item.ProviderID != providerID || item.Language != language || item.Region != region {
 		return
 	}
 	for imageKind, art := range artwork {
@@ -157,6 +157,15 @@ func (c *Catalog) publishMatchArtwork(kind, id, providerID string, artwork map[s
 	c.series[id] = series
 }
 
+func (c *Catalog) metadataResult(kind, id string, fallback Item) Item {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if item, ok := c.metadataTarget(kind, id); ok {
+		return publicMetadataItem(item)
+	}
+	return fallback
+}
+
 func (c *Catalog) updateArtworkReferences(kind string, item Item) error {
 	if c.db == nil {
 		return nil
@@ -180,7 +189,7 @@ func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
 	}
 	if kind == "series" {
 		series, ok := c.series[id]
-		return Item{ID: series.ID, Title: series.Title, Kind: "series"}, ok
+		return Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}, ok
 	}
 	return Item{}, false
 }
