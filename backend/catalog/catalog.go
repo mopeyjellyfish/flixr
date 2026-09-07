@@ -219,6 +219,7 @@ type Catalog struct {
 	derivativeBytes   int64
 	derivativeCount   int
 	derivativeReady   bool
+	refreshPreviews   map[string]refreshPreview
 }
 
 func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
@@ -228,7 +229,7 @@ func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
 }
 
 func New() *Catalog {
-	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, prober: newFFprobe(), fs: afero.NewOsFs()}
+	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: newFFprobe(), fs: afero.NewOsFs()}
 }
 
 // Open uses the production ffprobe prober and OS-backed Afero filesystem.
@@ -244,7 +245,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if prober == nil || fs == nil {
 		return nil, errors.New("catalog prober and filesystem are required")
 	}
-	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, prober: prober, provider: NewTMDB(nil), fs: fs}
+	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: prober, provider: NewTMDB(nil), fs: fs}
 	if db == nil {
 		return c, nil
 	}

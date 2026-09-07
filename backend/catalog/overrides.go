@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type MetadataField struct {
@@ -19,6 +20,14 @@ type MetadataField struct {
 type MetadataEdit struct {
 	Fields []MetadataField `json:"fields"`
 }
+type refreshPreview struct {
+	edit     MetadataEdit
+	artwork  map[string]Artwork
+	expected Item
+	expires  time.Time
+}
+
+func refreshKey(kind, id string) string { return kind + ":" + id }
 
 var editableMetadataFields = map[string]bool{"title": true, "synopsis": true, "year": true, "poster": true, "backdrop": true, "tags": true, "content_rating": true}
 
@@ -197,11 +206,17 @@ func (c *Catalog) applyLockedFields(kind, id string, item *Item) {
 }
 
 func (c *Catalog) RefreshPreview(ctx context.Context, kind, id string) ([]MetadataField, error) {
-	edit, _, _, err := c.refreshEdit(ctx, kind, id)
+	edit, artwork, expected, err := c.refreshEdit(ctx, kind, id)
 	if err != nil {
 		return nil, err
 	}
-	return c.PreviewMetadata(kind, id, edit)
+	fields, err := c.PreviewMetadata(kind, id, edit)
+	if err == nil {
+		c.mu.Lock()
+		c.refreshPreviews[refreshKey(kind, id)] = refreshPreview{edit, artwork, expected, time.Now().Add(time.Minute)}
+		c.mu.Unlock()
+	}
+	return fields, err
 }
 
 func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdit, map[string]Artwork, Item, error) {
@@ -244,9 +259,19 @@ func refreshEdit(id string, enrichment Enrichment, artwork map[string]Artwork) M
 }
 
 func (c *Catalog) Refresh(ctx context.Context, kind, id string) (Item, error) {
-	edit, artwork, expected, err := c.refreshEdit(ctx, kind, id)
-	if err != nil {
-		return Item{}, err
+	c.mu.Lock()
+	staged, ok := c.refreshPreviews[refreshKey(kind, id)]
+	if ok {
+		delete(c.refreshPreviews, refreshKey(kind, id))
+	}
+	c.mu.Unlock()
+	edit, artwork, expected := staged.edit, staged.artwork, staged.expected
+	var err error
+	if !ok || time.Now().After(staged.expires) {
+		edit, artwork, expected, err = c.refreshEdit(ctx, kind, id)
+		if err != nil {
+			return Item{}, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return Item{}, err
