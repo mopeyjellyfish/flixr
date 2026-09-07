@@ -30,6 +30,7 @@ export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
   const [password, setPassword] = useState('');
   const [films, setFilms] = useState(initialRoots?.films ?? '');
   const [tv, setTV] = useState(initialRoots?.tv ?? '');
+  const [tmdbToken, setTMDBToken] = useState('');
   const [name, setName] = useState('');
   const [pin, setPin] = useState('');
   const [createdProfile, setCreatedProfile] = useState<Profile>();
@@ -65,14 +66,15 @@ export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
     setBusy(true);
     try {
       await api.roots(films, tv);
+      if (tmdbToken.trim()) await api.saveTMDBToken(tmdbToken);
       if (!readiness.ffprobe) {
         setNotice('Libraries saved. ffprobe is unavailable, so scanning will wait. Direct play still works, and you can start a scan later after installing FFmpeg tools.');
       } else {
-        void api.scan().catch((cause: unknown) => setNotice(cause instanceof ApiError ? `Libraries saved. ${cause.message} You can start a scan later from owner settings.` : 'Libraries saved, but Flixr could not start a scan. You can start one later from owner settings.'));
+        void api.scan().then(() => { if (tmdbToken.trim()) setNotice('Libraries saved. TMDB credential verified, and metadata enrichment is running.'); }).catch((cause: unknown) => setNotice(cause instanceof ApiError ? `Libraries saved. ${cause.message} You can start a scan later from owner settings.` : 'Libraries saved, but Flixr could not start a scan. You can start one later from owner settings.'));
       }
       setStep('profile');
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : 'Unable to save library roots.');
+      setError(cause instanceof ApiError ? cause.message : 'Unable to save libraries or metadata credential.');
     } finally {
       setBusy(false);
     }
@@ -109,7 +111,7 @@ export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
         <p>{step === 'secure' ? 'Three quick steps. No Flixr account, cloud connection, or metadata provider is required.' : step === 'libraries' ? 'Choose folders on this server now, or start with a clean slate and add them later.' : 'Profiles stay in your home. A PIN is optional.'}</p>
       </div>
       {step === 'secure' && <><Readiness readiness={readiness} /><form onSubmit={claim} aria-busy={busy}><p className="setup-token-help">The setup token is shown in the server console and is never exposed by status.</p><label>Setup token<input required autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your server" /></label><label>Owner password<input required minLength={8} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Create a private password" /></label>{error && <p role="alert">{error}</p>}<button className="primary" disabled={busy}>Secure this server →</button></form></>}
-      {step === 'libraries' && <form onSubmit={saveLibraries} aria-busy={busy}><label>Films library<input value={films} onChange={(event) => setFilms(event.target.value)} placeholder="/media/films" /></label><label>TV library<input value={tv} onChange={(event) => setTV(event.target.value)} placeholder="/media/tv" /></label><p className="setup-note">Your folders remain local. Metadata is optional and can be configured later.</p>{error && <p role="alert">{error}</p>}<div className="setup-actions"><button className="primary" disabled={busy}>Save libraries</button><button type="button" disabled={busy} onClick={() => { setError(''); setNotice(''); setStep('profile'); }}>Skip for now</button></div></form>}
+      {step === 'libraries' && <form onSubmit={saveLibraries} aria-busy={busy}><label>Films library<input value={films} onChange={(event) => setFilms(event.target.value)} placeholder="/media/films" /></label><label>TV library<input value={tv} onChange={(event) => setTV(event.target.value)} placeholder="/media/tv" /></label><label>TMDB API Read Access Token (optional)<input type="password" value={tmdbToken} onChange={(event) => setTMDBToken(event.target.value)} autoComplete="new-password" /></label><p className="setup-note"><a href="https://www.themoviedb.org/settings/api">Get a TMDB API Read Access Token</a> for artwork, accurate titles, and descriptions. Flixr verifies it before saving. You can leave this empty and configure it later.</p>{error && <p role="alert">{error}</p>}<div className="setup-actions"><button className="primary" disabled={busy}>Save libraries</button><button type="button" disabled={busy} onClick={() => { setError(''); setNotice(''); setStep('profile'); }}>Skip for now</button></div></form>}
       {step === 'profile' && <form onSubmit={createProfile} aria-busy={busy}>{notice && <p role="status">{notice}</p>}{createdProfile && <p role="status">Profile created. Retry to enter Flixr.</p>}<label>Name<input required disabled={Boolean(createdProfile)} value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label>PIN (optional)<input disabled={Boolean(createdProfile)} type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} placeholder="For a little privacy" /></label>{error && <p role="alert">{error}</p>}<button className="primary" disabled={busy}>{createdProfile ? 'Retry entering Flixr →' : 'Create profile and enter Flixr →'}</button></form>}
       <p className="setup-promises"><span><b>✓</b> Stays on your LAN</span><span><b>✓</b> Metadata is optional</span><span><b>✓</b> Change settings anytime</span></p>
     </section>

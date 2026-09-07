@@ -3,6 +3,7 @@ package catalog_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
 
@@ -25,7 +27,7 @@ func (f *metadataFake) Lookup(_ context.Context, token, kind, title string) (cat
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls[kind+":"+title]++
-	return catalog.Enrichment{ProviderID: kind + "-id", Year: 2024, Synopsis: kind + " summary", Poster: "/poster.jpg", Backdrop: "/backdrop.jpg"}, nil
+	return catalog.Enrichment{ProviderID: kind + "-id", Title: kind + " title", Year: 2024, Synopsis: kind + " summary", Poster: "/poster.jpg", Backdrop: "/backdrop.jpg"}, nil
 }
 
 func (f *metadataFake) FetchArtwork(_ context.Context, imagePath string) (catalog.Artwork, error) {
@@ -35,12 +37,40 @@ func (f *metadataFake) FetchArtwork(_ context.Context, imagePath string) (catalo
 	return catalog.Artwork{Bytes: []byte("image:" + imagePath), ContentType: "image/jpeg"}, nil
 }
 
+func (f *metadataFake) Validate(_ context.Context, token string) error {
+	if token != "secret" {
+		return catalog.ErrInvalidCredential
+	}
+	return nil
+}
+
+func (f *metadataFake) LookupEpisode(_ context.Context, token, seriesID string, season, episode int) (catalog.Enrichment, error) {
+	if token != "secret" || seriesID != "series-id" {
+		return catalog.Enrichment{}, os.ErrPermission
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls[fmt.Sprintf("episode:%d:%d", season, episode)]++
+	return catalog.Enrichment{ProviderID: fmt.Sprintf("episode-%d-%d", season, episode), Title: fmt.Sprintf("Episode %d", episode), Year: 2024, Synopsis: "episode summary", Backdrop: "/backdrop.jpg"}, nil
+}
+
 type outcomeProvider struct {
 	lookup func(kind, title string) (catalog.Enrichment, error)
 }
 
 func (p outcomeProvider) Lookup(_ context.Context, _ string, kind, title string) (catalog.Enrichment, error) {
 	return p.lookup(kind, title)
+}
+
+type metadataBlockingProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p metadataBlockingProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	close(p.started)
+	<-p.release
+	return catalog.Enrichment{}, nil
 }
 
 func TestScanRecordsProviderOutcomes(t *testing.T) {
@@ -89,6 +119,9 @@ func TestScanRecordsProviderOutcomes(t *testing.T) {
 		if status := c.ScanStatus(); status.Status != "partial" || status.Failed != 1 || status.Unmatched != 0 {
 			t.Fatalf("status = %#v", status)
 		}
+		if status := c.MetadataStatus(); status.State != "failed" || !status.Configured {
+			t.Fatalf("metadata status = %#v", status)
+		}
 		rows, err := db.Query("SELECT relative_path, outcome, message FROM scan_files WHERE scan_id=?", c.ScanStatus().ID)
 		if err != nil {
 			t.Fatal(err)
@@ -120,6 +153,32 @@ func TestScanRecordsProviderOutcomes(t *testing.T) {
 		if status := c.ScanStatus(); status.Unmatched != 0 || status.Failed != 0 {
 			t.Fatalf("status = %#v", status)
 		}
+		if status := c.MetadataStatus(); status.State != "unavailable" || status.Configured {
+			t.Fatalf("metadata status = %#v", status)
+		}
+	})
+
+	t.Run("configured provider reports a running enrichment", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		provider := metadataBlockingProvider{started: make(chan struct{}), release: make(chan struct{})}
+		c.SetProvider(provider)
+		if err := c.SetTMDBToken("secret"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetRoots(films, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.StartScan(context.Background(), 1); err != nil {
+			t.Fatal(err)
+		}
+		<-provider.started
+		if status := c.MetadataStatus(); status.State != "running" || !status.Configured {
+			t.Fatalf("metadata status = %#v", status)
+		}
+		close(provider.release)
 	})
 
 	t.Run("outage retains known cached metadata", func(t *testing.T) {
@@ -259,5 +318,94 @@ func TestScanEnrichesFilmAndSeriesOnce(t *testing.T) {
 	}
 	if fake.calls["film:Film"] != 1 || fake.calls["series:Show"] != 1 {
 		t.Fatalf("provider calls = %#v", fake.calls)
+	}
+}
+
+func TestNormalModeProviderSetupEnrichesUnchangedLibraryAndSurvivesRestart(t *testing.T) {
+	films, tv, data := t.TempDir(), t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	writeMedia(t, filepath.Join(tv, "Show", "Season 01", "Show.S01E01.mp4"))
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots(films, tv); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("local scan: %v", err)
+	}
+	before, err := c.List("", 0, 10)
+	if err != nil || len(before) != 2 {
+		t.Fatalf("local catalog = %#v, %v", before, err)
+	}
+	var filmID string
+	for _, item := range before {
+		if item.Kind == "film" {
+			filmID = item.ID
+		}
+	}
+	browse, _, err := c.Browse("", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seriesID string
+	for _, item := range browse {
+		if item.Kind == "series" {
+			seriesID = item.ID
+		}
+	}
+	seriesBefore, ok := c.Series(seriesID)
+	if !ok || len(seriesBefore.Seasons) != 1 || len(seriesBefore.Seasons[0].Episodes) != 1 {
+		t.Fatalf("local series = %#v", seriesBefore)
+	}
+	episodeID := seriesBefore.Seasons[0].Episodes[0].ID
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := house.CreateProfile("Viewer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := house.Select(profile.ID, "")
+	if err != nil || house.Progress(session, episodeID, 1234) != nil {
+		t.Fatalf("save progress: %v", err)
+	}
+	fake := &metadataFake{calls: map[string]int{}}
+	c.SetProvider(fake)
+	if err := c.ValidateTMDBToken(context.Background(), "secret"); err != nil || c.SetTMDBToken("secret") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("configure and enrich: %v", err)
+	}
+	if got := fake.calls; got["film:Film"] != 1 || got["series:Show"] != 1 || got["episode:1:1"] != 1 {
+		t.Fatalf("provider calls = %#v", got)
+	}
+	after, _, err := c.Browse("Film", 0, 10)
+	if err != nil || len(after) != 1 || after[0].ID != filmID || after[0].ProviderID != "film-id" || after[0].Title != "film title" || after[0].Synopsis != "film summary" || after[0].Poster == "" {
+		t.Fatalf("enriched film = %#v, %v", after, err)
+	}
+	seriesAfter, ok := c.Series(seriesBefore.ID)
+	if !ok || seriesAfter.ProviderID != "series-id" || seriesAfter.Title != "series title" || seriesAfter.Synopsis != "series summary" {
+		t.Fatalf("enriched series = %#v", seriesAfter)
+	}
+	episode := seriesAfter.Seasons[0].Episodes[0]
+	if episode.ID != episodeID || episode.ProviderID != "episode-1-1" || episode.Title != "Episode 1" || episode.Synopsis != "episode summary" || episode.Backdrop == "" {
+		t.Fatalf("enriched episode = %#v", episode)
+	}
+	if position, err := house.Position(session, episodeID); err != nil || position != 1234 {
+		t.Fatalf("progress after enrichment = %d, %v", position, err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Shutdown(context.Background())
+	reopened.SetProvider(outcomeProvider{lookup: func(string, string) (catalog.Enrichment, error) { return catalog.Enrichment{}, errors.New("offline") }})
+	persisted, ok := reopened.Series(seriesBefore.ID)
+	if !ok || persisted.Synopsis != "series summary" || persisted.Seasons[0].Episodes[0].Synopsis != "episode summary" {
+		t.Fatalf("persisted series = %#v", persisted)
+	}
+	if data, contentType, err := reopened.Artwork(episodeID, "backdrop"); err != nil || len(data) == 0 || contentType != "image/jpeg" {
+		t.Fatalf("persisted episode artwork = %q %q %v", data, contentType, err)
 	}
 }

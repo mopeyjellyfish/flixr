@@ -1,7 +1,10 @@
 package web_test
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +23,9 @@ func (artworkProvider) Lookup(context.Context, string, string, string) (catalog.
 	return catalog.Enrichment{ProviderID: "provider-id", Poster: "/poster.jpg"}, nil
 }
 func (artworkProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
-	return catalog.Artwork{Bytes: []byte("jpeg"), ContentType: "image/jpeg"}, nil
+	var data bytes.Buffer
+	_ = png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 2, 2)))
+	return catalog.Artwork{Bytes: data.Bytes(), ContentType: "image/png"}, nil
 }
 
 func TestProfileServesCachedArtwork(t *testing.T) {
@@ -69,12 +74,15 @@ func TestProfileServesCachedArtwork(t *testing.T) {
 	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
 	w := httptest.NewRecorder()
 	web.NewServer(h, c).Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/jpeg" || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Cache-Control") != "private, max-age=0, must-revalidate" || w.Body.String() != "jpeg" {
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/png" || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Cache-Control") != "private, max-age=0, must-revalidate" {
 		t.Fatalf("artwork response=%d %q %q %q", w.Code, w.Header().Get("Content-Type"), w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	if decoded, format, err := image.Decode(bytes.NewReader(w.Body.Bytes())); err != nil || format != "png" || decoded.Bounds() != image.Rect(0, 0, 2, 2) {
+		t.Fatalf("decoded artwork=%v %q %v", decoded, format, err)
 	}
 	w = httptest.NewRecorder()
 	web.NewServer(h, c).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/catalog/artwork/../../flixr.db/poster", nil))
-	if w.Code == http.StatusOK || w.Body.String() == "jpeg" {
+	if w.Code == http.StatusOK {
 		t.Fatalf("path request served artwork: %d %q", w.Code, w.Body.String())
 	}
 }

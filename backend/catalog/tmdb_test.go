@@ -2,11 +2,44 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestTMDBValidatesBearerCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/authentication" || r.Header.Get("Authorization") != "Bearer valid" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	if err := provider.Validate(context.Background(), "valid"); err != nil {
+		t.Fatalf("valid credential: %v", err)
+	}
+	if err := provider.Validate(context.Background(), "invalid"); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("invalid credential = %v", err)
+	}
+}
+
+func TestTMDBLoadsEpisodeDetailsSeparatelyFromSeries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/tv/7/season/1/episode/2" {
+			t.Fatalf("episode path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":22,"name":"The Second Signal","overview":"Episode synopsis","air_date":"2024-02-03","still_path":"/still.jpg"}`))
+	}))
+	defer server.Close()
+	got, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).LookupEpisode(context.Background(), "valid", "7", 1, 2)
+	if err != nil || got.ProviderID != "22" || got.Title != "The Second Signal" || got.Year != 2024 || got.Synopsis != "Episode synopsis" || got.Backdrop != "/still.jpg" {
+		t.Fatalf("episode = %+v, %v", got, err)
+	}
+}
 
 func TestTMDBRejectsUnsafeAndOversizedArtwork(t *testing.T) {
 	requests := 0

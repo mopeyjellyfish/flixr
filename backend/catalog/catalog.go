@@ -755,6 +755,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 			item.LocalOnly = false
 			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			if enrichment.Title != "" {
+				item.Title = enrichment.Title
+			}
 			if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok {
 				c.applyLockedFields("film", previous.ID, &item)
 			}
@@ -796,6 +799,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				}
 				value.LocalOnly = false
 				value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+				if enrichment.Title != "" {
+					value.Title = enrichment.Title
+				}
 			}
 		}
 		if previous, ok := previousSeries[id]; ok {
@@ -804,6 +810,39 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			value.Title, value.Synopsis, value.Year, value.Poster, value.Backdrop = item.Title, item.Synopsis, item.Year, item.Poster, item.Backdrop
 		}
 		series[id] = value
+	}
+	if episodeProvider, ok := provider.(EpisodeProvider); ok && token != "" {
+		for id, item := range next {
+			parent, found := series[item.SeriesID]
+			if item.Kind != "episode" || !found || parent.ProviderID == "" || item.ProviderID != "" {
+				continue
+			}
+			enrichment, err := episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				observations = append(observations, providerFailure("episode:"+id, "provider_failed"))
+				continue
+			}
+			if enrichment.ProviderID == "" {
+				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
+				continue
+			}
+			artworkFailed := c.cacheEnrichmentArtwork(ctx, id, &enrichment)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if artworkFailed {
+				observations = append(observations, providerFailure("episode:"+id, "provider_artwork_failed"))
+			}
+			item.LocalOnly = false
+			item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
+			if enrichment.Title != "" {
+				item.Title = enrichment.Title
+			}
+			next[id] = item
+		}
 	}
 	for id, value := range previousSeries {
 		if value.Demo {
