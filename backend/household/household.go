@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,9 +57,10 @@ type Manager struct {
 }
 type profile struct {
 	Profile
-	hash, salt  []byte
-	attempts    int
-	lockedUntil time.Time
+	hash, salt    []byte
+	attempts      int
+	lockedUntil   time.Time
+	audioLanguage string
 }
 
 func random() (string, error) {
@@ -92,7 +94,7 @@ func Open(db *sqlite.DB) (*Manager, error) {
 	if err == nil {
 		m.ownerHash, m.salt, m.token = hash, salt, ""
 	}
-	rows, err := db.Query("SELECT id,name,pin_hash,salt,attempts,locked_until FROM profiles")
+	rows, err := db.Query("SELECT profiles.id,name,pin_hash,salt,attempts,locked_until,COALESCE(profile_audio_preferences.language,'') FROM profiles LEFT JOIN profile_audio_preferences ON profile_audio_preferences.profile_id=profiles.id")
 	if err != nil {
 		return nil, fmt.Errorf("load profiles: %w", err)
 	}
@@ -100,7 +102,7 @@ func Open(db *sqlite.DB) (*Manager, error) {
 	for rows.Next() {
 		var p profile
 		var locked int64
-		if err := rows.Scan(&p.ID, &p.Name, &p.hash, &p.salt, &p.attempts, &locked); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.hash, &p.salt, &p.attempts, &locked, &p.audioLanguage); err != nil {
 			return nil, err
 		}
 		p.Protected = len(p.hash) > 0
@@ -517,6 +519,36 @@ func (m *Manager) Profile(session string) (Profile, bool) {
 	defer m.mu.Unlock()
 	p, ok := m.profiles[id]
 	return p.Profile, ok
+}
+
+// AudioLanguage returns the normalized language preference for one profile.
+func (m *Manager) AudioLanguage(profileID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.profiles[profileID]
+	if !ok {
+		return "", ErrProfileNotFound
+	}
+	return p.audioLanguage, nil
+}
+
+// SaveAudioLanguage remembers a validated catalog track's language.
+func (m *Manager) SaveAudioLanguage(profileID, language string) error {
+	language = strings.ToLower(strings.TrimSpace(language))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.profiles[profileID]
+	if !ok {
+		return ErrProfileNotFound
+	}
+	if m.db != nil {
+		if _, err := m.db.Exec("INSERT INTO profile_audio_preferences(profile_id,language) VALUES(?,?) ON CONFLICT(profile_id) DO UPDATE SET language=excluded.language", profileID, language); err != nil {
+			return fmt.Errorf("save audio language: %w", err)
+		}
+	}
+	p.audioLanguage = language
+	m.profiles[profileID] = p
+	return nil
 }
 func (m *Manager) Progress(session, catalogID string, position int64) error {
 	return m.ProgressForProfile(m.subject(session), catalogID, position)

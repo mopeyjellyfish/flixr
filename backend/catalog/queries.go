@@ -92,6 +92,8 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 	if c.db == nil {
 		return c.seriesMemory(seriesID)
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	var out Series
 	var local, playable, demo int
 	var genres string
@@ -118,6 +120,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {
 			return Series{}, false
 		}
+		x.Audio = append(x.Audio, externalAudioTracks(c.items[x.ID].Audio)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		bySeason[x.Season] = append(bySeason[x.Season], x)

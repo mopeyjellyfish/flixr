@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,11 +40,31 @@ type webFakeExecutor struct {
 	process  *webFakeProcess
 	inputURL string
 	onStart  func()
+	startErr error
+}
+
+func TestPreferredAudioAvoidsCommentaryAndFallsBackToSourceDefault(t *testing.T) {
+	tracks := []catalog.AudioTrack{
+		{Index: 1, Language: "eng", Title: "English"},
+		{Index: 2, Language: "eng", Title: "Director Commentary", Default: true},
+		{Index: 3, Language: "fra", Title: "French"},
+	}
+	selected, ok := selectedAudio(tracks, nil, false, "eng")
+	if !ok || selected.Index != 1 {
+		t.Fatalf("preferred English = %#v, %v", selected, ok)
+	}
+	selected, ok = selectedAudio(tracks, nil, false, "deu")
+	if !ok || selected.Index != 2 {
+		t.Fatalf("missing preference fallback = %#v, %v", selected, ok)
+	}
 }
 
 func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.Process, error) {
 	if e.onStart != nil {
 		e.onStart()
+	}
+	if e.startErr != nil {
+		return nil, e.startErr
 	}
 	e.process = &webFakeProcess{done: make(chan struct{})}
 	for index, arg := range args {
@@ -269,4 +290,247 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 		t.Fatal("canceled plan leaked a generation")
 	}
 
+}
+
+func TestAudioSelectionPersistsLanguageAndPreservesPosition(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	for _, name := range []string{"one.mp4", "two.mp4"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audio := `[{"index":1,"codec":"aac","language":"eng","title":"English","default":true},{"index":2,"codec":"aac","language":"fra","title":"French"},{"index":3,"codec":"aac","language":"und","title":"Director Commentary"}]`
+	for _, row := range []struct{ id, path string }{{"one", "one.mp4"}, {"two", "two.mp4"}} {
+		if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,audio_json,subtitle_json,updated_at) VALUES(?,?,?,?,1,'film','mp4','h264',?,'[]',0)`, row.id, "film", row.id, row.path, audio); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, _ := house.CreateProfile("One", "")
+	two, _ := house.CreateProfile("Two", "")
+	oneToken, _ := house.Select(one.ID, "")
+	twoToken, _ := house.Select(two.ID, "")
+	library, err := catalog.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := playback.DefaultSettings(t.TempDir())
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 4 << 20
+	settings.MaxGenerations = 4
+	executor := &webFakeExecutor{}
+	manager, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: afero.NewOsFs(), InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	server := NewServerWithPlayback(house, library, manager)
+	server.readyMu.Lock()
+	server.readiness.FFmpeg = true
+	server.readyMu.Unlock()
+	handler := server.Handler()
+	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_fmp4_hls":true}`
+	plan := func(token, catalogID, extra string) *httptest.ResponseRecorder {
+		body := `{"catalog_id":"` + catalogID + `",` + capabilities + extra + `}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(body))
+		request.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	initial := plan(oneToken, "one", "")
+	if initial.Code != http.StatusCreated {
+		t.Fatalf("initial plan = %d: %s", initial.Code, initial.Body.String())
+	}
+	var first struct {
+		SessionID          string `json:"session_id"`
+		ProgressGeneration int64  `json:"progress_generation"`
+		Plan               struct {
+			Kind             playback.Kind `json:"kind"`
+			AudioStreamIndex int           `json:"audio_stream_index"`
+		} `json:"plan"`
+		AudioTracks []catalog.AudioTrack `json:"audio_tracks"`
+	}
+	if err := json.NewDecoder(initial.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Plan.Kind != playback.Direct || first.Plan.AudioStreamIndex != 1 || len(first.AudioTracks) != 3 || first.AudioTracks[2].Title != "Director Commentary" {
+		t.Fatalf("initial selection = %#v", first)
+	}
+
+	executor.startErr = errors.New("synthetic startup failure")
+	failedBody := `{"audio_stream_index":2,"position_ms":1234,"observation":1,` + capabilities + `}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+first.SessionID+"/audio", bytes.NewBufferString(failedBody))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed audio switch = %d: %s", response.Code, response.Body.String())
+	}
+	if language, err := house.AudioLanguage(one.ID); err != nil || language != "" {
+		t.Fatalf("failed switch saved language = %q, %v", language, err)
+	}
+	if _, ok := manager.Lookup(first.SessionID, one.ID, false); !ok {
+		t.Fatal("failed switch revoked active session")
+	}
+	executor.startErr = nil
+
+	switchBody := `{"audio_stream_index":2,"position_ms":4321,"observation":2,` + capabilities + `}`
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+first.SessionID+"/audio", bytes.NewBufferString(switchBody))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("audio switch = %d: %s", response.Code, response.Body.String())
+	}
+	var french struct {
+		SessionID          string `json:"session_id"`
+		ProgressGeneration int64  `json:"progress_generation"`
+		ResumeMS           int64  `json:"resume_ms"`
+		Plan               struct {
+			Kind             playback.Kind `json:"kind"`
+			AudioStreamIndex int           `json:"audio_stream_index"`
+		} `json:"plan"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&french); err != nil {
+		t.Fatal(err)
+	}
+	if french.ResumeMS != 4321 || french.Plan.Kind != playback.Remux || french.Plan.AudioStreamIndex != 2 || french.SessionID == first.SessionID || french.ProgressGeneration != first.ProgressGeneration {
+		t.Fatalf("French replacement = %#v", french)
+	}
+	if language, err := house.AudioLanguage(one.ID); err != nil || language != "fra" {
+		t.Fatalf("saved language = %q, %v", language, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+french.SessionID+"/audio", bytes.NewBufferString(`{"audio_stream_index":3,"position_ms":5000,"observation":3,`+capabilities+`}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unknown-language switch = %d: %s", response.Code, response.Body.String())
+	}
+	if language, _ := house.AudioLanguage(one.ID); language != "fra" {
+		t.Fatalf("unknown language replaced useful preference with %q", language)
+	}
+
+	next := plan(oneToken, "two", "")
+	if next.Code != http.StatusCreated || !bytes.Contains(next.Body.Bytes(), []byte(`"audio_stream_index":2`)) {
+		t.Fatalf("next episode preference = %d: %s", next.Code, next.Body.String())
+	}
+	invalid := plan(oneToken, "one", `,"audio_stream_index":99`)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid index = %d: %s", invalid.Code, invalid.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+french.SessionID+"/audio", bytes.NewBufferString(switchBody))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: twoToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-profile audio switch = %d", response.Code)
+	}
+}
+
+func TestCanceledAudioPreparationPreservesLiveSession(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("film"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audio := `[{"index":1,"codec":"aac","language":"eng","default":true},{"index":2,"codec":"aac","language":"fra"}]`
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mp4',1,'film','mp4','h264',?,'[]',0)`, audio); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := house.CreateProfile("One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := house.Select(profile.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	library, err := catalog.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := playback.DefaultSettings(t.TempDir())
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 4 << 20
+	settings.MaxGenerations = 4
+	executor := &webFakeExecutor{}
+	manager, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: afero.NewOsFs(), InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	server := NewServerWithPlayback(house, library, manager)
+	server.readyMu.Lock()
+	server.readiness.FFmpeg = true
+	server.readyMu.Unlock()
+	handler := server.Handler()
+	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_fmp4_hls":true}`
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film",`+capabilities+`}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("initial plan = %d: %s", response.Code, response.Body.String())
+	}
+	var initial struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	executor.onStart = cancel
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+initial.SessionID+"/audio", bytes.NewBufferString(`{"audio_stream_index":2,"position_ms":1234,"observation":1,`+capabilities+`}`)).WithContext(ctx)
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if language, err := house.AudioLanguage(profile.ID); err != nil || language != "" {
+		t.Fatalf("canceled request saved preference = %q, %v", language, err)
+	}
+	if _, ok := manager.Lookup(initial.SessionID, profile.ID, false); !ok {
+		t.Fatal("canceled request revoked original session")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("canceled request leaked candidate generation")
+	}
+	if executor.process == nil || !executor.process.signaled {
+		t.Fatal("canceled request did not retire candidate process")
+	}
 }

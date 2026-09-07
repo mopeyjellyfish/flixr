@@ -61,8 +61,9 @@ export type ApiErrorCode =
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
+export type AudioTrack = { index: number; codec: string; channels?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
 export type PlaybackPlan = {
-  plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string };
+  plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean };
   session_id: string;
   media_url: string;
   heartbeat_url: string;
@@ -71,6 +72,7 @@ export type PlaybackPlan = {
   resume_ms: number;
   stream_offset_ms: number;
   expires_at: number;
+  audio_tracks?: AudioTrack[];
 };
 export class ApiError extends Error {
   constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string) {

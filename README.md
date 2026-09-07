@@ -7,8 +7,9 @@ Run it at home, choose a profile, and watch in your browser. Your accounts,
 library and playback stay on your server and work without an internet connection.
 Internet access is needed to download FlixR and optional metadata or artwork.
 
-**Early development (0.x).** Browser playback is available; native TV/mobile apps,
-Cast, AirPlay and full audio/subtitle selection are still being built.
+**Early development (0.x).** Browser playback and per-profile audio selection are
+available; native TV/mobile apps, Cast, AirPlay and subtitle selection are still
+being built.
 
 ## Get started in five minutes
 
