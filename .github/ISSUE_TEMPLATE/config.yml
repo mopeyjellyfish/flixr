@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/mopeyjellyfish/flixr/blob/main/SECURITY.md
+    about: Do not disclose vulnerabilities in public issues; current confidential-reporting status is in SECURITY.md.
+  - name: Support and diagnostics guide
+    url: https://github.com/mopeyjellyfish/flixr/blob/main/SUPPORT.md
+    about: Read the public-support boundaries and redaction guide before opening an issue.

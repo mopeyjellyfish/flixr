@@ -1,0 +1,35 @@
+name: Support question
+description: Ask for installation or operational help.
+title: "support: "
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Support is best-effort and public. Read SUPPORT.md before posting. Do not include setup tokens, passwords, cookies, API tokens, TLS material, media paths, or complete logs.
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: FlixR version/image tag, OS, installation method, and browser/version when relevant. Omit identifying details.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets and private household information.
+          required: true
