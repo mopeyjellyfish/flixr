@@ -31,6 +31,16 @@ go build -o flixr .
 
 Flixr prints a one-time setup token. Open http://localhost:8787 and use that token to claim the owner account.
 
+## Support diagnostics
+
+An owner can download **Support diagnostics** from Server settings. The local ZIP
+contains the Flixr build/runtime version, tool and scan health, active playback
+count, and the latest 100 failure IDs. It contains no media names, filesystem
+paths, passwords, tokens, configuration values, or database content. A failed
+browser request shows its support ID; include that ID only when you choose to
+share the archive with support. The records are in memory, so restarting Flixr
+clears them.
+
 Native builds store data in `./flixr-data` and listen on `127.0.0.1:8787` by default. Set `FLIXR_LISTEN_ADDR=0.0.0.0:8787` to allow LAN devices to connect.
 
 ## Development demo
@@ -162,4 +172,3 @@ poster scaling without hiding failures behind screenshot-only assertions.
 - `frontend/` — React, TypeScript, Vite, Tailwind CSS, unit tests, and Playwright tests.
 - `docs/features/flixr-core/` — accepted pitch, delivery plan, and validation evidence.
 - `DESIGN.md` — accepted Cobalt Signal interface direction.
-

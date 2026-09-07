@@ -124,7 +124,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       <div className="owner-intro"><p className="eyebrow">YOUR SERVER</p><h1>Server settings</h1><p>Manage your libraries, household, and playback from this device.</p></div>
       {notice && <p className="owner-notice" role="status">{notice}</p>}
       <div className="owner-layout">
-        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a></nav>
+        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a><a href="#support">Support</a></nav>
         <div className="owner-sections">
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
@@ -144,6 +144,10 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
             <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
+          </section>
+          <section id="support" className="owner-section" aria-labelledby="support-title">
+            <h2 id="support-title">Support diagnostics</h2><p>Download a local ZIP with versions, runtime health, and recent failure IDs. It never includes media names, paths, passwords, or tokens.</p>
+            <a className="button-link primary" href="/api/v1/owner/diagnostics" download>Download diagnostics</a>
           </section>
         </div>
       </div>

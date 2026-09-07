@@ -13,7 +13,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError('request_failed', 0);
   }
   const body: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError((body as { error?: { code?: ApiError['code'] } }).error?.code ?? 'request_failed', response.status);
+  if (!response.ok) throw new ApiError((body as { error?: { code?: ApiError['code'] } }).error?.code ?? 'request_failed', response.status, response.headers.get('X-Flixr-Error-ID') ?? undefined);
   return body as T;
 }
 

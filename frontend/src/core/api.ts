@@ -61,8 +61,8 @@ export type PlaybackPlan = {
   expires_at: number;
 };
 export class ApiError extends Error {
-  constructor(public readonly code: ApiErrorCode, public readonly status: number) {
-    super(messageFor(code));
+  constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string) {
+    super(`${messageFor(code)}${errorID ? ` Support ID: ${errorID}.` : ''}`);
   }
 }
 export function messageFor(code: string): string {
