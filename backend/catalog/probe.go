@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -77,7 +78,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			Duration   string `json:"duration"`
 		} `json:"format"`
 		Streams []struct {
-			Index         int               `json:"index"`
+			Index         *int              `json:"index"`
 			CodecType     string            `json:"codec_type"`
 			CodecName     string            `json:"codec_name"`
 			Profile       string            `json:"profile"`
@@ -97,27 +98,33 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		return MediaProperties{}, fmt.Errorf("decode ffprobe output: %w", err)
 	}
 	media := MediaProperties{Container: value.Format.FormatName, PrimaryVideoStreamIndex: -1}
-	if seconds, err := strconv.ParseFloat(value.Format.Duration, 64); err == nil && seconds >= 0 {
-		media.DurationMS = int64(seconds * 1000)
-	}
+	media.DurationMS = durationMilliseconds(value.Format.Duration)
 	for _, stream := range value.Streams {
 		switch stream.CodecType {
 		case "video":
 			if media.VideoCodec == "" {
 				media.VideoCodec = stream.CodecName
 				media.VideoProfile = stream.Profile
-				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = stream.Index, stream.Width, stream.Height, stream.ColorTransfer
+				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), stream.ColorTransfer
 				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
 					media.Bitrate = bitrate
 				}
 			}
 		case "audio":
-			media.Audio = append(media.Audio, AudioTrack{Index: stream.Index, Codec: stream.CodecName, Channels: stream.Channels, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
+			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Channels: nonNegative(stream.Channels), Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		case "subtitle":
-			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: stream.Index, Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
+			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		}
 	}
 	return media, nil
+}
+
+func durationMilliseconds(value string) int64 {
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 || seconds > float64(math.MaxInt64)/1000 {
+		return 0
+	}
+	return int64(seconds * 1000)
 }
 
 // contentFingerprint is a stable identity from sampled bytes and file size, never path.

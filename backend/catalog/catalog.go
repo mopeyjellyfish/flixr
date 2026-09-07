@@ -54,6 +54,25 @@ type AudioTrack struct {
 	Forced   bool   `json:"forced,omitempty"`
 }
 
+// UnmarshalJSON treats indexes absent from pre-011 track JSON as unknown. Zero
+// is a real ffprobe stream index, so it must remain distinct from unknown.
+func (t *AudioTrack) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Index    *int   `json:"index"`
+		Codec    string `json:"codec"`
+		Channels int    `json:"channels"`
+		Language string `json:"language"`
+		Title    string `json:"title"`
+		Default  bool   `json:"default"`
+		Forced   bool   `json:"forced"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*t = AudioTrack{Index: normalizedIndex(raw.Index), Codec: raw.Codec, Channels: nonNegative(raw.Channels), Language: raw.Language, Title: raw.Title, Default: raw.Default, Forced: raw.Forced}
+	return nil
+}
+
 type SubtitleTrack struct {
 	Index    int    `json:"index"`
 	Codec    string `json:"codec"`
@@ -61,6 +80,36 @@ type SubtitleTrack struct {
 	Title    string `json:"title,omitempty"`
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
+}
+
+func (t *SubtitleTrack) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Index    *int   `json:"index"`
+		Codec    string `json:"codec"`
+		Language string `json:"language"`
+		Title    string `json:"title"`
+		Default  bool   `json:"default"`
+		Forced   bool   `json:"forced"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*t = SubtitleTrack{Index: normalizedIndex(raw.Index), Codec: raw.Codec, Language: raw.Language, Title: raw.Title, Default: raw.Default, Forced: raw.Forced}
+	return nil
+}
+
+func normalizedIndex(value *int) int {
+	if value == nil || *value < 0 {
+		return -1
+	}
+	return *value
+}
+
+func nonNegative(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 type Item struct {
