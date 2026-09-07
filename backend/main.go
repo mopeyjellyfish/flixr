@@ -160,7 +160,7 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	}
 	defer inputListener.Close()
 	inputBase := "http://" + inputListener.Addr().String()
-	p, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: filesystem, InputBase: inputBase, Executor: playback.OSExecutor{}, SaveProgress: h.ProgressForProfile, ManifestWait: 10 * time.Second})
+	p, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: filesystem, InputBase: inputBase, Executor: playback.OSExecutor{}, ManifestWait: 10 * time.Second})
 	if err != nil {
 		return err
 	}

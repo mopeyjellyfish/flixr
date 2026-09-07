@@ -22,7 +22,7 @@ it('sends an absolute remote seek before the compatibility stream offset to the 
   const { container } = render(<Player catalogID="film" onExit={() => undefined} />);
   await waitFor(() => expect(container.querySelector('video')).toHaveAttribute('src', '/old.m3u8'));
   await act(async () => { listen.mock.calls[0][0]({ version: 1, type: 'seek', position_ms: 1000 }); });
-  await waitFor(() => expect(fetcher.mock.calls.some(([path, init]) => String(path).endsWith('/seek') && init?.body === '{"position_ms":1000}')).toBe(true));
+  await waitFor(() => expect(fetcher.mock.calls.some(([path, init]) => String(path).endsWith('/seek') && JSON.parse(String(init?.body)).position_ms === 1000)).toBe(true));
   await waitFor(() => expect(container.querySelector('video')).toHaveAttribute('src', '/new.m3u8'));
 });
 

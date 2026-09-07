@@ -181,7 +181,7 @@ func TestManagerEnforcesConcurrencyAndSeekWindow(t *testing.T) {
 func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 	manager, executor := testManager(t, nil)
 	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
-	first, err := manager.Create("profile-a", "film-1", plan, 0)
+	first, err := manager.Create("profile-a", "film-1", plan, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +192,9 @@ func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 	replacement, err := manager.Seek(first.ID, "profile-a", 90_000)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if replacement.ProgressGeneration != 7 {
+		t.Fatalf("seek lost progress generation: %d", replacement.ProgressGeneration)
 	}
 	if replacement.GenerationID == first.GenerationID || len(executor.processes) != 2 {
 		t.Fatal("out-of-window seek did not create a replacement generation")
@@ -387,8 +390,7 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		settings.HeartbeatInterval = time.Second
 		settings.ProcessGrace = 100 * time.Millisecond
 		executor := &fakeExecutor{}
-		var saved atomic.Int64
-		manager, err := NewManager(ManagerConfig{Settings: settings, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second, SaveProgress: func(_, _ string, positionMS int64) error { saved.Store(positionMS); return nil }})
+		manager, err := NewManager(ManagerConfig{Settings: settings, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,9 +408,6 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		}
 		if !executor.processes[0].signaled.Load() {
 			t.Fatal("abandoned generation process was not interrupted")
-		}
-		if got := saved.Load(); got != 222 {
-			t.Fatalf("saved progress = %d, want 222", got)
 		}
 		if err := manager.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)

@@ -101,7 +101,7 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
   const video = document.querySelector('video') as HTMLVideoElement;
   video.currentTime = 5;
   fireEvent.seeked(video);
-  await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && request.body === JSON.stringify({ position_ms: 7_000 }))).toBe(true));
+  await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && JSON.parse(request.body ?? '{}').position_ms === 7_000)).toBe(true));
   hls.error?.({}, { fatal: true });
   expect(await screen.findByRole('alert')).toHaveTextContent(/compatibility stream stopped unexpectedly/i);
 });
@@ -146,4 +146,29 @@ it('ignores late media heartbeats while the final stop request is pending', asyn
   expect(exit).toHaveBeenCalledOnce();
   expect(calls.filter(path => path.endsWith('/heartbeat'))).toHaveLength(1);
   expect(calls.filter(path => path.endsWith('/stop'))).toHaveLength(1);
+});
+
+it('orders seek, ended, pagehide and final observations without the device clock', async () => {
+  const observations: number[] = [];
+  let beaconBody: Blob | undefined;
+  Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: (_url: string, body: Blob) => { beaconBody = body; return true; } });
+  const plan = { plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream/master.m3u8', heartbeat_url: '/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/heartbeat') || path.endsWith('/seek')) observations.push(JSON.parse(String(init?.body)).observation);
+    return new Response(JSON.stringify(plan));
+  });
+  const { unmount } = render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video')!;
+  vi.spyOn(Date, 'now').mockReturnValue(9999999999999);
+  fireEvent.seeked(video);
+  await waitFor(() => expect(observations).toHaveLength(1));
+  vi.spyOn(Date, 'now').mockReturnValue(1);
+  fireEvent.ended(video);
+  await waitFor(() => expect(observations).toHaveLength(2));
+  fireEvent(window, new Event('pagehide'));
+  const beaconText = await new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(beaconBody!); });
+  unmount();
+  expect([...observations.slice(0, 2), JSON.parse(beaconText).observation, observations[2]]).toEqual([1, 2, 3, 4]);
 });

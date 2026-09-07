@@ -101,6 +101,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/catalog/series/{id}", s.series)
 	s.mux.HandleFunc("GET /api/v1/catalog/items/{id}", s.item)
 	s.mux.HandleFunc("GET /api/v1/catalog/view", s.viewer)
+	s.mux.HandleFunc("PUT /api/v1/catalog/watched/{kind}/{id}", s.watched)
 	s.mux.HandleFunc("PUT /api/v1/catalog/list/{kind}/{id}", s.list)
 	s.mux.HandleFunc("DELETE /api/v1/catalog/list/{kind}/{id}", s.list)
 	s.mux.HandleFunc("GET /api/v1/catalog/preferences/{media}", s.preferences)
@@ -527,22 +528,29 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		p, e := s.house.Position(s.session(r), r.PathValue("id"))
+		p, generation, e := s.house.ProgressState(s.session(r), r.PathValue("id"))
 		if e != nil {
 			fail(w, 500, "progress_failed")
 			return
 		}
-		write(w, 200, map[string]int64{"position_ms": p})
+		write(w, 200, map[string]int64{"position_ms": p, "generation": generation})
 		return
 	}
 	var v struct {
-		Position int64 `json:"position_ms"`
+		Generation int64 `json:"generation"`
+		Position   int64 `json:"position_ms"`
+		ObservedAt int64 `json:"observed_at"`
 	}
 	if !decode(r, &v) || v.Position < 0 {
 		fail(w, 400, "invalid_request")
 		return
 	}
-	if e := s.house.Progress(s.session(r), r.PathValue("id"), v.Position); e != nil {
+	profile, _ := s.house.Profile(s.session(r))
+	if e := s.house.RecordProgress(profile.ID, r.PathValue("id"), v.Position, v.ObservedAt, false, v.Generation); e != nil {
+		if errors.Is(e, household.ErrProgressConflict) {
+			fail(w, http.StatusConflict, "progress_conflict")
+			return
+		}
 		fail(w, 500, "progress_failed")
 		return
 	}
