@@ -54,3 +54,27 @@ func TestSetListedDoesNotHideDatabaseFailureAsMissingCatalog(t *testing.T) {
 	assert.Error(t, err)
 	assert.False(t, errors.Is(err, catalog.ErrCatalogNotFound))
 }
+
+func TestViewerPreferenceSurvivesDatabaseReopen(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(dir)
+	require.NoError(t, err)
+	house, err := household.Open(db)
+	require.NoError(t, err)
+	profile, err := house.CreateProfile("Ada", "")
+	require.NoError(t, err)
+	library, err := catalog.Open(db)
+	require.NoError(t, err)
+	_, err = library.SavePreference(profile.ID, "film", catalog.ViewPreference{View: "grid", Sort: "watched"})
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	db, err = sqlite.Open(dir)
+	require.NoError(t, err)
+	defer db.Close()
+	library, err = catalog.Open(db)
+	require.NoError(t, err)
+	preference, err := library.Preference(profile.ID, "film")
+	require.NoError(t, err)
+	assert.Equal(t, catalog.ViewPreference{View: "grid", Sort: "watched"}, preference)
+}

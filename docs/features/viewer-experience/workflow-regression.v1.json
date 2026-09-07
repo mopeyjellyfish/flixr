@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "issue": 116,
+  "purpose": "Release gate for familiar local-library workflows. Action counts exclude typing and playback time.",
+  "tasks": [
+    {
+      "id": "library-entry",
+      "starting_route": "/home",
+      "actions": 1,
+      "expected": "Movies and TV are direct visible destinations; neither requires a promotional row or sign-in.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked viewer journey"
+    },
+    {
+      "id": "folder-switching",
+      "starting_route": "/movies",
+      "actions": 1,
+      "expected": "Switching between Movies and TV keeps each profile's saved view and sort choice.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked viewer journey"
+    },
+    {
+      "id": "search",
+      "starting_route": "/home",
+      "actions": 2,
+      "expected": "Search is reachable from the visible header and accepts a local title query.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked delivery-unit states"
+    },
+    {
+      "id": "return-from-details",
+      "starting_route": "/home",
+      "actions": 2,
+      "expected": "Open then close details restores focus to the originating library card and preserves its rail position.",
+      "evidence": "frontend/src/features/browse/Browse.test.tsx and frontend/e2e/mock-api.spec.ts: mocked delivery-unit states"
+    },
+    {
+      "id": "layout-after-restart",
+      "starting_route": "/movies",
+      "actions": 0,
+      "expected": "A saved per-profile view and sort are returned after the local database is reopened.",
+      "evidence": "backend/catalog/viewer_test.go: TestViewerPreferenceSurvivesDatabaseReopen"
+    },
+    {
+      "id": "resume",
+      "status": "covered-by-existing-playback-acceptance",
+      "expected": "Selecting a local title resumes through the existing playback flow.",
+      "evidence": "frontend/e2e/production.spec.ts"
+    },
+    {
+      "id": "track-changes",
+      "status": "pending-issue-30",
+      "expected": "Audio and subtitle track selection remains a visible in-player control when delivered.",
+      "evidence": "Issue #30 owns the implementation and acceptance."
+    },
+    {
+      "id": "next-episode",
+      "status": "pending-issue-31",
+      "expected": "Episode continuation returns predictably to the prior series context when delivered.",
+      "evidence": "Issue #31 owns the implementation and acceptance."
+    }
+  ]
+}
