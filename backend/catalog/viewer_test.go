@@ -65,8 +65,14 @@ func TestViewerPreferenceSurvivesDatabaseReopen(t *testing.T) {
 	require.NoError(t, err)
 	library, err := catalog.Open(db)
 	require.NoError(t, err)
-	_, err = library.SavePreference(profile.ID, "film", catalog.ViewPreference{View: "grid", Sort: "watched"})
-	require.NoError(t, err)
+	for media, preference := range map[string]catalog.ViewPreference{
+		"all":    {View: "rows", Sort: "watched"},
+		"film":   {View: "grid", Sort: "watched"},
+		"series": {View: "grid", Sort: "year"},
+	} {
+		_, err = library.SavePreference(profile.ID, media, preference)
+		require.NoError(t, err)
+	}
 	require.NoError(t, db.Close())
 
 	db, err = sqlite.Open(dir)
@@ -74,7 +80,13 @@ func TestViewerPreferenceSurvivesDatabaseReopen(t *testing.T) {
 	defer db.Close()
 	library, err = catalog.Open(db)
 	require.NoError(t, err)
-	preference, err := library.Preference(profile.ID, "film")
-	require.NoError(t, err)
-	assert.Equal(t, catalog.ViewPreference{View: "grid", Sort: "watched"}, preference)
+	for media, expected := range map[string]catalog.ViewPreference{
+		"all":    {View: "rows", Sort: "watched"},
+		"film":   {View: "grid", Sort: "watched"},
+		"series": {View: "grid", Sort: "year"},
+	} {
+		preference, err := library.Preference(profile.ID, media)
+		require.NoError(t, err)
+		assert.Equal(t, expected, preference, media)
+	}
 }
