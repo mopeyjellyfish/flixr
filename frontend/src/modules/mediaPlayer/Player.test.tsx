@@ -248,6 +248,33 @@ it('suppresses ordinary heartbeats once durable completion starts', async () => 
   expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
 });
 
+it('waits for durable completion before cancellation stops the session', async () => {
+  let releaseEnded: (() => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/heartbeat')) {
+      await new Promise<void>((resolve) => { releaseEnded = resolve; });
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const exit = vi.fn();
+  render(<Player catalogID="episode-1" onExit={exit} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(releaseEnded).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: /cancel autoplay/i }));
+  expect(calls.some((path) => path.endsWith('/stop'))).toBe(false);
+  expect(exit).not.toHaveBeenCalled();
+  await act(async () => { releaseEnded?.(); });
+  await waitFor(() => expect(calls.some((path) => path.endsWith('/stop'))).toBe(true));
+  expect(exit).toHaveBeenCalledOnce();
+});
+
 it('starts a fresh playback generation after autoplay navigation', async () => {
   const calls: string[] = [];
   const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();

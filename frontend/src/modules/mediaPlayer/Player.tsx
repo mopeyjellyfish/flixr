@@ -42,6 +42,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const initializingPosition = useRef(false);
   const finalizing = useRef(false);
   const endedPlayback = useRef(false);
+  const completionAck = useRef<Promise<boolean> | null>(null);
   const autoplayVersion = useRef(0);
   const autoplayRequest = useRef<AbortController | null>(null);
   const autoStart = useRef(startPositionMS !== undefined);
@@ -111,6 +112,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     autoplayRequest.current = null;
     finalizing.current = false;
     endedPlayback.current = false;
+    completionAck.current = null;
     setAutoplay({ kind: 'idle' });
     api.playbackPlan(catalogID, browserCapabilities()).then(async (initial) => {
       if (!active) { void api.playbackStop(initial.session_id); return; }
@@ -150,7 +152,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       const plan = playback.current;
       if (plan && !finalizing.current) {
         const save = endedPlayback.current
-          ? Promise.resolve()
+          ? completionAck.current?.then(() => undefined).catch(() => undefined) ?? Promise.resolve()
           : api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
         void save.then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
@@ -261,11 +263,18 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const finish = async () => {
     if (finalizing.current) return;
     finalizing.current = true;
+    autoplayVersion.current += 1;
+    autoplayRequest.current?.abort();
+    autoplayRequest.current = null;
     const plan = playback.current;
     if (plan) {
       try {
         // A failed progress write must not leave an FFmpeg session running.
-        if (!endedPlayback.current) await api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
+        if (endedPlayback.current) {
+          await completionAck.current?.catch(() => false);
+        } else {
+          await api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
+        }
         await api.playbackStop(plan.session_id);
       } catch {
         // The durable progress write is best-effort during an explicit exit.
@@ -283,7 +292,11 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const controller = new AbortController();
     autoplayRequest.current = controller;
     setAutoplay({ kind: 'resolving' });
-    if (!await heartbeat(true) || controller.signal.aborted || version !== autoplayVersion.current) return;
+    const acknowledgement = heartbeat(true);
+    completionAck.current = acknowledgement;
+    const accepted = await acknowledgement;
+    if (completionAck.current === acknowledgement) completionAck.current = null;
+    if (!accepted || controller.signal.aborted || version !== autoplayVersion.current) return;
     try {
       const next = await api.playbackNext(plan.session_id, false, controller.signal);
       if (controller.signal.aborted || version !== autoplayVersion.current || playback.current?.session_id !== plan.session_id) return;
