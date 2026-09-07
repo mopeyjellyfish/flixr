@@ -58,7 +58,7 @@ func TestMediaFixtureCorpusMatchesManifest(t *testing.T) {
 			t.Fatalf("fixture %+v lacks classification, consumer, or streams", fixture)
 		}
 		switch fixture.Classification {
-		case string(Direct), string(Remux), string(Transcode), "malformed", "version":
+		case string(Direct), string(Remux), string(Transcode), "malformed", "version", "sidecar":
 		default:
 			t.Fatalf("fixture %s has unknown classification %q", fixture.ID, fixture.Classification)
 		}
@@ -297,9 +297,6 @@ func fixtureBitrateEvidence(t *testing.T, fixture string) (int64, string, int64)
 			}
 		}
 	}
-	if videoBitrate <= 0 || audioCodec != "" && audioBitrate <= 0 {
-		t.Fatalf("fixture %s lacks source bitrate evidence", fixture)
-	}
 	return videoBitrate, audioCodec, audioBitrate
 }
 
@@ -362,7 +359,7 @@ func TestRealFFmpegRemuxAndTranscodeProducePlayableHLS(t *testing.T) {
 			if test.kind == Remux {
 				commandPlan.VideoBitrate, commandPlan.AudioCodec, commandPlan.AudioBitrate = fixtureBitrateEvidence(t, fixture)
 			}
-			name, args, err := ffmpegCommand(commandPlan, server.URL, dir, test.start, time.Minute)
+			name, args, err := ffmpegCommand(commandPlan, server.URL, "", -1, dir, test.start, time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -439,7 +436,7 @@ func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
 	if err := os.Mkdir(outputDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, outputDir, 0, time.Minute)
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, "", -1, outputDir, 0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,6 +551,74 @@ func assertFragmentedMP4Segments(t *testing.T, dir string, manifest []byte) {
 	}
 }
 
+func TestRealFFmpegMapsRequestedAudioStream(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is unavailable", tool)
+		}
+	}
+	fixture, err := filepath.Abs(filepath.Join("..", "testdata", "media", "tv", "Signal", "Season 01", "Signal S01E01.mkv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, fixture)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	videoBitrate, audioCodec, audioBitrate := fixtureBitrateEvidence(t, fixture)
+	name, args, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: videoBitrate, AudioCodec: audioCodec, AudioBitrate: audioBitrate}, server.URL, "", 2, dir, 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	process, err := (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Wait(); err != nil {
+		t.Fatalf("ffmpeg: %v\n%s", err, stderr.String())
+	}
+	assertPlaylistAudioLanguage(t, filepath.Join(dir, "index.m3u8"), "fra")
+
+	sidecar, err := filepath.Abs(filepath.Join("..", "testdata", "media", "tv", "Signal", "Season 01", "Signal S01E01.jpn.Director Commentary.m4a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, sidecar)
+	}))
+	defer audioServer.Close()
+	externalDir := t.TempDir()
+	_, audioCodec, audioBitrate = fixtureBitrateEvidence(t, sidecar)
+	name, args, err = ffmpegCommand(Plan{Kind: Remux, VideoBitrate: videoBitrate, AudioCodec: audioCodec, AudioBitrate: audioBitrate}, server.URL, audioServer.URL, 0, externalDir, 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	process, err = (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Wait(); err != nil {
+		t.Fatalf("external audio ffmpeg: %v\n%s", err, stderr.String())
+	}
+	assertPlaylistAudioLanguage(t, filepath.Join(externalDir, "index.m3u8"), "jpn")
+}
+
+func assertPlaylistAudioLanguage(t *testing.T, manifest, want string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream_tags=language", "-of", "default=nw=1:nk=1", manifest).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(output)); got != want {
+		t.Fatalf("selected audio language = %q, want %q", got, want)
+	}
+}
+
 func assertFixtureSeek(t *testing.T, fixture string, start time.Duration) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -625,7 +690,7 @@ func TestRealFFmpegCancellationAllowsRestart(t *testing.T) {
 	}))
 	defer server.Close()
 	start := func(dir string) Process {
-		name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, dir, 0, time.Minute)
+		name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, "", -1, dir, 0, time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}

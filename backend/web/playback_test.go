@@ -106,13 +106,21 @@ func TestPlaybackPlanAndDirectRangeAreProfileBound(t *testing.T) {
 	}
 	secondPlan := plan(oneToken, "film")
 	var resumed struct {
-		ResumeMS int64 `json:"resume_ms"`
+		ResumeMS  int64  `json:"resume_ms"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.NewDecoder(secondPlan.Body).Decode(&resumed); err != nil {
 		t.Fatal(err)
 	}
 	if secondPlan.Code != http.StatusCreated || resumed.ResumeMS != 4321 {
 		t.Fatalf("resume plan = %d at %d", secondPlan.Code, resumed.ResumeMS)
+	}
+	r = httptest.NewRequest(http.MethodGet, result.MediaURL, nil)
+	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("superseded plan remained reachable: %d", w.Code)
 	}
 	if got := plan(oneToken, "../film").Code; got != http.StatusNotFound {
 		t.Fatalf("traversal = %d", got)

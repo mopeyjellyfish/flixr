@@ -272,3 +272,56 @@ it('does not let a completed preference save replace a newer destination', async
   expect(screen.queryByText('Film destination')).not.toBeInTheDocument();
 });
 });
+
+function pendingResponse() {
+ let resolve!: (value: Response) => void;
+ const promise = new Promise<Response>((done) => { resolve = done; });
+ return {promise, resolve};
+}
+function ratingFetch(overrides: { get?: Promise<Response>; save?: Promise<Response> } = {}) {
+ return async (input: RequestInfo | URL, init?: RequestInit) => {
+  const path=String(input);
+  if (path.includes('/catalog/view')) return new Response(JSON.stringify({preference:{view:'rows',sort:'title'},sections:[]}));
+  if (path.includes('/catalog/items/')) return new Response(JSON.stringify({id:path.endsWith('/second')?'second':'first',title:'Detail',kind:'film',local_only:true}));
+  if (path.includes('/ratings/')) {
+   if (init?.method === 'PUT') return overrides.save ?? new Response(JSON.stringify({saved:true}));
+   return path.endsWith('/first') && overrides.get ? overrides.get : new Response(JSON.stringify({rating:{value:2}}));
+  }
+  throw new Error(`Unexpected request ${path}`);
+ };
+}
+it('waits for the current rating before allowing a save', async () => {
+ const get=pendingResponse();
+ vi.spyOn(globalThis,'fetch').mockImplementation(ratingFetch({get:get.promise}));
+ HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};
+ render(<Browse detailID="first" onExit={()=>undefined}/>);
+ const select=await screen.findByRole('combobox',{name:'Your rating'});
+ expect(select).toBeDisabled();
+ await act(async()=>{get.resolve(new Response(JSON.stringify({rating:{value:3}})));});
+ expect(select).toHaveValue('3'); expect(select).toBeEnabled();
+});
+it('serializes rating saves and displays the saved value', async () => {
+ const save=pendingResponse();
+ vi.spyOn(globalThis,'fetch').mockImplementation(ratingFetch({save:save.promise}));
+ HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};
+ render(<Browse detailID="first" onExit={()=>undefined}/>);
+ const select=await screen.findByRole('combobox',{name:'Your rating'});
+ await waitFor(()=>expect(select).toHaveValue('2'));
+ fireEvent.change(select,{target:{value:'5'}});
+ expect(select).toBeDisabled();
+ await act(async()=>{save.resolve(new Response(JSON.stringify({saved:true})));});
+ expect(select).toHaveValue('5'); expect(select).toBeEnabled();
+});
+it('keeps a new catalog rating when an old save finishes last', async () => {
+ const save=pendingResponse();
+ vi.spyOn(globalThis,'fetch').mockImplementation(ratingFetch({save:save.promise}));
+ HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};
+ const {rerender}=render(<Browse detailID="first" onExit={()=>undefined}/>);
+ const select=await screen.findByRole('combobox',{name:'Your rating'});
+ await waitFor(()=>expect(select).toHaveValue('2'));
+ fireEvent.change(select,{target:{value:'5'}});
+ rerender(<Browse detailID="second" onExit={()=>undefined}/>);
+ await waitFor(()=>expect(screen.getByRole('combobox',{name:'Your rating'})).toBeEnabled());
+ await act(async()=>{save.resolve(new Response(JSON.stringify({saved:true})));});
+ expect(screen.getByRole('combobox',{name:'Your rating'})).toHaveValue('2');
+});

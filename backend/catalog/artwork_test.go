@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,6 +23,58 @@ import (
 type failingArtworkFS struct {
 	afero.Fs
 	openErr, removeErr error
+}
+
+type noSpaceArtworkFS struct{ afero.Fs }
+
+func (f noSpaceArtworkFS) OpenFile(name string, flag int, perm os.FileMode) (afero.File, error) {
+	file, err := f.Fs.OpenFile(name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return noSpaceArtworkFile{File: file}, nil
+}
+
+type noSpaceArtworkFile struct{ afero.File }
+
+func (noSpaceArtworkFile) Write([]byte) (int, error) { return 0, syscall.ENOSPC }
+
+type artworkReadBarrierFS struct {
+	afero.Fs
+	objectPath    string
+	readStarted   chan struct{}
+	allowRead     chan struct{}
+	removeStarted chan struct{}
+	readOnce      sync.Once
+	removeOnce    sync.Once
+}
+
+func (f *artworkReadBarrierFS) Open(name string) (afero.File, error) {
+	file, err := f.Fs.Open(name)
+	if err != nil || name != f.objectPath {
+		return file, err
+	}
+	return &artworkReadBarrierFile{File: file, fs: f}, nil
+}
+
+func (f *artworkReadBarrierFS) Remove(name string) error {
+	if filepath.Ext(name) == ".jpg" {
+		f.removeOnce.Do(func() { close(f.removeStarted) })
+	}
+	return f.Fs.Remove(name)
+}
+
+type artworkReadBarrierFile struct {
+	afero.File
+	fs *artworkReadBarrierFS
+}
+
+func (f *artworkReadBarrierFile) Read(data []byte) (int, error) {
+	f.fs.readOnce.Do(func() {
+		close(f.fs.readStarted)
+		<-f.fs.allowRead
+	})
+	return f.File.Read(data)
 }
 
 func (f failingArtworkFS) Open(name string) (afero.File, error) {
@@ -101,6 +154,44 @@ func TestArtworkSizedFallsBackForInvalidCachedImage(t *testing.T) {
 	data, contentType, err := c.ArtworkSized(context.Background(), "film", "poster", 200)
 	if err != nil || string(data) != "not an image" || contentType != "image/jpeg" {
 		t.Fatalf("fallback = %q %q %v", data, contentType, err)
+	}
+}
+
+func TestArtworkSizedFallsBackWhenDerivativeDiskIsFull(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sourceImage := image.NewRGBA(image.Rect(0, 0, 400, 600))
+	var source bytes.Buffer
+	if err := jpeg.Encode(&source, sourceImage, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: source.Bytes(), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	c.fs = noSpaceArtworkFS{Fs: afero.NewOsFs()}
+	c.derivativeReady = true
+
+	data, contentType, err := c.ArtworkSized(context.Background(), "film", "poster", 160)
+	if err != nil || contentType != "image/jpeg" || !bytes.Equal(data, source.Bytes()) {
+		t.Fatalf("low-disk fallback = %q bytes=%d err=%v", contentType, len(data), err)
+	}
+	original, _, err := c.Artwork("film", "poster")
+	if err != nil || !bytes.Equal(original, source.Bytes()) {
+		t.Fatalf("durable original after low disk = %d bytes err=%v", len(original), err)
+	}
+	entries, err := os.ReadDir(filepath.Join(db.DataDir(), "artwork", "derivatives"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("partial derivatives after low disk = %d err=%v", len(entries), err)
 	}
 }
 
@@ -242,6 +333,164 @@ func TestArtworkMaintenanceBoundsFreshCacheBeyondOneBatch(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) > maintenanceMaxFiles {
 		t.Fatalf("fresh cache = %d, %v", len(entries), err)
+	}
+}
+
+func TestArtworkMaintenanceResumesAfterRestartMidSweep(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: []byte("durable"), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO settings(key,value) VALUES('film_root','/media/films')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO profiles(id,name) VALUES('profile','Profile')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO catalog_items(id,kind,title,relative_path) VALUES('film','film','Film','film.mkv')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms) VALUES('profile','film',42000)"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(db.DataDir(), "artwork", "derivatives")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-derivativeMaxAge - time.Hour)
+	for i := range maintenanceBatch + 44 {
+		path := filepath.Join(dir, "expired-"+strconv.Itoa(i)+".jpg")
+		if err := os.WriteFile(path, []byte("derivative"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.artworkMu.Lock()
+	err = c.cleanupDerivativesLocked(time.Now())
+	if c.maintenanceDir != nil {
+		_ = c.maintenanceDir.Close()
+		c.maintenanceDir = nil
+	}
+	c.artworkMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 || len(entries) > 44 {
+		t.Fatalf("first bounded sweep left %d entries, err=%v", len(entries), err)
+	}
+
+	reopened, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("restart cleanup left %d entries, err=%v", len(entries), err)
+	}
+	data, _, err := reopened.Artwork("film", "poster")
+	if err != nil || string(data) != "durable" {
+		t.Fatalf("durable original after restart = %q err=%v", data, err)
+	}
+	var root string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='film_root'").Scan(&root); err != nil || root != "/media/films" {
+		t.Fatalf("settings after restart = %q err=%v", root, err)
+	}
+	var position int64
+	if err := db.QueryRow("SELECT position_ms FROM progress WHERE profile_id='profile' AND catalog_id='film'").Scan(&position); err != nil || position != 42000 {
+		t.Fatalf("history after restart = %d err=%v", position, err)
+	}
+}
+
+func TestArtworkMaintenanceWaitsForActiveReaderBeforeEviction(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: []byte("durable"), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	var objectName string
+	if err := db.QueryRow("SELECT object_name FROM catalog_artwork WHERE catalog_id='film' AND kind='poster'").Scan(&objectName); err != nil {
+		t.Fatal(err)
+	}
+	derivativeDir := filepath.Join(db.DataDir(), "artwork", "derivatives")
+	if err := os.MkdirAll(derivativeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	derivative := filepath.Join(derivativeDir, "expired.jpg")
+	if err := os.WriteFile(derivative, []byte("disposable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-derivativeMaxAge - time.Hour)
+	if err := os.Chtimes(derivative, old, old); err != nil {
+		t.Fatal(err)
+	}
+	barrier := &artworkReadBarrierFS{
+		Fs:            afero.NewOsFs(),
+		objectPath:    filepath.Join(db.DataDir(), "artwork", "objects", objectName),
+		readStarted:   make(chan struct{}),
+		allowRead:     make(chan struct{}),
+		removeStarted: make(chan struct{}),
+	}
+	c.fs = barrier
+	readDone := make(chan error, 1)
+	go func() {
+		data, _, err := c.Artwork("film", "poster")
+		if err == nil && string(data) != "durable" {
+			err = errors.New("reader returned changed artwork")
+		}
+		readDone <- err
+	}()
+	<-barrier.readStarted
+	cleanupDone := make(chan error, 1)
+	go func() {
+		c.artworkMu.Lock()
+		defer c.artworkMu.Unlock()
+		cleanupDone <- c.cleanupDerivativesLocked(time.Now())
+	}()
+	select {
+	case err := <-cleanupDone:
+		close(barrier.allowRead)
+		t.Fatalf("cleanup finished during active read: %v", err)
+	case <-barrier.removeStarted:
+		close(barrier.allowRead)
+		t.Fatal("eviction started during active read")
+	case <-time.After(50 * time.Millisecond):
+		close(barrier.allowRead)
+	}
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(derivative); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired derivative after reader completed: %v", err)
 	}
 }
 

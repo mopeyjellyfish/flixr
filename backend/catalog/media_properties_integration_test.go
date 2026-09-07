@@ -113,18 +113,21 @@ func TestCatalogPersistsRealMultitrackCorpusProperties(t *testing.T) {
 	if want.ID == "" {
 		t.Fatalf("episode one missing from %#v", items)
 	}
-	if want.DurationMS != 2021 || want.PrimaryVideoStreamIndex != 0 || want.Width != 320 || want.Height != 180 || want.Bitrate <= 0 || want.HDR != "" || len(want.Audio) != 2 || len(want.Subtitles) != 2 {
+	if want.DurationMS != 2021 || want.PrimaryVideoStreamIndex != 0 || want.Width != 320 || want.Height != 180 || want.Bitrate <= 0 || want.HDR != "" || len(want.Audio) != 3 || len(want.Subtitles) != 2 {
 		t.Fatalf("decoded properties = %#v", want.MediaProperties)
 	}
 	if want.VideoLevel != 12 || want.Bitrate <= 0 || want.Audio[0].Index != 1 || want.Audio[0].Profile != "LC" || want.Audio[0].Language != "eng" || want.Audio[0].Channels != 1 || want.Audio[0].SampleRate != 48000 || want.Audio[0].Bitrate <= 0 || want.Audio[1].Index != 2 || want.Audio[1].Language != "fra" || want.Subtitles[0].Index != 3 || want.Subtitles[0].Language != "eng" || !want.Subtitles[0].Default || !want.Subtitles[0].Forced || want.Subtitles[1].Index != 4 || want.Subtitles[1].Language != "fra" || want.Subtitles[1].Default || want.Subtitles[1].Forced {
 		t.Fatalf("decoded tracks = %#v / %#v", want.Audio, want.Subtitles)
+	}
+	if want.Audio[2].Index != 3 || want.Audio[2].SourceStreamIndex() != 0 || !want.Audio[2].External || want.Audio[2].Profile != "LC" || want.Audio[2].Channels != 1 || want.Audio[2].SampleRate != 48000 || want.Audio[2].Bitrate <= 0 || want.Audio[2].Language != "jpn" || want.Audio[2].Title != "Director Commentary" {
+		t.Fatalf("decoded sidecar = %#v", want.Audio[2])
 	}
 	reopened, err := catalog.Open(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	restored, ok := reopened.Item(want.ID)
-	if !ok || restored.DurationMS != want.DurationMS || restored.VideoLevel != 12 || restored.PrimaryVideoStreamIndex != 0 || restored.Audio[0].SampleRate != 48000 || restored.Audio[0].Bitrate <= 0 || len(restored.Subtitles) != 2 || !restored.Subtitles[0].Forced {
+	if !ok || restored.DurationMS != want.DurationMS || restored.VideoLevel != 12 || restored.PrimaryVideoStreamIndex != 0 || restored.Audio[0].SampleRate != 48000 || restored.Audio[0].Bitrate <= 0 || len(restored.Audio) != 3 || restored.Audio[2].Profile != "LC" || restored.Audio[2].SampleRate != 48000 || restored.Audio[2].Bitrate <= 0 || len(restored.Subtitles) != 2 || !restored.Subtitles[0].Forced {
 		t.Fatalf("reopened properties = %#v", restored)
 	}
 }

@@ -20,7 +20,9 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
     const response = handler(url.pathname, request.method(), url.search, request.postDataJSON() as Record<string, unknown> | undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
-      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined);
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname.startsWith('/api/v1/ratings/') ? { json: { rating: null } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });
@@ -73,7 +75,7 @@ for (const viewport of viewports) {
     await page.getByLabel(/owner password/i).fill('safe owner password');
     await page.getByRole('button', { name: /secure this server/i }).click();
     await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
-    await expect(page.getByLabel(/tmdb/i)).toHaveCount(0);
+    await expect(page.getByLabel(/TMDB API Read Access Token/i)).toBeVisible();
     await expect(page.getByRole('button', { name: /save libraries/i })).toBeVisible();
     await check(page, errors);
     await page.getByLabel(/films library/i).fill('/media/films');
@@ -151,6 +153,7 @@ for (const viewport of viewports) {
       ] } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
       if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [{ ...film, provider_id: '42' }] } };
+      if (path.endsWith('/owner/identity/repairs') && method === 'GET') return { json: { conflicts: [], merges: [] } };
       if (path.endsWith('/metadata/film/film-1/fields') && method === 'GET') return { json: { fields: [{ field: 'tags', value: 'family', source: 'local', locked: true }] } };
       if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
@@ -162,7 +165,7 @@ for (const viewport of viewports) {
     await open(page, '/owner');
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
     await expect(page.getByText(/partial: 2 scanned/i)).toBeVisible();
-    await expect(page.getByLabel(/TMDB access token/i)).toHaveValue('');
+    await expect(page.getByLabel(/TMDB API Read Access Token/i)).toHaveValue('');
     await page.getByText('Edit metadata').click();
     await expect(page.getByLabel('Tags')).toHaveValue('family');
     await page.getByRole('button', { name: /preview provider refresh/i }).click();
@@ -190,6 +193,52 @@ for (const viewport of viewports) {
     await check(page, errors);
   });
 }
+
+test('mocked owner identity repair confirms merge and unmerge without exposing file paths', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const errors: string[] = [];
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', (error) => errors.push(error.message));
+  const arrival = { id: 'film-a', title: 'Arrival', kind: 'film', local_only: false };
+  const duplicate = { id: 'film-b', title: 'Arrival (duplicate)', kind: 'film', local_only: false };
+  let merged = false;
+  let unmerged = false;
+  await mock(page, (path, method) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/owner/roots')) return { json: { films: '', tv: '' } };
+    if (path.endsWith('/settings/tmdb')) return { json: { configured: false } };
+    if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [] } };
+    if (path.endsWith('/owner/identity/repairs')) return { json: { conflicts: merged ? [] : [{ id: 7, kind: 'film', reason: 'provider_identity', state: 'open', left: arrival, right: duplicate }], merges: merged ? [{ id: 'merge-7', kind: 'film', state: unmerged ? 'unmerged' : 'active', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] }] : [] } };
+    if (path.endsWith('/owner/identity/merges') && method === 'POST') { merged = true; return { json: { id: 'merge-7', kind: 'film', state: 'active', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] } }; }
+    if (path.endsWith('/owner/identity/merges/merge-7/unmerge') && method === 'POST') { unmerged = true; return { json: { id: 'merge-7', kind: 'film', state: 'unmerged', survivor: arrival, source: duplicate, decisions: ['Original title records remain recoverable.'] } }; }
+    if (path.endsWith('/owner/settings')) return { json: { settings: [] } };
+    if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 } };
+    if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 }, generations: [] } };
+    if (path.endsWith('/scan/status')) return { json: { scan: {} } };
+    if (path.endsWith('/profiles')) return { json: { profiles: [] } };
+    return undefined;
+  });
+
+  await open(page, '/owner');
+  const repair = page.getByRole('region', { name: 'Identity repair' });
+  await expect(repair.getByText(/same provider identity/i)).toBeVisible();
+  await expect(repair).not.toContainText('film-a');
+  await expect(repair).not.toContainText('film-b');
+  await expect(repair).not.toContainText('/media');
+  await repair.getByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }).check();
+  page.once('dialog', (dialog) => dialog.accept());
+  await repair.getByRole('button', { name: /merge selected titles/i }).click();
+  await expect(repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('owner-identity-repair.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
+  await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('owner-identity-repair-mobile.png'), fullPage: true });
+  page.once('dialog', (dialog) => dialog.accept());
+  await repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }).click();
+  await expect(repair.getByText(/unmerge retained the state/i)).toBeVisible();
+  await check(page, errors);
+});
 
 test('mocked viewer journey: filtered grids, sort, demo detail, and My List', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -376,7 +425,7 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   await expect(page.getByRole('alert')).toContainText(/playback limit/i);
 });
 
-test('mocked playback heartbeat, buffering, cross-client resume, expiry, recovery, stop, and interruption states', async ({ page, context }) => {
+test('mocked playback heartbeat, buffering, cross-client resume, lease recovery, stop, and network recovery', async ({ page, context }) => {
   await mockMediaSource(page);
   let heartbeats = 0;
   let stops = 0;
@@ -444,15 +493,77 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
   });
   expect(resumedAt).toBe(12);
   expired = true;
+  const plansBeforeExpiry = plans;
   await secondClient.locator('video').dispatchEvent('pause');
-  await expect(secondClient.getByRole('alert')).toContainText(/session expired/i);
+  await expect.poll(() => plans).toBeGreaterThan(plansBeforeExpiry);
+  const recoveredFromExpiry = await secondClient.locator('video').evaluate((video) => {
+    const media = video as HTMLVideoElement;
+    media.dispatchEvent(new Event('loadedmetadata'));
+    return media.currentTime;
+  });
+  expect(recoveredFromExpiry).toBe(12);
+  await expect(secondClient.getByRole('alert')).toHaveCount(0);
 
   expired = false;
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
   await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
   interrupted = true;
+  const plansBeforeInterruption = plans;
   await secondClient.locator('video').dispatchEvent('pause');
-  await expect(secondClient.getByRole('alert')).toContainText(/complete that request/i);
+  await expect.poll(() => plans).toBeGreaterThan(plansBeforeInterruption);
+  await expect(secondClient.getByRole('alert')).toHaveCount(0);
   expect(errors.every((message) => message.includes('403') || message.includes('500'))).toBeTruthy();
+
+  interrupted = false;
+  const stopsBeforeExit = stops;
+  await secondClient.getByRole('button', { name: /back to library/i }).click();
+  await expect.poll(() => stops).toBeGreaterThan(stopsBeforeExit);
+});
+
+test('personal history dates, clear undo, and rating persist across navigation', async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('pageerror', error => errors.push(error.message));
+  const timestamp = Date.UTC(2024, 4, 6, 12);
+  let cleared = false;
+  let rating = 2;
+  await mock(page, (path, method, _query, body) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [film] }] } };
+    if (path.endsWith('/catalog/items/film-1')) return { json: film };
+    if (path.endsWith('/ratings/film-1')) {
+      if (method === 'PUT') { rating = Number(body?.value); return { json: { saved: true } }; }
+      return { json: { rating: { value: rating } } };
+    }
+    if (path.endsWith('/history/clear')) { cleared = true; return { json: { id: 'clear-one', undo_until: Date.now() + 300000 } }; }
+    if (path.endsWith('/history/clear/clear-one/undo')) { cleared = false; return { json: { restored: true } }; }
+    if (path.endsWith('/history')) return { json: { events: cleared ? [] : [
+      { id: 'local', catalog_id: 'film-1', title: 'Local completion', kind: 'film', type: 'completed', provenance: 'local', source_time: null, recorded_at: timestamp },
+      { id: 'imported', catalog_id: 'gone', title: 'Unknown imported viewing', kind: 'film', type: 'summary', provenance: 'import', source_time: null, recorded_at: timestamp },
+    ] } };
+    return undefined;
+  });
+  await page.goto('/history');
+  await expect(page.getByRole('heading', { name: 'Viewing history' })).toBeVisible();
+  await expect(page.locator('time')).toHaveAttribute('datetime', new Date(timestamp).toISOString());
+  await expect(page.getByText('Date unknown')).toHaveCount(1);
+  await check(page, errors);
+  await page.screenshot({ path: testInfo.outputPath('history-desktop.png') });
+  await page.getByRole('button', { name: 'Clear history' }).click();
+  await expect(page.getByText('Local completion')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo clear' }).click();
+  await expect(page.getByText('Local completion')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await check(page, errors);
+  await page.screenshot({ path: testInfo.outputPath('history-phone.png') });
+  await page.goto('/detail/film-1');
+  const select = page.getByRole('combobox', { name: 'Your rating' });
+  await expect(select).toHaveValue('2');
+  await select.selectOption('5');
+  await expect(select).toBeEnabled();
+  await expect(select).toHaveValue('5');
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: 'Your rating' })).toHaveValue('5');
+  await check(page, errors);
 });

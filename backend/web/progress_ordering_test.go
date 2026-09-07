@@ -95,7 +95,10 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	second := plan()
 	heartbeat(second, 400, 1, 1)
 	state(400, 0)
-	heartbeat(first, 900, 1<<62, 1<<62)
+	stalePlan := request("POST", first, `{"position_ms":900,"observation":4611686018427387904,"observed_at":4611686018427387904}`)
+	if stalePlan.Code != http.StatusForbidden {
+		t.Fatalf("superseded heartbeat=%d, want 403", stalePlan.Code)
+	}
 	state(400, 0)
 	for _, watched := range []bool{true, false} {
 		w := request("PUT", "/api/v1/catalog/watched/film/film", fmt.Sprintf(`{"watched":%t}`, watched))
@@ -116,8 +119,25 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	if ended.Code != 200 {
 		t.Fatalf("ended=%d", ended.Code)
 	}
+	var endedAck struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := json.Unmarshal(ended.Body.Bytes(), &endedAck); err != nil || !endedAck.Accepted {
+		t.Fatalf("ended acknowledgement = %s: %v", ended.Body, err)
+	}
+	stale := request("POST", third, `{"position_ms":100,"observation":1}`)
+	var staleAck struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := json.Unmarshal(stale.Body.Bytes(), &staleAck); err != nil || staleAck.Accepted {
+		t.Fatalf("stale acknowledgement = %s: %v", stale.Body, err)
+	}
 	heartbeat(third, 200, 3, 1)
 	state(200, 1)
+	var completionEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM viewing_events WHERE profile_id=? AND catalog_id='film' AND event_type='completed'`, p.ID).Scan(&completionEvents); err != nil || completionEvents != 1 {
+		t.Fatalf("completion ledger=%d %v", completionEvents, err)
+	}
 	replay := plan()
 	heartbeat(replay, 50, 1, 1)
 	state(50, 0)

@@ -90,6 +90,20 @@ cannot always be distinguished from an intentionally emptied library; ensure the
 share is available before scanning. Unreadable or missing roots fail scans without
 replacing the last catalog.
 
+### External audio tracks
+
+Put an external audio file beside its film or episode and start its name with the
+complete video filename stem. Add a language tag and an optional label before the
+audio extension. For example, `Signal S01E01.jpn.Director Commentary.m4a` belongs
+to `Signal S01E01.mkv`. Flixr recognizes AAC, FLAC, M4A, MP3, Ogg, Opus and WAV
+sidecars. The language tag may use a two- or three-letter code, with optional
+hyphenated subtags.
+
+The player labels embedded and external tracks, including default and commentary
+metadata. Choosing a track with a known language remembers that language for the
+active profile and prefers it on the next episode. Unlabeled languages remain
+selectable without replacing the last known preference.
+
 ## Environment and secrets
 
 Compose `environment` and `env_file` are the supported ways to inject settings.
@@ -175,6 +189,35 @@ schema migration occurred, select the previous image version/digest, and restart
 Never run old and new containers against the same config or segment directory.
 Existing source/demo Compose files continue mounting their previous `/data` volumes
 and explicitly set `FLIXR_DATA_DIR`; no automatic data migration is performed.
+
+## Database and log maintenance
+
+FlixR retains the current catalog scan report and the 31 most recent earlier
+reports. Saving a scan status and pruning older reports is one database transaction;
+the matching per-file outcomes are removed with the report. Owner-recovery audit
+events are durable security records and are not deleted by scan, artwork, or log
+maintenance.
+
+SQLite remains in WAL mode and uses its conservative automatic checkpoint threshold
+of 1,000 WAL pages. FlixR does not schedule manual checkpoints or a full `VACUUM`.
+Stop FlixR before any operator-run database maintenance and keep the database, WAL,
+and shared-memory files together when backing up or restoring the data volume.
+
+FlixR writes application logs to stdout and stderr; the container runtime owns those
+logs. The shipped release Compose file uses Docker's `json-file` driver with three
+10 MiB files. If a deployment replaces that logging block or uses another runtime,
+configure an equivalent finite size and file count there. A Compose override can
+apply the same bound explicitly:
+
+```yaml
+services:
+  flixr:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
 
 ### Recover a forgotten owner password
 

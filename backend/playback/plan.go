@@ -20,22 +20,27 @@ var (
 
 // MediaProperties is the path-free media description consumed by the planner.
 type MediaProperties struct {
-	Container       string   `json:"container"`
-	VideoCodec      string   `json:"video_codec"`
-	VideoProfile    string   `json:"video_profile,omitempty"`
-	VideoLevel      int      `json:"video_level,omitempty"`
-	Width           int      `json:"width,omitempty"`
-	Height          int      `json:"height,omitempty"`
-	VideoBitrate    int64    `json:"video_bitrate,omitempty"`
-	FrameRateMilli  int      `json:"frame_rate_milli,omitempty"`
-	BitDepth        int      `json:"bit_depth,omitempty"`
-	HDR             string   `json:"hdr,omitempty"`
-	AudioCodec      string   `json:"audio_codec"`
-	AudioProfile    string   `json:"audio_profile,omitempty"`
-	AudioChannels   int      `json:"audio_channels,omitempty"`
-	AudioSampleRate int      `json:"audio_sample_rate,omitempty"`
-	AudioBitrate    int64    `json:"audio_bitrate,omitempty"`
-	Subtitles       []string `json:"subtitles,omitempty"`
+	Container              string   `json:"container"`
+	VideoCodec             string   `json:"video_codec"`
+	VideoProfile           string   `json:"video_profile,omitempty"`
+	VideoLevel             int      `json:"video_level,omitempty"`
+	Width                  int      `json:"width,omitempty"`
+	Height                 int      `json:"height,omitempty"`
+	VideoBitrate           int64    `json:"video_bitrate,omitempty"`
+	FrameRateMilli         int      `json:"frame_rate_milli,omitempty"`
+	BitDepth               int      `json:"bit_depth,omitempty"`
+	HDR                    string   `json:"hdr,omitempty"`
+	AudioCodec             string   `json:"audio_codec"`
+	AudioProfile           string   `json:"audio_profile,omitempty"`
+	AudioChannels          int      `json:"audio_channels,omitempty"`
+	AudioSampleRate        int      `json:"audio_sample_rate,omitempty"`
+	AudioBitrate           int64    `json:"audio_bitrate,omitempty"`
+	AudioStreamIndex       int      `json:"audio_stream_index"`
+	AudioSourceStreamIndex int      `json:"-"`
+	AudioExternal          bool     `json:"audio_external,omitempty"`
+	AudioSelected          bool     `json:"-"`
+	RequiresAudioMapping   bool     `json:"-"`
+	Subtitles              []string `json:"subtitles,omitempty"`
 }
 
 // ClientCapabilities declares exact original-media and fMP4 HLS support.
@@ -71,23 +76,28 @@ const (
 
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
-	Kind            Kind   `json:"kind"`
-	Container       string `json:"container,omitempty"`
-	VideoCodec      string `json:"video_codec,omitempty"`
-	VideoProfile    string `json:"video_profile,omitempty"`
-	VideoLevel      int    `json:"video_level,omitempty"`
-	Width           int    `json:"width,omitempty"`
-	Height          int    `json:"height,omitempty"`
-	VideoBitrate    int64  `json:"video_bitrate,omitempty"`
-	FrameRateMilli  int    `json:"frame_rate_milli,omitempty"`
-	BitDepth        int    `json:"bit_depth,omitempty"`
-	HDR             string `json:"hdr,omitempty"`
-	AudioCodec      string `json:"audio_codec,omitempty"`
-	AudioProfile    string `json:"audio_profile,omitempty"`
-	AudioChannels   int    `json:"audio_channels,omitempty"`
-	AudioSampleRate int    `json:"audio_sample_rate,omitempty"`
-	AudioBitrate    int64  `json:"audio_bitrate,omitempty"`
-	Description     string `json:"description,omitempty"`
+	SourceKey              string `json:"-"`
+	Kind                   Kind   `json:"kind"`
+	Container              string `json:"container,omitempty"`
+	VideoCodec             string `json:"video_codec,omitempty"`
+	VideoProfile           string `json:"video_profile,omitempty"`
+	VideoLevel             int    `json:"video_level,omitempty"`
+	Width                  int    `json:"width,omitempty"`
+	Height                 int    `json:"height,omitempty"`
+	VideoBitrate           int64  `json:"video_bitrate,omitempty"`
+	FrameRateMilli         int    `json:"frame_rate_milli,omitempty"`
+	BitDepth               int    `json:"bit_depth,omitempty"`
+	HDR                    string `json:"hdr,omitempty"`
+	AudioCodec             string `json:"audio_codec,omitempty"`
+	AudioProfile           string `json:"audio_profile,omitempty"`
+	AudioChannels          int    `json:"audio_channels,omitempty"`
+	AudioSampleRate        int    `json:"audio_sample_rate,omitempty"`
+	AudioBitrate           int64  `json:"audio_bitrate,omitempty"`
+	AudioStreamIndex       int    `json:"audio_stream_index"`
+	AudioSourceStreamIndex int    `json:"-"`
+	AudioExternal          bool   `json:"audio_external,omitempty"`
+	AudioSelected          bool   `json:"-"`
+	Description            string `json:"description,omitempty"`
 }
 
 const (
@@ -106,13 +116,15 @@ func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadi
 	if client, err = client.Normalized(); err != nil {
 		return Plan{}, err
 	}
-	if directCompatible(media, client) {
+	selection := sourcePlan(Unsupported, media)
+	if !media.RequiresAudioMapping && directCompatible(media, client) {
 		plan := sourcePlan(Direct, media)
 		plan.Description = "Original media"
 		return plan, nil
 	}
 	if !fallbackCompatible(client) {
-		return Plan{Kind: Unsupported}, ErrUnsupported
+		selection.Kind = Unsupported
+		return selection, ErrUnsupported
 	}
 	if remuxCompatible(media, client) {
 		if !ready.FFmpeg {
@@ -128,15 +140,15 @@ func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadi
 		}
 		return compatibilityPlan(media), nil
 	}
-	return Plan{Kind: Unsupported}, ErrUnsupported
+	return selection, ErrUnsupported
 }
 
 func sourcePlan(kind Kind, media MediaProperties) Plan {
-	return Plan{Kind: kind, Container: media.Container, VideoCodec: media.VideoCodec, VideoProfile: media.VideoProfile, VideoLevel: media.VideoLevel, Width: media.Width, Height: media.Height, VideoBitrate: media.VideoBitrate, FrameRateMilli: media.FrameRateMilli, BitDepth: media.BitDepth, HDR: media.HDR, AudioCodec: media.AudioCodec, AudioProfile: media.AudioProfile, AudioChannels: media.AudioChannels, AudioSampleRate: media.AudioSampleRate, AudioBitrate: media.AudioBitrate}
+	return Plan{Kind: kind, Container: media.Container, VideoCodec: media.VideoCodec, VideoProfile: media.VideoProfile, VideoLevel: media.VideoLevel, Width: media.Width, Height: media.Height, VideoBitrate: media.VideoBitrate, FrameRateMilli: media.FrameRateMilli, BitDepth: media.BitDepth, HDR: media.HDR, AudioCodec: media.AudioCodec, AudioProfile: media.AudioProfile, AudioChannels: media.AudioChannels, AudioSampleRate: media.AudioSampleRate, AudioBitrate: media.AudioBitrate, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected}
 }
 
 func compatibilityPlan(media MediaProperties) Plan {
-	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: media.Width, Height: media.Height, VideoBitrate: compatibilityVideoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, Description: "Bounded H.264/AAC compatibility stream"}
+	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: media.Width, Height: media.Height, VideoBitrate: compatibilityVideoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected, Description: "Bounded H.264/AAC compatibility stream"}
 	if media.AudioCodec != "" {
 		plan.AudioCodec, plan.AudioProfile = "aac", "LC"
 		plan.AudioChannels, plan.AudioSampleRate, plan.AudioBitrate = compatibilityAudioChannels, compatibilityAudioSampleRate, compatibilityAudioBitrate

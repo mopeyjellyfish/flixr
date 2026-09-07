@@ -68,6 +68,25 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i }).click();
   await page.getByRole('button', { name: /play blue horizon 2026/i }).click();
   await expectPlayback(page);
+  const directVideo = page.locator('video');
+  const acknowledgedHeartbeat = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/heartbeat') && response.ok());
+  await directVideo.dispatchEvent('pause');
+  const acknowledgedRequest = (await acknowledgedHeartbeat).request();
+  const acknowledgedPosition = Number((acknowledgedRequest.postDataJSON() as { position_ms: number }).position_ms);
+  expect(acknowledgedPosition).toBeGreaterThan(0);
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeFalsy();
+  const failedHeartbeat = page.waitForEvent('requestfailed', (request) => request.method() === 'POST' && request.url().endsWith('/heartbeat'));
+  const failedPlan = page.waitForEvent('requestfailed', (request) => request.method() === 'POST' && request.url().endsWith('/playback/plans'));
+  await directVideo.dispatchEvent('pause');
+  await Promise.all([failedHeartbeat, failedPlan]);
+  const reconnectPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
+  await page.context().setOffline(false);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeTruthy();
+  const reconnectBody = await (await reconnectPlan).json() as { resume_ms: number };
+  expect(reconnectBody.resume_ms).toBe(acknowledgedPosition);
+  await expect.poll(() => directVideo.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await page.screenshot({ path: testInfo.outputPath('production-direct-playback-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -75,8 +94,35 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('button', { name: /back to library/i }).click();
   await expect(page.locator('[data-catalog-id]:focus')).toHaveAccessibleName(/blue horizon 2026/i);
+  let faultSession = '';
+  let injectedSegmentFailures = 0;
+  const failInitialSegments = async (route: import('@playwright/test').Route) => {
+    const match = new URL(route.request().url()).pathname.match(/\/playback\/sessions\/([^/]+)\/segment-[^/]+\.m4s$/);
+    if (!match) return route.continue();
+    faultSession ||= match[1];
+    if (match[1] === faultSession) {
+      injectedSegmentFailures += 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'playback_failed' } }) });
+    }
+    return route.continue();
+  };
+  await page.route('**/api/v1/playback/sessions/*/segment-*.m4s', failInitialSegments);
+  const initialCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
   await page.getByRole('button', { name: /film compatibility check 2026/i }).click();
   await page.getByRole('button', { name: /play compatibility check 2026/i }).click();
+  const initialCompatibilityBody = await (await initialCompatibilityPlan).json() as { session_id: string; heartbeat_url: string };
+  const acknowledgedCompatibilityPosition = 750;
+  const compatibilityHeartbeat = await page.evaluate(async ({ heartbeatURL, positionMS }) => {
+    const response = await fetch(heartbeatURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ position_ms: positionMS, observation: 1 }) });
+    return response.status;
+  }, { heartbeatURL: initialCompatibilityBody.heartbeat_url, positionMS: acknowledgedCompatibilityPosition });
+  expect(compatibilityHeartbeat).toBe(200);
+  const recoveredCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
+  const recoveredCompatibilityBody = await (await recoveredCompatibilityPlan).json() as { session_id: string; resume_ms: number };
+  expect(recoveredCompatibilityBody.session_id).not.toBe(initialCompatibilityBody.session_id);
+  expect(recoveredCompatibilityBody.resume_ms).toBe(acknowledgedCompatibilityPosition);
+  expect(injectedSegmentFailures).toBeGreaterThan(0);
+  await page.unroute('**/api/v1/playback/sessions/*/segment-*.m4s', failInitialSegments);
   await expectPlayback(page);
   await page.screenshot({ path: testInfo.outputPath('production-transcode-playback-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: /back to library/i }).click();
@@ -84,6 +130,9 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /series signal/i }).click();
   await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
   await expectPlayback(page);
+  const audio = page.getByRole('combobox', { name: /audio track/i });
+  await expect(audio).toBeVisible();
+  await expect(audio.locator('option')).toHaveText([/English/, /French/, /Director Commentary.*Japanese.*External/]);
   const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
   await page.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
@@ -91,10 +140,35 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
     media.dispatchEvent(new Event('seeked', { bubbles: true }));
   });
   expect((await seekResponse).ok()).toBeTruthy();
+  const frenchResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/audio'));
+  await audio.selectOption('embedded:2');
+  const french = await frenchResponse;
+  expect(french.ok()).toBeTruthy();
+  const frenchPlan = await french.json() as { plan: { audio_stream_index: number }; resume_ms: number };
+  expect(frenchPlan.plan.audio_stream_index).toBe(2);
+  expect(frenchPlan.resume_ms).toBeGreaterThanOrEqual(100);
+  await expect.poll(() => page.locator('video').evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
+  const externalResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/audio'));
+  await audio.selectOption('external:3');
+  const external = await externalResponse;
+  expect(external.ok()).toBeTruthy();
+  const externalPlan = await external.json() as { plan: { audio_stream_index: number; audio_external: boolean } };
+  expect(externalPlan.plan).toMatchObject({ audio_stream_index: 3, audio_external: true });
   await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
-  await page.getByRole('button', { name: /back to library/i }).click();
-
-  await page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i }).click();
+  const firstEpisodeURL = page.url();
+  await expect(page.getByRole('heading', { name: 'Next episode' })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('dialog')).toContainText(/S1 E2 · Signal/i);
+  await page.screenshot({ path: testInfo.outputPath('production-next-episode-countdown-desktop.png'), fullPage: true });
+  await expect.poll(() => page.url(), { timeout: 20_000 }).not.toBe(firstEpisodeURL);
+  await expectPlaybackStartedAutomatically(page);
+  await expect(page.getByRole('heading', { name: 'End of series' })).toBeVisible({ timeout: 20_000 });
+  await page.screenshot({ path: testInfo.outputPath('production-end-of-series-desktop.png'), fullPage: true });
+  const refreshedHome = page.waitForResponse((response) => response.url().includes('/api/v1/catalog/view') && response.request().method() === 'GET');
+  await page.getByRole('button', { name: /return to your library/i }).click();
+  expect((await refreshedHome).ok()).toBeTruthy();
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(page.getByRole('region', { name: 'Continue Watching' }).getByRole('button', { name: /series signal/i })).toHaveCount(0);
+  await page.getByRole('region', { name: 'New' }).getByRole('button', { name: /series signal/i }).click();
   await expect(page.getByRole('dialog')).toContainText(/Signal.*Season 1 · Episode 1/i);
   await expect(page).toHaveURL(/\/detail\//);
   await page.reload();
@@ -110,7 +184,20 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
   await acceptScreens(page, browser, testInfo);
-  expect(errors).toEqual([]);
+  const activeGenerations = await page.evaluate(async () => {
+    const login = await fetch('/api/v1/owner/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'production-owner-password' }),
+    });
+    if (!login.ok) throw new Error(`owner login failed with HTTP ${login.status}`);
+    const status = await fetch('/api/v1/owner/playback/status');
+    if (!status.ok) throw new Error(`playback status failed with HTTP ${status.status}`);
+    const body = await status.json() as { generations: unknown[] };
+    return body.generations;
+  });
+  expect(activeGenerations).toEqual([]);
+  expect(errors.filter((message) => !message.includes('ERR_INTERNET_DISCONNECTED') && !message.includes('503'))).toEqual([]);
   expect(externalRequests).toEqual([]);
 });
 
@@ -119,5 +206,12 @@ async function expectPlayback(page: import('@playwright/test').Page) {
   await expect(video).toBeVisible();
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
+}
+
+async function expectPlaybackStartedAutomatically(page: import('@playwright/test').Page) {
+  const video = page.locator('video');
+  await expect(video).toBeVisible();
+  await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
 }

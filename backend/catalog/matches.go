@@ -30,6 +30,11 @@ type CandidateProvider interface {
 	ByID(context.Context, string, string, string, string, string) (Enrichment, error)
 }
 
+type stagedMatchArtwork struct {
+	available map[string]Artwork
+	pending   map[string]string
+}
+
 func (c *Catalog) MetadataTargets() []Item {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -72,7 +77,7 @@ func (c *Catalog) Candidates(ctx context.Context, kind, id, query, language, reg
 
 func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, region string) (Item, error) {
 	c.mu.RLock()
-	_, ok := c.metadataTarget(kind, id)
+	expected, ok := c.metadataTarget(kind, id)
 	provider, token := c.provider, c.token
 	c.mu.RUnlock()
 	if !ok {
@@ -98,64 +103,32 @@ func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, reg
 	}
 	// Provider paths are never published. They become local URLs only after this owner choice commits.
 	enrichment.Poster, enrichment.Backdrop = "", ""
-	matched, err := c.saveMatch(kind, id, enrichment, language, region, true)
+	matched, err := c.saveMatch(kind, id, enrichment, language, region, true, &expected, artwork)
 	if err != nil {
 		return Item{}, err
 	}
-	c.publishMatchArtwork(kind, id, enrichment.ProviderID, language, region, artwork)
 	return c.metadataResult(kind, id, matched), nil
 }
 
-func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) map[string]Artwork {
+func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) stagedMatchArtwork {
 	c.mu.RLock()
 	provider, ok := c.provider.(ArtworkProvider)
 	c.mu.RUnlock()
 	if !ok || c.db == nil {
-		return nil
+		return stagedMatchArtwork{}
 	}
-	out := map[string]Artwork{}
+	out := stagedMatchArtwork{available: map[string]Artwork{}, pending: map[string]string{}}
 	for kind, imagePath := range map[string]string{"poster": enrichment.Poster, "backdrop": enrichment.Backdrop} {
 		if imagePath == "" || ctx.Err() != nil {
 			continue
 		}
 		if art, err := provider.FetchArtwork(ctx, imagePath); err == nil && len(art.Bytes) > 0 && len(art.Bytes) <= maxArtworkSource && allowedArtworkContentType(art.ContentType) {
-			out[kind] = art
+			out.available[kind] = art
+		} else {
+			out.pending[kind] = imagePath
 		}
 	}
 	return out
-}
-
-func (c *Catalog) publishMatchArtwork(kind, id, providerID, language, region string, artwork map[string]Artwork) {
-	if len(artwork) == 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.metadataTarget(kind, id)
-	if !ok || !item.OwnerMatch || item.ProviderID != providerID || item.Language != language || item.Region != region {
-		return
-	}
-	for imageKind, art := range artwork {
-		url, err := c.cacheArtwork(id, imageKind, art)
-		if err != nil || url == "" {
-			continue
-		}
-		if imageKind == "poster" {
-			item.Poster = url
-		} else {
-			item.Backdrop = url
-		}
-	}
-	if err := c.updateArtworkReferences(kind, item); err != nil {
-		return
-	}
-	if kind == "film" {
-		c.items[id] = item
-		return
-	}
-	series := c.series[id]
-	series.Poster, series.Backdrop = item.Poster, item.Backdrop
-	c.series[id] = series
 }
 
 func (c *Catalog) metadataResult(kind, id string, fallback Item) Item {
@@ -167,20 +140,8 @@ func (c *Catalog) metadataResult(kind, id string, fallback Item) Item {
 	return fallback
 }
 
-func (c *Catalog) updateArtworkReferences(kind string, item Item) error {
-	if c.db == nil {
-		return nil
-	}
-	table := "catalog_items"
-	if kind == "series" {
-		table = "catalog_series"
-	}
-	_, err := c.db.Exec(`UPDATE `+table+` SET poster=?,backdrop=? WHERE id=?`, item.Poster, item.Backdrop, item.ID)
-	return err
-}
-
 func (c *Catalog) Unmatch(kind, id string) (Item, error) {
-	return c.saveMatch(kind, id, Enrichment{}, "", "", false)
+	return c.saveMatch(kind, id, Enrichment{}, "", "", false, nil, stagedMatchArtwork{})
 }
 
 func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
@@ -196,11 +157,18 @@ func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
 	return Item{}, false
 }
 
-func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, region string, owner bool) (Item, error) {
+func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, region string, owner bool, expected *Item, artwork stagedMatchArtwork) (Item, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.scanning {
 		return Item{}, ErrMetadataBusy
+	}
+	current, ok := c.metadataTarget(kind, id)
+	if !ok {
+		return Item{}, ErrMetadataNotFound
+	}
+	if expected != nil && !sameMetadataIdentity(current, *expected) {
+		return Item{}, ErrMetadataStale
 	}
 	if kind == "film" {
 		item, ok := c.items[id]
@@ -208,7 +176,8 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 			return Item{}, ErrMetadataNotFound
 		}
 		applyMatch(&item, enrichment, language, region, owner)
-		if err := c.updateMatch(kind, item); err != nil {
+		item, err := c.updateMatch(kind, item, artwork)
+		if err != nil {
 			return Item{}, err
 		}
 		c.advanceMetadataVersion(kind, id)
@@ -224,9 +193,11 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 		applyMatch(&item, enrichment, language, region, owner)
 		series.ProviderID, series.Provider, series.Language, series.Region, series.Confidence, series.OwnerMatch, series.OwnerUnmatch, series.Year, series.Synopsis, series.Poster, series.Backdrop = item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop
 		series.LocalOnly = !owner
-		if err := c.updateMatch(kind, item); err != nil {
+		item, err := c.updateMatch(kind, item, artwork)
+		if err != nil {
 			return Item{}, err
 		}
+		series.Poster, series.Backdrop = item.Poster, item.Backdrop
 		c.advanceMetadataVersion(kind, id)
 		c.series[id] = series
 		return item, nil
@@ -245,16 +216,82 @@ func applyMatch(item *Item, enrichment Enrichment, language, region string, owne
 	}
 }
 
-func (c *Catalog) updateMatch(kind string, item Item) error {
+func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork) (Item, error) {
 	if c.db == nil {
-		return nil
+		return item, nil
 	}
 	table := "catalog_items"
 	if kind == "series" {
 		table = "catalog_series"
 	}
-	_, err := c.db.Exec(`UPDATE `+table+` SET provider_id=?,metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=?,year=?,synopsis=?,poster=?,backdrop=?,local_only=? WHERE id=?`, item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, boolInt(item.OwnerMatch), boolInt(item.OwnerUnmatch), item.Year, item.Synopsis, item.Poster, item.Backdrop, boolInt(item.LocalOnly), item.ID)
-	return err
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	var created, replaced []string
+	committed := false
+	defer func() {
+		cleanup := created
+		if committed {
+			cleanup = replaced
+		}
+		for _, name := range cleanup {
+			c.removeArtworkObject(name)
+		}
+	}()
+	tx, err := c.db.Begin()
+	if err != nil {
+		return Item{}, err
+	}
+	defer tx.Rollback()
+	for _, artworkKind := range []string{"poster", "backdrop"} {
+		art, ok := artwork.available[artworkKind]
+		if !ok {
+			continue
+		}
+		name, previous, err := c.replaceArtwork(tx, item.ID, artworkKind, art)
+		if err != nil {
+			return Item{}, err
+		}
+		created, replaced = append(created, name), append(replaced, previous)
+		if artworkKind == "poster" {
+			item.Poster = artworkURL(item.ID, artworkKind)
+		} else {
+			item.Backdrop = artworkURL(item.ID, artworkKind)
+		}
+	}
+	if _, err := tx.Exec(`UPDATE `+table+` SET provider_id=?,metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=?,year=?,synopsis=?,poster=?,backdrop=?,local_only=? WHERE id=?`, item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, boolInt(item.OwnerMatch), boolInt(item.OwnerUnmatch), item.Year, item.Synopsis, item.Poster, item.Backdrop, boolInt(item.LocalOnly), item.ID); err != nil {
+		return Item{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+		return Item{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+		return Item{}, err
+	}
+	if kind == "series" {
+		if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='episode' AND parent_catalog_id=?`, item.ID); err != nil {
+			return Item{}, err
+		}
+		if _, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind='episode' AND parent_catalog_id=?`, item.ID); err != nil {
+			return Item{}, err
+		}
+	}
+	for _, artworkKind := range []string{"poster", "backdrop"} {
+		providerPath := artwork.pending[artworkKind]
+		if providerPath == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO catalog_artwork_retries(catalog_kind,catalog_id,artwork_kind,provider_id,provider_path) VALUES(?,?,?,?,?)`, kind, item.ID, artworkKind, item.ProviderID, providerPath); err != nil {
+			return Item{}, err
+		}
+	}
+	if err := detectProviderConflicts(tx); err != nil {
+		return Item{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Item{}, err
+	}
+	committed = true
+	return item, nil
 }
 
 // Called under mu after a successful owner identity change. Versions only need

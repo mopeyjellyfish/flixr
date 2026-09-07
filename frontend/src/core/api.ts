@@ -21,7 +21,7 @@ export type CatalogItem = {
 	frame_rate_milli?: number;
 	bit_depth?: number;
 	hdr?: string;
-	audio?: Array<{ codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number }>;
+	audio?: AudioTrack[];
   audio_codec?: string;
   duration_ms?: number;
   year?: number;
@@ -36,13 +36,19 @@ export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' |
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
+export type EpisodeSequence =
+  | { state: 'next'; episode: Episode }
+  | { state: 'end_of_series' | 'not_episodic' | 'context_unavailable'; episode?: never };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
-export type TMDBSettings = { configured: boolean };
+export type TMDBSettings = { provider: 'tmdb'; configured: boolean; state: 'unavailable' | 'configured' | 'running' | 'failed'; message: string };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
 export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
 export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };
+export type IdentityConflict = { id: number; kind: string; reason: string; state: string; left: CatalogItem; right: CatalogItem };
+export type IdentityMerge = { id: string; kind: string; state: string; survivor: CatalogItem; source: CatalogItem; decisions: string[] };
+export type IdentityRepairs = { conflicts: IdentityConflict[]; merges: IdentityMerge[] };
 export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number | null };
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
 export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
@@ -58,14 +64,15 @@ export type ApiErrorCode =
   | 'playback_capability_unknown'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_unavailable' | 'metadata_busy'
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
+export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
 export type PlaybackPlan = {
-  plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string };
+  plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean };
   session_id: string;
   media_url: string;
   heartbeat_url: string;
@@ -74,6 +81,7 @@ export type PlaybackPlan = {
   resume_ms: number;
   stream_offset_ms: number;
   expires_at: number;
+  audio_tracks?: AudioTrack[];
 };
 export class ApiError extends Error {
   constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string) {
@@ -95,8 +103,11 @@ export function messageFor(code: string): string {
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
     scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
+    metadata_invalid_credential: 'That TMDB API Read Access Token is not valid.',
     metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     metadata_busy: 'Wait for the current scan to finish, then retry metadata repair.',
+    metadata_not_found: 'That title is no longer available for identity repair.',
+    identity_conflict: 'This title is already part of an identity repair. Refresh the repair list and try again.',
     playback_unsupported: 'This title is not compatible with this browser.',
 	playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
@@ -111,3 +122,6 @@ export function messageFor(code: string): string {
     playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }
+export type ViewingEvent = { id: string; catalog_id: string; title: string; kind: string; type: 'completed' | 'summary'; provenance: 'local' | 'import'; source_time: number | null; recorded_at: number };
+export type HistoryPage = { events: ViewingEvent[]; next?: string };
+export type Rating = { catalog_id: string; value: number; provenance: 'local' | 'import'; updated_at: number };

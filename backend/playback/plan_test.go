@@ -30,6 +30,9 @@ func TestPlanFor(t *testing.T) {
 		err    error
 	}{
 		{"compatible original", MediaProperties{Container: "mov,mp4,m4a", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, VideoBitrate: 5968, FrameRateMilli: 24000, BitDepth: 8, AudioCodec: "aac", AudioProfile: "LC", AudioChannels: 2, AudioSampleRate: 48000, AudioBitrate: 2323}, browser, ServerReadiness{}, Direct, nil},
+		{"source default selection stays original", MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, VideoBitrate: 5968, FrameRateMilli: 24000, BitDepth: 8, AudioCodec: "aac", AudioProfile: "LC", AudioChannels: 2, AudioSampleRate: 48000, AudioBitrate: 2323, AudioStreamIndex: 2}, browser, ServerReadiness{}, Direct, nil},
+		{"non-default selection requires mapping", MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, VideoBitrate: 5968, FrameRateMilli: 24000, BitDepth: 8, AudioCodec: "aac", AudioProfile: "LC", AudioChannels: 2, AudioSampleRate: 48000, AudioBitrate: 2323, AudioStreamIndex: 3, RequiresAudioMapping: true}, browser, ServerReadiness{FFmpeg: true}, Remux, nil},
+		{"external selection requires mapping", MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, VideoBitrate: 5968, FrameRateMilli: 24000, BitDepth: 8, AudioCodec: "aac", AudioProfile: "LC", AudioChannels: 2, AudioSampleRate: 48000, AudioBitrate: 2323, AudioStreamIndex: 0, AudioExternal: true, RequiresAudioMapping: true}, browser, ServerReadiness{FFmpeg: true}, Remux, nil},
 		{"constrained compatibility output is unsupported", MediaProperties{Container: "mp4", VideoCodec: "h264", AudioCodec: "aac", Width: 3840, Height: 2160, FrameRateMilli: 60000, BitDepth: 10, AudioChannels: 6, HDR: "smpte2084"}, ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRateMilli: 30000, MaxBitDepth: 8, MaxAudioChannels: 2}, ServerReadiness{FFmpeg: true}, Unsupported, ErrUnsupported},
 		{"unknown direct capability transcodes only with exact fallback evidence", MediaProperties{Container: "mp4", VideoCodec: "h264", Width: 320, Height: 180, FrameRateMilli: 24000, AudioCodec: "aac"}, ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}, ServerReadiness{FFmpeg: true}, Transcode, nil},
 		{"compatible WebM original", MediaProperties{Container: "webm", VideoCodec: "vp9", AudioCodec: "opus"}, ClientCapabilities{Containers: []string{"webm"}, VideoCodecs: []string{"vp9"}, AudioCodecs: []string{"opus"}, SupportsDirect: true}, ServerReadiness{}, Direct, nil},
@@ -47,6 +50,9 @@ func TestPlanFor(t *testing.T) {
 			}
 			if !errors.Is(err, tt.err) {
 				t.Fatalf("error = %v, want %v", err, tt.err)
+			}
+			if err == nil && (got.AudioStreamIndex != tt.media.AudioStreamIndex || got.AudioExternal != tt.media.AudioExternal) {
+				t.Fatalf("audio selection = %d external=%v, want %d external=%v", got.AudioStreamIndex, got.AudioExternal, tt.media.AudioStreamIndex, tt.media.AudioExternal)
 			}
 		})
 	}

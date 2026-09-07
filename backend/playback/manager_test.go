@@ -48,28 +48,60 @@ type fakeExecutor struct {
 	processes    []*fakeProcess
 	commands     [][]string
 	ignoreSignal bool
+	skipManifest bool
+	onStart      func()
+	startErr     error
+}
+
+type pauseSuccessfulManifestStatFS struct {
+	afero.Fs
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
+	info, err := f.Fs.Stat(name)
+	if err == nil && filepath.Base(name) == "master.m3u8" {
+		f.once.Do(func() {
+			close(f.observed)
+			<-f.release
+		})
+	}
+	return info, err
 }
 
 func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
 	}
+	if e.onStart != nil {
+		e.onStart()
+	}
 	process := newFakeProcess(e.ignoreSignal)
 	e.mu.Lock()
+	if e.startErr != nil {
+		err := e.startErr
+		e.startErr = nil
+		e.mu.Unlock()
+		return nil, err
+	}
 	e.processes = append(e.processes, process)
 	e.commands = append(e.commands, append([]string(nil), args...))
 	e.mu.Unlock()
-	manifest := args[len(args)-1]
-	var playlist strings.Builder
-	playlist.WriteString("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n")
-	for index := range 15 {
-		fmt.Fprintf(&playlist, "#EXTINF:4.0,\nsegment-%06d.m4s\n", index)
-	}
-	if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
-		return nil, err
+	if !e.skipManifest {
+		manifest := args[len(args)-1]
+		var playlist strings.Builder
+		playlist.WriteString("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n")
+		for index := range 15 {
+			fmt.Fprintf(&playlist, "#EXTINF:4.0,\nsegment-%06d.m4s\n", index)
+		}
+		if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
+			return nil, err
+		}
 	}
 	return process, nil
 }
@@ -133,6 +165,213 @@ func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
 	}
 	if len(manager.Status().Generations) != 0 {
 		t.Fatal("generation remains after its final lease")
+	}
+}
+
+func TestManagerStopsOnlyPlaybackOwnedByOneViewerSession(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	first, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.CreateForViewer("viewer-b", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID != second.GenerationID {
+		t.Fatal("viewer sessions did not share the compatible generation")
+	}
+
+	manager.StopViewer("viewer-a")
+	if _, ok := manager.LookupForViewer(first.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("stopped viewer retained playback authority")
+	}
+	if _, ok := manager.LookupForViewer(second.ID, "viewer-b", "profile-a", false); !ok {
+		t.Fatal("stopping one viewer interrupted another viewer on the same profile")
+	}
+	if executor.processes[0].signaled.Load() {
+		t.Fatal("shared FFmpeg process stopped while another viewer held a lease")
+	}
+
+	manager.StopViewer("viewer-b")
+	if !executor.processes[0].signaled.Load() {
+		t.Fatal("FFmpeg process remained after its final viewer lease stopped")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("generation remained after its final viewer lease stopped")
+	}
+}
+
+func TestManagerSupersedesOnlyOlderPlansForTheSameViewerAndTitle(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDevice, err := manager.CreateForViewer("viewer-b", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopSupersededPlans(current)
+
+	if _, ok := manager.LookupForViewer(old.ID, old.ViewerID, old.ProfileID, false); ok {
+		t.Fatal("older plan retained its lease")
+	}
+	if _, ok := manager.LookupForViewer(otherDevice.ID, otherDevice.ViewerID, otherDevice.ProfileID, false); !ok {
+		t.Fatal("supersession interrupted another device")
+	}
+	if _, ok := manager.LookupForViewer(current.ID, current.ViewerID, current.ProfileID, false); !ok {
+		t.Fatal("supersession stopped the admitted plan")
+	}
+	if _, ok := manager.LookupForViewer(later.ID, later.ViewerID, later.ProfileID, false); !ok {
+		t.Fatal("an earlier response revoked later playback")
+	}
+}
+
+func TestManagerIgnoresEmptyViewerTeardownIdentity(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Direct}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopViewer("")
+	if _, ok := manager.Lookup(session.ID, "profile-a", false); !ok {
+		t.Fatal("an empty viewer identity stopped unrelated playback")
+	}
+}
+
+func TestManagerDoesNotRetainARevocationFenceWithoutPendingCreates(t *testing.T) {
+	manager, _ := testManager(t, nil)
+
+	manager.StopViewer("viewer-a")
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatalf("retained %d inactive viewer revocation fences", len(manager.revokedViewers))
+	}
+}
+
+func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	started := make(chan struct{})
+	resume := make(chan struct{})
+	executor.onStart = func() {
+		close(started)
+		<-resume
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+		result <- err
+	}()
+	<-started
+
+	manager.StopViewer("viewer-a")
+	close(resume)
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("late create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("late FFmpeg candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("late create retained a generation")
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatal("viewer revocation fence remained after pending create finished")
+	}
+}
+
+func TestManagerRejectsAViewerCreateRevokedWhileWaitingForManifest(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	executor.skipManifest = true
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.mu.Lock()
+		registered := len(manager.sessions) == 1
+		manager.mu.Unlock()
+		if registered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("create did not register its pending viewer session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	manager.StopViewer("viewer-a")
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("late manifest create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("revoked manifest candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("revoked manifest candidate retained a generation")
+	}
+}
+
+func TestManagerRejectsAViewerRevokedAfterSuccessfulManifestWait(t *testing.T) {
+	settings := DefaultSettings(t.TempDir())
+	settings.LeaseTTL = 3 * time.Second
+	settings.HeartbeatInterval = time.Second
+	settings.ProcessGrace = 10 * time.Millisecond
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 2 << 20
+	settings.MaxGenerations = 2
+	fs := &pauseSuccessfulManifestStatFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+	executor := &fakeExecutor{}
+	manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+		result <- err
+	}()
+	<-fs.observed
+
+	manager.StopViewer("viewer-a")
+	close(fs.release)
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("revoked successful manifest candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("revoked successful manifest candidate retained a generation")
 	}
 }
 
@@ -331,11 +570,12 @@ func TestCleanupOrphansRefusesUnownedNonEmptyDirectory(t *testing.T) {
 
 func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	dir := t.TempDir()
-	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", dir, time.Second, time.Minute)
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", 2, dir, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "ffmpeg" || !strings.Contains(strings.Join(args, " "), "libx264") {
+	command := strings.Join(args, " ")
+	if name != "ffmpeg" || !strings.Contains(command, "libx264") || !strings.Contains(command, "-map 0:2") {
 		t.Fatalf("unexpected command: %s %v", name, args)
 	}
 	joined := strings.Join(args, " ")
@@ -344,13 +584,100 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
 		}
 	}
-	if _, _, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1}, "https://media.example/file", dir, 0, time.Minute); err == nil {
+	if _, _, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1}, "https://media.example/file", "", 1, dir, 0, time.Minute); err == nil {
 		t.Fatal("accepted a non-loopback input")
+	}
+	_, externalArgs, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, "http://127.0.0.1:8787/api/v1/playback/input/video", "http://127.0.0.1:8787/api/v1/playback/input/audio", 0, dir, 23*time.Second, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := strings.Join(externalArgs, " ")
+	if strings.Count(external, "-ss 23.000") != 2 || !strings.Contains(external, "-map 1:0") {
+		t.Fatalf("external audio command is not source-relative: %v", externalArgs)
+	}
+}
+
+func TestManagerAudioReplacementUsesDistinctJobAtGenerationLimit(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	firstPlan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	first, err := manager.Create("profile-a", "film-1", firstPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan := firstPlan
+	secondPlan.AudioStreamIndex = 2
+	second, err := manager.Replace(first.ID, "profile-a", secondPlan, 12_345)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Lookup(first.ID, "profile-a", false); ok {
+		t.Fatal("replacement kept old session")
+	}
+	if second.PositionMS != 12_345 || second.GenerationID == first.GenerationID || len(executor.processes) != 2 || !executor.processes[0].signaled.Load() {
+		t.Fatalf("replacement = %#v, processes = %d", second, len(executor.processes))
+	}
+}
+
+func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	first, err := manager.Create("profile-a", "film-1", plan, 0, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	executor.startErr = errors.New("synthetic startup failure")
+	executor.mu.Unlock()
+	plan.AudioStreamIndex = 2
+	if _, err := manager.Replace(first.ID, "profile-a", plan, 12_345); err == nil {
+		t.Fatal("replacement succeeded")
+	}
+	if current, ok := manager.Lookup(first.ID, "profile-a", false); !ok || current.PositionMS != 0 || current.ProgressGeneration != 7 {
+		t.Fatalf("failed replacement removed old session: %#v, %v", current, ok)
+	}
+	if len(executor.processes) != 1 || executor.processes[0].signaled.Load() {
+		t.Fatal("failed replacement interrupted old generation")
+	}
+}
+
+func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	session, err := manager.Create("profile-a", "film-1", plan, 4_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) != 1 {
+		t.Fatalf("commands = %d", len(executor.commands))
+	}
+	var tokens []string
+	for index, arg := range executor.commands[0] {
+		if arg == "-i" && index+1 < len(executor.commands[0]) {
+			tokens = append(tokens, filepath.Base(executor.commands[0][index+1]))
+		}
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("input tokens = %v", tokens)
+	}
+	if catalogID, audioIndex, external, ok := manager.Input(tokens[1]); !ok || catalogID != "film-1" || audioIndex != 2 || !external {
+		t.Fatalf("audio authority = %q %d %v %v", catalogID, audioIndex, external, ok)
+	}
+	if catalogID, sourceKey, ok := manager.InputSource(tokens[1]); !ok || catalogID != "film-1" || sourceKey != "source-a" {
+		t.Fatalf("audio source authority = %q %q %v", catalogID, sourceKey, ok)
+	}
+	if !manager.Stop(session.ID, "profile-a") {
+		t.Fatal("stop failed")
+	}
+	if _, _, _, ok := manager.Input(tokens[1]); ok {
+		t.Fatal("external audio authority survived generation stop")
 	}
 }
 
 func TestFFmpegCommandSuppliesRemuxBitrateEvidenceForTheMasterPlaylist(t *testing.T) {
-	_, args, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 4_000_000, AudioCodec: "aac", AudioBitrate: 192_000}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", t.TempDir(), 0, time.Minute)
+	_, args, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 4_000_000, AudioCodec: "aac", AudioBitrate: 192_000}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", -1, t.TempDir(), 0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,4 +762,34 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestSourceVersionSeparatesGenerationsAndInputAuthority(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	first, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "original", VideoBitrate: 1_000_000}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "replacement", VideoBitrate: 1_000_000}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID == second.GenerationID {
+		t.Fatal("replacement shared original generation")
+	}
+	manager.mu.Lock()
+	tokens := make(map[string]string)
+	for token, authority := range manager.inputs {
+		tokens[token] = authority.sourceKey
+	}
+	manager.mu.Unlock()
+	if len(tokens) != 2 {
+		t.Fatalf("input authorities %v", tokens)
+	}
+	for token, want := range tokens {
+		id, key, ok := manager.InputSource(token)
+		if !ok || id != "film" || key != want {
+			t.Fatalf("input %s %s %v", id, key, ok)
+		}
+	}
 }

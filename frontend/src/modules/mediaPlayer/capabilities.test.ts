@@ -6,7 +6,7 @@ const media: CatalogItem = {
 	id: 'film', title: 'Blue Horizon', kind: 'film', local_only: true,
 	container: 'mov,mp4,m4a,3gp,3g2,mj2', video_codec: 'h264', video_profile: 'High', video_level: 12,
 	width: 320, height: 180, bitrate: 5968, frame_rate_milli: 24000, bit_depth: 8,
-	audio: [{ codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 2323 }],
+	audio: [{ index: 1, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 2323 }],
 };
 
 afterEach(() => {
@@ -42,7 +42,7 @@ it('assesses the separately bounded H.264/AAC transcode output', async () => {
 	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
 	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
 
-	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', video_profile: 'Simple Profile', video_level: 1, bitrate: 647312, audio: [{ codec: 'mp3', channels: 1, sample_rate: 48000, bitrate: 64000 }] });
+	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', video_profile: 'Simple Profile', video_level: 1, bitrate: 647312, audio: [{ index: 1, codec: 'mp3', channels: 1, sample_rate: 48000, bitrate: 64000 }] });
 
 	expect(decodingInfo).toHaveBeenCalledTimes(1);
 	expect(decodingInfo).toHaveBeenCalledWith({
@@ -81,7 +81,7 @@ it('does not assess an output with dimensions the fixed encoder cannot produce',
 	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
 	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
 
-	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', width: 321, audio: [{ codec: 'mp3' }] });
+	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', width: 321, audio: [{ index: 1, codec: 'mp3' }] });
 
 	expect(decodingInfo).not.toHaveBeenCalled();
 	expect(result.supports_transcode).toBe(false);
@@ -92,7 +92,7 @@ it('assesses the rotated display geometry for a bounded portrait transcode', asy
 	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
 	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
 
-	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', width: 1080, height: 1920, audio: [{ codec: 'mp3' }] });
+	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', width: 1080, height: 1920, audio: [{ index: 1, codec: 'mp3' }] });
 
 	expect(decodingInfo).toHaveBeenCalledWith({
 		type: 'file',

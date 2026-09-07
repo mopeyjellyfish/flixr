@@ -96,6 +96,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/owner/sessions/{id}", s.revokeSession)
 	s.mux.HandleFunc("POST /api/v1/profiles/{id}/select", s.selectProfile)
 	s.mux.HandleFunc("GET /api/v1/catalog/home", s.home)
+	s.mux.HandleFunc("GET /api/v1/history", s.history)
+	s.mux.HandleFunc("POST /api/v1/history/import", s.importHistory)
+	s.mux.HandleFunc("POST /api/v1/history/clear", s.clearHistory)
+	s.mux.HandleFunc("POST /api/v1/history/clear/{id}/undo", s.undoClearHistory)
+	s.mux.HandleFunc("GET /api/v1/ratings/{id}", s.rating)
+	s.mux.HandleFunc("PUT /api/v1/ratings/{id}", s.rating)
+	s.mux.HandleFunc("DELETE /api/v1/ratings/{id}", s.rating)
 	s.mux.HandleFunc("GET /api/v1/catalog/search", s.search)
 	s.mux.HandleFunc("GET /api/v1/catalog/films/{id}", s.film)
 	s.mux.HandleFunc("GET /api/v1/catalog/series/{id}", s.series)
@@ -115,6 +122,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
 	s.mux.HandleFunc("GET /api/v1/owner/settings/tmdb", s.tmdbSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/tmdb", s.tmdbSettings)
+	s.mux.HandleFunc("GET /api/v1/owner/identity/repairs", s.identityRepairs)
+	s.mux.HandleFunc("POST /api/v1/owner/identity/merges", s.identityMerge)
+	s.mux.HandleFunc("POST /api/v1/owner/identity/merges/{id}/unmerge", s.identityUnmerge)
 	s.mux.HandleFunc("GET /api/v1/owner/metadata/unmatched", s.unmatchedMetadata)
 	s.mux.HandleFunc("GET /api/v1/owner/metadata/{kind}/{id}/candidates", s.metadataCandidates)
 	s.mux.HandleFunc("PUT /api/v1/owner/metadata/{kind}/{id}/match", s.metadataMatch)
@@ -131,11 +141,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/owner/readiness/recheck", s.recheckReadiness)
 	s.mux.HandleFunc("POST /api/v1/playback/plans", s.playbackPlan)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/media", s.playbackMedia)
+	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/next", s.playbackNext)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/stop", s.playbackStop)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/manifest.m3u8", s.playbackManifest)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/{name}", s.playbackSegment)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/heartbeat", s.playbackHeartbeat)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/seek", s.playbackSeek)
+	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/audio", s.playbackAudio)
 	s.mux.HandleFunc("GET /api/v1/playback/input/{token}", s.playbackInput)
 	s.mux.HandleFunc("GET /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/playback", s.playbackSettings)
@@ -252,10 +264,13 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
-	if err := s.house.Logout(s.session(r)); err != nil {
+	session := s.session(r)
+	viewerID, _ := s.house.SessionIdentity(session)
+	if err := s.house.Logout(session); err != nil {
 		fail(w, 500, "logout_failed")
 		return
 	}
+	s.playback.StopViewer(viewerID)
 	http.SetCookie(w, &http.Cookie{Name: "flixr_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	write(w, 200, map[string]bool{"logged_out": true})
 }
@@ -334,7 +349,7 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request")
 		return
 	}
-	p, e := s.house.UpdateProfile(r.PathValue("id"), v.Name, v.PIN, v.Unprotect)
+	p, revoked, e := s.house.UpdateProfileAndRevokeSessions(r.PathValue("id"), v.Name, v.PIN, v.Unprotect)
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
 			fail(w, 429, "credential_busy")
@@ -345,19 +360,26 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	for _, viewerID := range revoked {
+		s.playback.StopViewer(viewerID)
+	}
 	write(w, 200, p)
 }
 func (s *Server) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	if err := s.house.DeleteProfile(r.PathValue("id")); err != nil {
+	revoked, err := s.house.DeleteProfileAndRevokeSessions(r.PathValue("id"))
+	if err != nil {
 		if errors.Is(err, household.ErrProfileNotFound) {
 			fail(w, 404, "profile_not_found")
 		} else {
 			fail(w, 500, "profile_failed")
 		}
 		return
+	}
+	for _, viewerID := range revoked {
+		s.playback.StopViewer(viewerID)
 	}
 	write(w, 200, map[string]bool{"deleted": true})
 }
@@ -384,6 +406,7 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.playback.StopViewer(r.PathValue("id"))
 	write(w, 200, map[string]bool{"revoked": true})
 }
 func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +420,7 @@ func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request")
 		return
 	}
+	priorViewerID, _ := s.house.SessionIdentity(s.session(r))
 	x, e := s.house.Select(r.PathValue("id"), v.PIN)
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
@@ -408,6 +432,7 @@ func (s *Server) selectProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.playback.StopViewer(priorViewerID)
 	s.cookie(w, r, x)
 	write(w, 200, map[string]bool{"selected": true})
 }
@@ -618,7 +643,7 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+		write(w, http.StatusOK, s.catalog.MetadataStatus())
 		return
 	}
 	var v struct {
@@ -632,9 +657,22 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err := s.catalog.SetTMDBToken(strings.TrimSpace(v.Token)); err != nil {
+	token := strings.TrimSpace(v.Token)
+	if token != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		defer cancel()
+		if err := s.catalog.ValidateTMDBToken(ctx, token); err != nil {
+			if errors.Is(err, catalog.ErrInvalidCredential) {
+				fail(w, http.StatusBadRequest, "metadata_invalid_credential")
+			} else {
+				fail(w, http.StatusServiceUnavailable, "metadata_unavailable")
+			}
+			return
+		}
+	}
+	if err := s.catalog.SetTMDBToken(token); err != nil {
 		fail(w, http.StatusInternalServerError, "settings_failed")
 		return
 	}
-	write(w, http.StatusOK, map[string]bool{"configured": s.catalog.TMDBConfigured()})
+	write(w, http.StatusOK, s.catalog.MetadataStatus())
 }
