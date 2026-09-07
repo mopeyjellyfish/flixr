@@ -103,3 +103,6 @@ export function messageFor(code: string): string {
     playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }
+export type ViewingEvent = { id: string; catalog_id: string; title: string; kind: string; type: 'completed' | 'summary'; provenance: 'local' | 'import'; source_time: number | null; recorded_at: number };
+export type HistoryPage = { events: ViewingEvent[]; next?: string };
+export type Rating = { catalog_id: string; value: number; provenance: 'local' | 'import'; updated_at: number };

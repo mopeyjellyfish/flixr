@@ -225,3 +225,11 @@ changed. A stale generation returns HTTP 409 `progress_conflict`; read the lates
 state and let the viewer decide whether to retry. Never automatically retry an
 old position with a newly read token. The shipped player uses playback sessions
 rather than this legacy route.
+
+## Personal history and ratings
+
+Personal ratings are profile-scoped local records. They are never provider metadata. The viewing ledger is immutable and records a snapshot of the catalog ID, title, and kind without a foreign key to a catalog row, so a temporary scan removal does not erase history.
+
+`GET /api/v1/history?limit=25&before=<cursor>` returns at most 100 events per page. `PUT` or `DELETE /api/v1/ratings/{catalogID}` changes the selected profile's rating. `POST /api/v1/history/import` accepts source events; an omitted `source_time` remains unknown rather than becoming an invented time. The server assigns internal event IDs and receipt timestamps; imports retain their original identity and timestamp in `source_id` and `source_time`. Completion writes use a random token persisted for the playback generation, so repeated observations deduplicate while later playbacks still create events after a catalog removal and re-add.
+
+`POST /api/v1/history/clear` hides the current profile's prior events while retaining the ledger. Its response has an ID and five-minute `undo_until`; `POST /api/v1/history/clear/{id}/undo` restores that clear within the window. Explicit watched/unwatched actions remain current-state progress actions and do not rewrite history.
