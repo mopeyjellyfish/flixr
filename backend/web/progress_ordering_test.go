@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/household"
+	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 	"github.com/mopeyjellyfish/flixr/backend/web"
 )
@@ -154,5 +156,19 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	state(899, 0)
 	heartbeat(threshold, 900, 2, 1)
 	state(900, 1)
+
+	closed := playback.NewDirectManager()
+	if err := closed.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	handler = web.NewServerWithPlayback(h, c, closed).Handler()
+	before := request("GET", "/api/v1/progress/film", "").Body.String()
+	failed := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`)
+	if failed.Code != http.StatusForbidden {
+		t.Fatalf("closed direct manager=%d %s", failed.Code, failed.Body)
+	}
+	if after := request("GET", "/api/v1/progress/film", "").Body.String(); after != before {
+		t.Fatalf("failed direct plan changed progress token: %s -> %s", before, after)
+	}
 
 }

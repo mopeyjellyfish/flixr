@@ -16,17 +16,33 @@ func (m *Manager) validProgress(profileID, catalogID string, position int64) boo
 }
 
 // BeginPlayback gives a new playback exclusive progress authority for this item.
+// An expected generation makes admission conditional on the original snapshot.
 // The durable generation also fences old sessions after restart or a manual action.
-func (m *Manager) BeginPlayback(profileID, catalogID string) (generation, position int64, err error) {
+func (m *Manager) BeginPlayback(profileID, catalogID string, expected ...int64) (generation, position int64, err error) {
 	if !m.validProgress(profileID, catalogID, 0) {
 		return 0, 0, ErrCredentials
 	}
 	if m.db == nil {
 		return 0, 0, nil
 	}
-	err = m.db.Writer().QueryRow(`INSERT INTO progress(profile_id,catalog_id,position_ms,generation) VALUES(?,?,0,1)
- ON CONFLICT(profile_id,catalog_id) DO UPDATE SET generation=progress.generation+1,observation=0
- RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID).Scan(&generation, &position)
+	compare := int64(-1)
+	if len(expected) > 0 {
+		compare = expected[0]
+		if compare < 0 {
+			return 0, 0, ErrProgressConflict
+		}
+	}
+	if compare > 0 {
+		err = m.db.Writer().QueryRow(`UPDATE progress SET generation=generation+1,observation=0 WHERE profile_id=? AND catalog_id=? AND generation=? RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID, compare).Scan(&generation, &position)
+	} else {
+		err = m.db.Writer().QueryRow(`INSERT INTO progress(profile_id,catalog_id,position_ms,generation) VALUES(?,?,0,1)
+ ON CONFLICT(profile_id,catalog_id) DO UPDATE SET generation=progress.generation+1,observation=0 WHERE ?=-1 OR progress.generation=?
+ RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID, compare, compare).Scan(&generation, &position)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrProgressConflict
+	}
+
 	return
 }
 

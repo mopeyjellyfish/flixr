@@ -1,3 +1,5 @@
+//go:build media_integration
+
 package household_test
 
 import (

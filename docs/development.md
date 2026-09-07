@@ -198,9 +198,10 @@ poster scaling without hiding failures behind screenshot-only assertions.
 
 ### Progress ordering and watched state
 
-Each playback plan acquires a durable, server-issued generation for its profile
+Each admitted playback plan acquires a durable, server-issued generation for its profile
 and catalog item. A newer plan supersedes previous playback sessions for that
-item. Mark watched or start over advances the same generation atomically for
+item. Failed session creation preserves the current generation; a manual action
+during preparation defeats the candidate plan. Mark watched or start over advances the same generation atomically for
 all selected items, so old playback messages cannot undo the action. Starting
 a plan preserves completion until the new playback reports an observation;
 completed items start at zero. Completion is set by `ended: true` or a position
