@@ -26,6 +26,11 @@ func recoverOwner(args []string, output io.Writer) error {
 	if err != nil || !info.IsDir() {
 		return errors.New("Flixr data directory must already exist and be accessible")
 	}
+	database := filepath.Join(*dataDir, "flixr.db")
+	info, err = os.Stat(database)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("Flixr database must already exist and be accessible")
+	}
 	password, err := recoverySecret(*passwordFile)
 	if err != nil {
 		return err

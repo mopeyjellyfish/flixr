@@ -191,8 +191,11 @@ The command replaces the password through the normal Argon2 hashing path, record
 an `owner_recovered` audit event in SQLite, and atomically revokes every owner
 browser session. Profiles and their sessions remain available. Remove the temporary
 password file with your normal secret-handling process after a successful recovery.
-If the command fails or is interrupted, restart Flixr and sign in with the previous
-password; the database transaction leaves the prior usable credential intact.
+If the command reports a failure before success, the database transaction leaves the
+previous credential intact. If the host or command was interrupted and the outcome is
+unknown, try the replacement password first, then the previous password; rerun local
+recovery if neither works. Do not assume an interrupted command rolled back after it
+committed.
 
 For a native install, stop its service and run
 `./flixr recover-owner --password-file /path/to/owner-password`; add
