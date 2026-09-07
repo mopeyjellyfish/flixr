@@ -14,7 +14,7 @@ func (s *Server) unmatchedMetadata(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	write(w, http.StatusOK, map[string]any{"items": s.catalog.Unmatched()})
+	write(w, http.StatusOK, map[string]any{"items": s.catalog.MetadataTargets()})
 }
 
 func (s *Server) metadataCandidates(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +69,10 @@ func (s *Server) metadataUnmatch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) metadataError(w http.ResponseWriter, err error) {
 	if errors.Is(err, catalog.ErrMetadataNotFound) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	if errors.Is(err, catalog.ErrMetadataBusy) {
+		fail(w, http.StatusConflict, "metadata_busy")
 		return
 	}
 	// Provider failures leave the local title untouched; the owner can retry from the queue.

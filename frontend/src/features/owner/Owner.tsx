@@ -89,7 +89,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     }
   };
   const findMatches = async (item: MetadataTarget) => { try { const result = await api.metadataCandidates(item.kind, item.id); setCandidates((current) => ({ ...current, [item.id]: result.candidates })); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Matches are unavailable.'); } };
-  const selectMatch = async (item: MetadataTarget, candidate: MetadataCandidate) => { try { await api.matchMetadata(item.kind, item.id, candidate.id); setUnmatched((current) => current.filter((value) => value.id !== item.id)); setCandidates((current) => { const next = { ...current }; delete next[item.id]; return next; }); setNotice(`Matched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save this match.'); } };
+  const selectMatch = async (item: MetadataTarget, candidate: MetadataCandidate) => { try { const matched = await api.matchMetadata(item.kind, item.id, candidate.id); setUnmatched((current) => current.map((value) => value.id === item.id ? matched : value)); setCandidates((current) => { const next = { ...current }; delete next[item.id]; return next; }); setNotice(`Matched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save this match.'); } };
+  const clearMatch = async (item: MetadataTarget) => { try { await api.unmatchMetadata(item.kind, item.id); setUnmatched((current) => current.map((value) => value.id === item.id ? { ...value, provider_id: '', owner_matched: false } : value)); setNotice(`Unmatched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to unmatch this title.'); } };
   const savePlayback = async (event: FormEvent) => {
     event.preventDefault();
     if (!playbackSettings) return;
@@ -149,7 +150,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
             <TMDBForm configured={tmdbConfigured} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} />
-            <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} />
+            <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} />
           </section>
           <section id="support" className="owner-section" aria-labelledby="support-title">
             <h2 id="support-title">Support diagnostics</h2><p>Download a local ZIP with versions, runtime health, and recent failure IDs. It never includes media names, paths, passwords, or tokens.</p>
@@ -161,8 +162,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   );
 }
 
-function MetadataRepair({ items, candidates, onFind, onSelect }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void> }) {
-  return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Unmatched titles</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}</span><button type="button" onClick={() => void onFind(item)}>Find matches</button>{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}</li>)}</ul>}</section>;
+function MetadataRepair({ items, candidates, onFind, onSelect, onClear }: { items: MetadataTarget[]; candidates: Record<string, MetadataCandidate[]>; onFind: (item: MetadataTarget) => Promise<void>; onSelect: (item: MetadataTarget, candidate: MetadataCandidate) => Promise<void>; onClear: (item: MetadataTarget) => Promise<void> }) {
+  return <section aria-labelledby="metadata-repair-title"><h3 id="metadata-repair-title">Title identification</h3>{items.length === 0 ? <p>Nothing needs review.</p> : <ul className="metadata-repair">{items.map((item) => <li key={item.id}><span>{item.title}{item.provider_id ? ' · matched' : ' · unmatched'}</span><button type="button" onClick={() => void onFind(item)}>{item.provider_id ? 'Change match' : 'Find matches'}</button>{item.provider_id && <button type="button" onClick={() => void onClear(item)}>Unmatch</button>}{candidates[item.id]?.map((candidate) => <button key={candidate.id} type="button" onClick={() => void onSelect(item, candidate)}>{candidate.title}{candidate.year ? ` (${candidate.year})` : ''} · TMDB</button>)}</li>)}</ul>}</section>;
 }
 
 function OwnerHeader({ onBrowse, onLogout }: OwnerProps) {

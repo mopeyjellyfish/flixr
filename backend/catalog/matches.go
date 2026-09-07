@@ -10,6 +10,7 @@ import (
 var (
 	ErrMetadataNotFound    = errors.New("catalog metadata target not found")
 	ErrProviderUnavailable = errors.New("metadata provider is unavailable")
+	ErrMetadataBusy        = errors.New("metadata repair is unavailable during a scan")
 )
 
 // Candidate is a provider result an owner may explicitly attach to local media.
@@ -28,22 +29,22 @@ type CandidateProvider interface {
 	ByID(context.Context, string, string, string, string, string) (Enrichment, error)
 }
 
-func (c *Catalog) Unmatched() []Item {
+func (c *Catalog) MetadataTargets() []Item {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]Item, 0)
 	for _, item := range c.items {
-		if item.Kind == "film" && item.ProviderID == "" {
+		if item.Kind == "film" {
 			out = append(out, publicMetadataItem(item))
 		}
 	}
 	for _, series := range c.series {
-		if series.ProviderID == "" {
-			out = append(out, publicMetadataItem(Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly}))
-		}
+		out = append(out, publicMetadataItem(Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}))
 	}
 	return out
 }
+
+func (c *Catalog) Unmatched() []Item { return c.MetadataTargets() }
 
 func publicMetadataItem(item Item) Item {
 	item.path, item.rootKind, item.fingerprint = "", "", ""
@@ -90,8 +91,7 @@ func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, reg
 	if enrichment.ProviderID == "" {
 		return Item{}, ErrProviderUnavailable
 	}
-	if c.cacheEnrichmentArtwork(ctx, id, &enrichment) { /* metadata remains usable without artwork */
-	}
+	c.cacheEnrichmentArtwork(ctx, id, &enrichment)
 	return c.saveMatch(kind, id, enrichment, language, region, true)
 }
 
@@ -114,16 +114,19 @@ func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
 func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, region string, owner bool) (Item, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.scanning {
+		return Item{}, ErrMetadataBusy
+	}
 	if kind == "film" {
 		item, ok := c.items[id]
 		if !ok || item.Kind != "film" {
 			return Item{}, ErrMetadataNotFound
 		}
 		applyMatch(&item, enrichment, language, region, owner)
-		c.items[id] = item
 		if err := c.updateMatch(kind, item); err != nil {
 			return Item{}, err
 		}
+		c.items[id] = item
 		return publicMetadataItem(item), nil
 	}
 	if kind == "series" {
@@ -131,14 +134,14 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 		if !ok {
 			return Item{}, ErrMetadataNotFound
 		}
-		item := Item{ID: series.ID, Title: series.Title, Kind: "series", ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}
+		item := Item{ID: series.ID, Title: series.Title, Kind: "series", ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}
 		applyMatch(&item, enrichment, language, region, owner)
-		series.ProviderID, series.Provider, series.Language, series.Region, series.Confidence, series.OwnerMatch, series.Year, series.Synopsis, series.Poster, series.Backdrop = item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.Year, item.Synopsis, item.Poster, item.Backdrop
+		series.ProviderID, series.Provider, series.Language, series.Region, series.Confidence, series.OwnerMatch, series.OwnerUnmatch, series.Year, series.Synopsis, series.Poster, series.Backdrop = item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop
 		series.LocalOnly = !owner
-		c.series[id] = series
 		if err := c.updateMatch(kind, item); err != nil {
 			return Item{}, err
 		}
+		c.series[id] = series
 		return item, nil
 	}
 	return Item{}, ErrMetadataNotFound
@@ -146,7 +149,7 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 
 func applyMatch(item *Item, enrichment Enrichment, language, region string, owner bool) {
 	item.ProviderID, item.Year, item.Synopsis, item.Poster, item.Backdrop = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis, enrichment.Poster, enrichment.Backdrop
-	item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch = "tmdb", language, region, 1, owner
+	item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch = "tmdb", language, region, 1, owner, !owner
 	if !owner {
 		item.Provider, item.Language, item.Region, item.Confidence = "", "", "", 0
 		item.LocalOnly = true
@@ -163,6 +166,6 @@ func (c *Catalog) updateMatch(kind string, item Item) error {
 	if kind == "series" {
 		table = "catalog_series"
 	}
-	_, err := c.db.Exec(`UPDATE `+table+` SET provider_id=?,metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,year=?,synopsis=?,poster=?,backdrop=?,local_only=? WHERE id=?`, item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, boolInt(item.OwnerMatch), item.Year, item.Synopsis, item.Poster, item.Backdrop, boolInt(item.LocalOnly), item.ID)
+	_, err := c.db.Exec(`UPDATE `+table+` SET provider_id=?,metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=?,year=?,synopsis=?,poster=?,backdrop=?,local_only=? WHERE id=?`, item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, boolInt(item.OwnerMatch), boolInt(item.OwnerUnmatch), item.Year, item.Synopsis, item.Poster, item.Backdrop, boolInt(item.LocalOnly), item.ID)
 	return err
 }

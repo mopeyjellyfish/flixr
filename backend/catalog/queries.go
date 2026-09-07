@@ -32,9 +32,9 @@ func (c *Catalog) Browse(query string, offset, limit int) ([]Item, int, error) {
 	if limit <= 0 {
 		limit = total
 	}
-	rows, err := c.db.Query(`SELECT id,'film' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_items WHERE series_id='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+	rows, err := c.db.Query(`SELECT id,'film' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_items WHERE series_id='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 		UNION ALL
-		SELECT id,'series' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_series WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+		SELECT id,'series' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_series WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 		ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, needle, needle, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("browse catalog: %w", err)
@@ -43,15 +43,15 @@ func (c *Catalog) Browse(query string, offset, limit int) ([]Item, int, error) {
 	out := make([]Item, 0)
 	for rows.Next() {
 		var x Item
-		var local, playable, demo, owner int
+		var local, playable, demo, owner, unmatched int
 		var genres string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &local, &x.ProviderID, &x.Provider, &x.Language, &x.Region, &x.Confidence, &owner, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &local, &x.ProviderID, &x.Provider, &x.Language, &x.Region, &x.Confidence, &owner, &unmatched, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, 0, fmt.Errorf("scan browse item: %w", err)
 		}
 		if err := json.Unmarshal([]byte(genres), &x.Genres); err != nil {
 			return nil, 0, fmt.Errorf("decode browse genres: %w", err)
 		}
-		x.LocalOnly, x.Playable, x.Demo, x.OwnerMatch = local != 0, playable != 0, demo != 0, owner != 0
+		x.LocalOnly, x.Playable, x.Demo, x.OwnerMatch, x.OwnerUnmatch = local != 0, playable != 0, demo != 0, owner != 0, unmatched != 0
 		out = append(out, x)
 	}
 	return out, total, rows.Err()
@@ -67,7 +67,7 @@ func (c *Catalog) browseMemory(query string, offset, limit int) []Item {
 		}
 	}
 	for _, series := range c.series {
-		all = append(all, Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop})
+		all = append(all, Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop})
 	}
 	needle := strings.ToLower(strings.TrimSpace(query))
 	filtered := all[:0]

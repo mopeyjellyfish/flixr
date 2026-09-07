@@ -98,3 +98,20 @@ func TestTMDBRetriesRateLimitOnce(t *testing.T) {
 		t.Fatalf("got %+v, requests=%d, err=%v", got, requests, err)
 	}
 }
+
+func TestTMDBLookupHonorsCancellation(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() }))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).Lookup(ctx, "test", "film", "Film")
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("cancelled lookup succeeded")
+	}
+}

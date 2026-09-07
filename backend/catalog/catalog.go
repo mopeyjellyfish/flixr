@@ -49,27 +49,28 @@ type SubtitleTrack struct {
 }
 
 type Item struct {
-	ID         string   `json:"id"`
-	Title      string   `json:"title"`
-	Kind       string   `json:"kind"`
-	Season     int      `json:"season,omitempty"`
-	Episode    int      `json:"episode,omitempty"`
-	SeriesID   string   `json:"series_id,omitempty"`
-	LocalOnly  bool     `json:"local_only"`
-	ProviderID string   `json:"provider_id,omitempty"`
-	Provider   string   `json:"metadata_provider,omitempty"`
-	Language   string   `json:"metadata_language,omitempty"`
-	Region     string   `json:"metadata_region,omitempty"`
-	Confidence float64  `json:"match_confidence,omitempty"`
-	OwnerMatch bool     `json:"owner_matched,omitempty"`
-	Year       int      `json:"year,omitempty"`
-	Synopsis   string   `json:"synopsis,omitempty"`
-	Poster     string   `json:"poster,omitempty"`
-	Backdrop   string   `json:"backdrop,omitempty"`
-	Genres     []string `json:"genres"`
-	AddedAt    int64    `json:"added_at"`
-	Playable   bool     `json:"playable"`
-	Demo       bool     `json:"demo"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Kind         string   `json:"kind"`
+	Season       int      `json:"season,omitempty"`
+	Episode      int      `json:"episode,omitempty"`
+	SeriesID     string   `json:"series_id,omitempty"`
+	LocalOnly    bool     `json:"local_only"`
+	ProviderID   string   `json:"provider_id,omitempty"`
+	Provider     string   `json:"metadata_provider,omitempty"`
+	Language     string   `json:"metadata_language,omitempty"`
+	Region       string   `json:"metadata_region,omitempty"`
+	Confidence   float64  `json:"match_confidence,omitempty"`
+	OwnerMatch   bool     `json:"owner_matched,omitempty"`
+	OwnerUnmatch bool     `json:"owner_unmatched,omitempty"`
+	Year         int      `json:"year,omitempty"`
+	Synopsis     string   `json:"synopsis,omitempty"`
+	Poster       string   `json:"poster,omitempty"`
+	Backdrop     string   `json:"backdrop,omitempty"`
+	Genres       []string `json:"genres"`
+	AddedAt      int64    `json:"added_at"`
+	Playable     bool     `json:"playable"`
+	Demo         bool     `json:"demo"`
 	MediaProperties
 
 	path        string
@@ -88,25 +89,26 @@ type Season struct {
 
 // Series is a catalog entity, distinct from its playable episode records.
 type Series struct {
-	ID         string   `json:"id"`
-	Title      string   `json:"title"`
-	Kind       string   `json:"kind"`
-	LocalOnly  bool     `json:"local_only"`
-	ProviderID string   `json:"provider_id,omitempty"`
-	Provider   string   `json:"metadata_provider,omitempty"`
-	Language   string   `json:"metadata_language,omitempty"`
-	Region     string   `json:"metadata_region,omitempty"`
-	Confidence float64  `json:"match_confidence,omitempty"`
-	OwnerMatch bool     `json:"owner_matched,omitempty"`
-	Year       int      `json:"year,omitempty"`
-	Synopsis   string   `json:"synopsis,omitempty"`
-	Poster     string   `json:"poster,omitempty"`
-	Backdrop   string   `json:"backdrop,omitempty"`
-	Genres     []string `json:"genres"`
-	AddedAt    int64    `json:"added_at"`
-	Playable   bool     `json:"playable"`
-	Demo       bool     `json:"demo"`
-	Seasons    []Season `json:"seasons,omitempty"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Kind         string   `json:"kind"`
+	LocalOnly    bool     `json:"local_only"`
+	ProviderID   string   `json:"provider_id,omitempty"`
+	Provider     string   `json:"metadata_provider,omitempty"`
+	Language     string   `json:"metadata_language,omitempty"`
+	Region       string   `json:"metadata_region,omitempty"`
+	Confidence   float64  `json:"match_confidence,omitempty"`
+	OwnerMatch   bool     `json:"owner_matched,omitempty"`
+	OwnerUnmatch bool     `json:"owner_unmatched,omitempty"`
+	Year         int      `json:"year,omitempty"`
+	Synopsis     string   `json:"synopsis,omitempty"`
+	Poster       string   `json:"poster,omitempty"`
+	Backdrop     string   `json:"backdrop,omitempty"`
+	Genres       []string `json:"genres"`
+	AddedAt      int64    `json:"added_at"`
+	Playable     bool     `json:"playable"`
+	Demo         bool     `json:"demo"`
+	Seasons      []Season `json:"seasons,omitempty"`
 }
 
 type ScanStatus struct {
@@ -188,9 +190,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := c.loadMatchState("catalog_items", func(id, provider, language, region string, confidence float64, owner int) {
+	if err := c.loadMatchState("catalog_items", func(id, provider, language, region string, confidence float64, owner, unmatched int) {
 		x := c.items[id]
-		x.Provider, x.Language, x.Region, x.Confidence, x.OwnerMatch = provider, language, region, confidence, owner != 0
+		x.Provider, x.Language, x.Region, x.Confidence, x.OwnerMatch, x.OwnerUnmatch = provider, language, region, confidence, owner != 0, unmatched != 0
 		c.items[id] = x
 	}); err != nil {
 		return nil, err
@@ -216,9 +218,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if err := seriesRows.Err(); err != nil {
 		return nil, err
 	}
-	if err := c.loadMatchState("catalog_series", func(id, provider, language, region string, confidence float64, owner int) {
+	if err := c.loadMatchState("catalog_series", func(id, provider, language, region string, confidence float64, owner, unmatched int) {
 		x := c.series[id]
-		x.Provider, x.Language, x.Region, x.Confidence, x.OwnerMatch = provider, language, region, confidence, owner != 0
+		x.Provider, x.Language, x.Region, x.Confidence, x.OwnerMatch, x.OwnerUnmatch = provider, language, region, confidence, owner != 0, unmatched != 0
 		c.series[id] = x
 	}); err != nil {
 		return nil, err
@@ -230,8 +232,8 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	return c, nil
 }
 
-func (c *Catalog) loadMatchState(table string, apply func(string, string, string, string, float64, int)) error {
-	rows, err := c.db.Query(`SELECT id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched FROM ` + table)
+func (c *Catalog) loadMatchState(table string, apply func(string, string, string, string, float64, int, int)) error {
+	rows, err := c.db.Query(`SELECT id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched FROM ` + table)
 	if err != nil {
 		return err
 	}
@@ -239,11 +241,11 @@ func (c *Catalog) loadMatchState(table string, apply func(string, string, string
 	for rows.Next() {
 		var id, provider, language, region string
 		var confidence float64
-		var owner int
-		if err := rows.Scan(&id, &provider, &language, &region, &confidence, &owner); err != nil {
+		var owner, unmatched int
+		if err := rows.Scan(&id, &provider, &language, &region, &confidence, &owner, &unmatched); err != nil {
 			return err
 		}
-		apply(id, provider, language, region, confidence, owner)
+		apply(id, provider, language, region, confidence, owner, unmatched)
 	}
 	return rows.Err()
 }
@@ -606,14 +608,14 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	c.mu.RUnlock()
 	var observations []scanObservation
 	for id, item := range next {
-		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok && previous.OwnerMatch {
-			item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, true, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
+		if previous, ok := previousItems[scanKey{item.rootKind, item.path}]; ok && (previous.OwnerMatch || previous.OwnerUnmatch) {
+			item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
 			next[id] = item
 		}
 	}
 	if provider != nil && token != "" {
 		for id, item := range next {
-			if item.Kind != "film" || item.ProviderID != "" {
+			if item.Kind != "film" || item.ProviderID != "" || item.OwnerUnmatch {
 				continue
 			}
 			enrichment, err := provider.Lookup(ctx, token, "film", item.Title)
@@ -653,8 +655,8 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 		series[item.SeriesID] = Series{ID: item.SeriesID, Title: seriesTitle(item.path, item.Title), Kind: "series", LocalOnly: item.LocalOnly, Playable: true}
 	}
 	for id, value := range series {
-		if previous, ok := previousSeries[id]; ok && previous.ProviderID != "" {
-			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
+		if previous, ok := previousSeries[id]; ok && (previous.ProviderID != "" || previous.OwnerUnmatch) {
+			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly
 		} else if provider != nil && token != "" {
 			enrichment, err := provider.Lookup(ctx, token, "series", value.Title)
@@ -748,7 +750,7 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 			if _, err = tx.Exec(`INSERT INTO catalog_series(id,title,local_only,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,local_only=excluded.local_only,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, value.ID, value.Title, boolInt(value.LocalOnly), value.ProviderID, value.Year, value.Synopsis, value.Poster, value.Backdrop, time.Now().Unix(), string(genres), value.AddedAt, boolInt(value.Playable)); err != nil {
 				return err
 			}
-			if _, err = tx.Exec(`UPDATE catalog_series SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=? WHERE id=?`, value.Provider, value.Language, value.Region, value.Confidence, boolInt(value.OwnerMatch), value.ID); err != nil {
+			if _, err = tx.Exec(`UPDATE catalog_series SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=? WHERE id=?`, value.Provider, value.Language, value.Region, value.Confidence, boolInt(value.OwnerMatch), boolInt(value.OwnerUnmatch), value.ID); err != nil {
 				return err
 			}
 		}
@@ -778,7 +780,7 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,video_profile=excluded.video_profile,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, x.VideoProfile, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix(), string(genres), x.AddedAt, boolInt(x.Playable)); err != nil {
 				return err
 			}
-			if _, err = tx.Exec(`UPDATE catalog_items SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=? WHERE id=?`, x.Provider, x.Language, x.Region, x.Confidence, boolInt(x.OwnerMatch), x.ID); err != nil {
+			if _, err = tx.Exec(`UPDATE catalog_items SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=? WHERE id=?`, x.Provider, x.Language, x.Region, x.Confidence, boolInt(x.OwnerMatch), boolInt(x.OwnerUnmatch), x.ID); err != nil {
 				return err
 			}
 		}
