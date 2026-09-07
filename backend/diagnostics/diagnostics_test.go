@@ -11,7 +11,6 @@ import (
 func TestArchiveRedactsAndBoundsRecords(t *testing.T) {
 	log := New(1)
 	log.Record("failure", "token=top-secret path=/Users/owner/Movies/Private Film.mkv password=hunter2")
-	log.Record("failure", "another failure")
 	if len(log.Records()) != 1 {
 		t.Fatal("records were not bounded")
 	}

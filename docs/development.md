@@ -30,6 +30,7 @@ go build -o flixr .
 ```
 
 Flixr prints a one-time setup token. Open http://localhost:8787 and use that token to claim the owner account.
+Native builds store data in `./flixr-data` and listen on `127.0.0.1:8787` by default. Set `FLIXR_LISTEN_ADDR=0.0.0.0:8787` to allow LAN devices to connect.
 
 ## Support diagnostics
 
@@ -40,8 +41,6 @@ paths, passwords, tokens, configuration values, or database content. A failed
 browser request shows its support ID; include that ID only when you choose to
 share the archive with support. The records are in memory, so restarting Flixr
 clears them.
-
-Native builds store data in `./flixr-data` and listen on `127.0.0.1:8787` by default. Set `FLIXR_LISTEN_ADDR=0.0.0.0:8787` to allow LAN devices to connect.
 
 ## Development demo
 
