@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-build
+WORKDIR /src
+COPY frontend/package.json frontend/package-lock.json frontend/
+RUN npm --prefix frontend ci
+COPY frontend frontend
+RUN npm --prefix frontend run build:embed
+
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS backend-build
+WORKDIR /src/backend
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend ./
+COPY --from=frontend-build /src/frontend/dist ./web/assets
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=$TARGETARCH go build -trimpath -o /out/flixr .
+
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
+USER root
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg jq lsof procps \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+RUN npm --prefix frontend ci --ignore-scripts
+COPY frontend/scripts/measure-artwork-local.mjs ./frontend/scripts/measure-artwork-local.mjs
+COPY scripts/measure-artwork-acceptance.sh scripts/generate-artwork-measurement-demo.mjs ./scripts/
+COPY ["backend/testdata/media/corpus/Long Duration Seek 2026.mkv", "./fixture/Long Duration Seek 2026.mkv"]
+COPY --from=backend-build /out/flixr /usr/local/bin/flixr
+ARG SOURCE_SHA=unknown
+ENV FLIXR_MEASURE_SOURCE_SHA=${SOURCE_SHA}
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+LABEL org.opencontainers.image.revision=${SOURCE_SHA}
+RUN chown -R pwuser:pwuser /work
+USER pwuser
+ENTRYPOINT ["bash", "/work/scripts/run-artwork-measurement-container.sh"]

@@ -7,6 +7,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 baseline="${FLIXR_MEASURE_BASELINE:-origin/main}"
 demo_source="${FLIXR_MEASURE_DEMO_SOURCE:?Set FLIXR_MEASURE_DEMO_SOURCE to the local demo cache to copy.}"
 fixture_source="${FLIXR_MEASURE_FIXTURE_SOURCE:-$repo_root/backend/testdata/media/corpus/Long Duration Seek 2026.mkv}"
+prebuilt_binary="${FLIXR_MEASURE_PREBUILT_BINARY:-}"
+cgroup_root="${FLIXR_MEASURE_CGROUP_ROOT:-}"
 port="${FLIXR_MEASURE_PORT:-18989}"
 copy_count="${FLIXR_MEASURE_COPY_COUNT:-300}"
 measurement_dir="$(mktemp -d "${TMPDIR:-/tmp}/flixr-artwork-acceptance.XXXXXX")"
@@ -29,7 +31,17 @@ cleanup() {
 trap cleanup EXIT
 
 require() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
-for command in git tar npm node go curl jq ffmpeg ffprobe ps lsof grep; do require "$command"; done
+for command in tar node curl jq ffmpeg ffprobe ps lsof grep; do require "$command"; done
+if [[ -n "$prebuilt_binary" ]]; then
+  [[ -x "$prebuilt_binary" ]] || { echo "FLIXR_MEASURE_PREBUILT_BINARY is not executable: $prebuilt_binary" >&2; exit 1; }
+  baseline_sha="${FLIXR_MEASURE_SOURCE_SHA:?Set FLIXR_MEASURE_SOURCE_SHA with FLIXR_MEASURE_PREBUILT_BINARY.}"
+  flixr_binary="$prebuilt_binary"
+else
+  for command in git npm go; do require "$command"; done
+fi
+if [[ -n "$cgroup_root" ]]; then
+  [[ -r "$cgroup_root/cpu.stat" && -r "$cgroup_root/memory.current" ]] || { echo "FLIXR_MEASURE_CGROUP_ROOT does not expose cgroup v2 CPU and memory counters" >&2; exit 1; }
+fi
 [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || { echo "FLIXR_MEASURE_PORT must be a TCP port" >&2; exit 1; }
 if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "refusing occupied measurement port: $port" >&2
@@ -39,14 +51,19 @@ fi
 [[ -f "$fixture_source" ]] || { echo "fixture source is not a file: $fixture_source" >&2; exit 1; }
 mkdir -p "$source_dir" "$data_dir/demo" "$media_dir/films" "$result_dir"
 
-# The archived tree fixes the binary and embedded frontend to the recorded release SHA.
-git -C "$repo_root" archive "$baseline" | tar -xf - -C "$source_dir"
-baseline_sha="$(git -C "$repo_root" rev-parse "$baseline")"
+if [[ -z "$prebuilt_binary" ]]; then
+  # The archived tree fixes the binary and embedded frontend to the recorded release SHA.
+  git -C "$repo_root" archive "$baseline" | tar -xf - -C "$source_dir"
+  baseline_sha="$(git -C "$repo_root" rev-parse "$baseline")"
+fi
 cp -R "$demo_source"/. "$data_dir/demo/"
 cp "$fixture_source" "$media_dir/films/Long Duration Seek 2026.mkv"
-(cd "$source_dir/frontend" && npm ci --ignore-scripts)
-(cd "$source_dir/frontend" && npm run build:embed)
-(cd "$source_dir/backend" && go build -o "$measurement_dir/flixr" .)
+if [[ -z "$prebuilt_binary" ]]; then
+  (cd "$source_dir/frontend" && npm ci --ignore-scripts)
+  (cd "$source_dir/frontend" && npm run build:embed)
+  (cd "$source_dir/backend" && go build -o "$measurement_dir/flixr" .)
+  flixr_binary="$measurement_dir/flixr"
+fi
 
 wait_for_http() {
   local expected_demo="$1" status
@@ -72,7 +89,7 @@ start_server() {
 }
 
 # Import the copied demo cache once, creating durable original artwork in the temp data.
-start_server true env FLIXR_DEMO=true FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" "$measurement_dir/flixr"
+start_server true env FLIXR_DEMO=true FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" "$flixr_binary"
 kill "$server_pid"; wait "$server_pid" 2>/dev/null || true; server_pid=""
 
 # This is intentionally the sole cache clear. Original artwork and all source paths remain intact.
@@ -82,7 +99,7 @@ rm -rf "$derivative_dir"
 [[ ! -e "$derivative_dir" ]] || { echo "could not clear isolated derivative directory" >&2; exit 1; }
 
 # First scan admits the playable fixture. The copied demo records retain 100 cached posters.
-start_server false env FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" FLIXR_FILMS_ROOT="$media_dir/films" FLIXR_SCAN_ON_START=true FLIXR_SCAN_WORKERS=2 "$measurement_dir/flixr"
+start_server false env FLIXR_DATA_DIR="$data_dir" FLIXR_LISTEN_ADDR="127.0.0.1:$port" FLIXR_FILMS_ROOT="$media_dir/films" FLIXR_SCAN_ON_START=true FLIXR_SCAN_WORKERS=2 "$flixr_binary"
 base_url="http://127.0.0.1:$port"
 curl --fail --silent --show-error --cookie-jar "$cookie_jar" -H "Content-Type: application/json" -d '{"password":"flixr-demo-only"}' "$base_url/api/v1/owner/login" >/dev/null
 alex_id="$(curl --fail --silent --show-error "$base_url/api/v1/profiles" | jq -r '.profiles[] | select(.name == "Alex") | .id')"
@@ -108,6 +125,21 @@ manifest="$(jq -r '.media_url' <<<"$playback")"
 curl --fail --silent --show-error --cookie "$profile_jar" "$base_url$manifest" >/dev/null
 
 sample_resources() {
+  if [[ -n "$cgroup_root" ]]; then
+    local previous_cpu previous_ns current_cpu current_ns cpu_percent memory_kib
+    previous_cpu="$(awk '/usage_usec/ {print $2}' "$cgroup_root/cpu.stat")"
+    previous_ns="$(date +%s%N)"
+    while :; do
+      sleep 0.1
+      current_cpu="$(awk '/usage_usec/ {print $2}' "$cgroup_root/cpu.stat")"
+      current_ns="$(date +%s%N)"
+      cpu_percent="$(awk -v used="$((current_cpu - previous_cpu))" -v elapsed="$((current_ns - previous_ns))" 'BEGIN { if (elapsed > 0) printf "%.1f", 100000000 * used / elapsed; else print "0.0" }')"
+      memory_kib="$(( $(cat "$cgroup_root/memory.current") / 1024 ))"
+      printf '%s cpu_percent=%s memory_kib=%s scope=container-cgroup-v2\n' "$(date -u +%FT%TZ)" "$cpu_percent" "$memory_kib" >>"$result_dir/resources.log"
+      previous_cpu="$current_cpu"
+      previous_ns="$current_ns"
+    done
+  fi
   while :; do
     sample="$(ps -axo pid=,ppid=,%cpu=,rss=,command= | awk -v parent="$server_pid" '$1 == parent || $2 == parent { cpu += $3; rss += $4; names = names (names ? "," : "") $5 } END { printf "%.1f %d %s\\n", cpu, rss, names }')"
     cpu="${sample%% *}"; rest="${sample#* }"; rss="${rest%% *}"; names="${rest#* }"
@@ -163,7 +195,13 @@ printf '%s\n' "$scan" >"$result_dir/scan-final.json"
 
 derivative_count="$(find "$derivative_dir" -type f -name '*.jpg' | wc -l | tr -d ' ')"
 peak_cpu="$(awk '{split($2, value, "="); if (value[2] + 0 > peak) peak = value[2] + 0} END {printf "%.1f", peak}' "$result_dir/resources.log")"
-peak_rss="$(awk '{split($3, value, "="); if (value[2] + 0 > peak) peak = value[2] + 0} END {printf "%d", peak}' "$result_dir/resources.log")"
-jq -n --arg source_sha "$baseline_sha" --arg fixture "$fixture_source" --argjson copy_count "$copy_count" --argjson derivatives "$derivative_count" --argjson peak_cpu "$peak_cpu" --argjson peak_rss "$peak_rss" --slurpfile timings "$result_dir/artwork-timings.json" --slurpfile scan "$result_dir/scan-final.json" --slurpfile cold "$result_dir/concurrency-cold.json" --slurpfile warm "$result_dir/concurrency-warm.json" '{source_sha:$source_sha,fixture:$fixture,concurrent_scan_copies:$copy_count,derivatives_after_cold:$derivatives,resources:{sampling_interval_ms:100,peak_cpu_percent:$peak_cpu,peak_rss_kib:$peak_rss,scope:"Flixr server plus immediate ffmpeg/ffprobe children"},artwork_timings:$timings[0],concurrent_visits:{cold:$cold[0],warm:$warm[0]},scan:$scan[0]}' >"$result_dir/summary.json"
+peak_memory="$(awk '{split($3, value, "="); if (value[2] + 0 > peak) peak = value[2] + 0} END {printf "%d", peak}' "$result_dir/resources.log")"
+resource_scope="Flixr server plus immediate ffmpeg/ffprobe children"
+memory_metric="rss"
+if [[ -n "$cgroup_root" ]]; then
+  resource_scope="all processes in the cgroup-v2 measurement container"
+  memory_metric="cgroup_memory_current"
+fi
+jq -n --arg source_sha "$baseline_sha" --arg fixture "$fixture_source" --argjson copy_count "$copy_count" --argjson derivatives "$derivative_count" --argjson peak_cpu "$peak_cpu" --argjson peak_memory "$peak_memory" --arg resource_scope "$resource_scope" --arg memory_metric "$memory_metric" --slurpfile timings "$result_dir/artwork-timings.json" --slurpfile scan "$result_dir/scan-final.json" --slurpfile cold "$result_dir/concurrency-cold.json" --slurpfile warm "$result_dir/concurrency-warm.json" '{source_sha:$source_sha,fixture:$fixture,concurrent_scan_copies:$copy_count,derivatives_after_cold:$derivatives,resources:{sampling_interval_ms:100,peak_cpu_percent:$peak_cpu,peak_memory_kib:$peak_memory,memory_metric:$memory_metric,scope:$resource_scope},artwork_timings:$timings[0],concurrent_visits:{cold:$cold[0],warm:$warm[0]},scan:$scan[0]}' >"$result_dir/summary.json"
 printf 'Results: %s\n' "$result_dir"
 cat "$result_dir/summary.json"
