@@ -131,6 +131,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/owner/readiness/recheck", s.recheckReadiness)
 	s.mux.HandleFunc("POST /api/v1/playback/plans", s.playbackPlan)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/media", s.playbackMedia)
+	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/next", s.playbackNext)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/stop", s.playbackStop)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/manifest.m3u8", s.playbackManifest)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/{name}", s.playbackSegment)

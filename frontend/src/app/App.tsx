@@ -108,7 +108,7 @@ export function App() {
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
   if (route === 'player') {
     const catalogID = decodeURIComponent(path.slice('/play/'.length));
-    return <Suspense fallback={<RouteFallback />}><Player key={`${catalogID}:${remoteStart?.sequence ?? 'local'}`} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
+    return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} onAdvance={(nextID) => navigate(`/play/${encodeURIComponent(nextID)}`, true)} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
   }
   if (route === 'browse') {
     const browsePath = path.startsWith('/detail/') ? lastBrowsePath : path;
