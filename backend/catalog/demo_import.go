@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,6 +92,7 @@ func importDemo(db *sqlite.DB) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer c.Shutdown(context.Background())
 	// Reuse the same local artwork cache and authenticated serving route as real libraries.
 	for _, group := range []struct {
 		kind   string
