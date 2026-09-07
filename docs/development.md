@@ -226,6 +226,24 @@ state and let the viewer decide whether to retry. Never automatically retry an
 old position with a newly read token. The shipped player uses playback sessions
 rather than this legacy route.
 
+### Episode sequence and autoplay
+
+When an episode ends and its completed heartbeat is acknowledged, Flixr asks the
+server for the next playable, unwatched episode for the active profile. Episodes
+are ordered by numeric season and episode numbers. Gaps in the files are skipped,
+as are episodes that this profile has already completed. Season 0 specials are
+excluded from the normal queue; API clients must opt in with
+`include_specials=true`.
+
+Automatic advancement stays within the current TV root and edition/version
+folder. If the next number has multiple playable files in that same context, or
+only a different cut/context is available, Flixr does not guess and shows that no
+next episode is available in this version. A ten-second countdown offers Play now
+and Cancel autoplay. Pause, a hidden tab, leaving the player, or cancellation
+prevents a pending advance. The player stops the completed session before opening
+a fresh playback session for the next episode; profile-scoped playback preferences
+are selected again for that new session.
+
 ## Personal history and ratings
 
 Personal ratings are profile-scoped local records. They are never provider metadata. The viewing ledger is immutable and records a snapshot of the catalog ID, title, and kind without a foreign key to a catalog row, so a temporary scan removal does not erase history.

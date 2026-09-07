@@ -116,6 +116,19 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	if ended.Code != 200 {
 		t.Fatalf("ended=%d", ended.Code)
 	}
+	var endedAck struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := json.Unmarshal(ended.Body.Bytes(), &endedAck); err != nil || !endedAck.Accepted {
+		t.Fatalf("ended acknowledgement = %s: %v", ended.Body, err)
+	}
+	stale := request("POST", third, `{"position_ms":100,"observation":1}`)
+	var staleAck struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := json.Unmarshal(stale.Body.Bytes(), &staleAck); err != nil || staleAck.Accepted {
+		t.Fatalf("stale acknowledgement = %s: %v", stale.Body, err)
+	}
 	heartbeat(third, 200, 3, 1)
 	state(200, 1)
 	var completionEvents int
