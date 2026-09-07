@@ -290,7 +290,7 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
 function SessionManager() {
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
   const [notice, setNotice] = useState('');
-  const load = () => api.activeSessions().then((value) => setSessions(value.sessions)).catch(() => setNotice('Sessions are unavailable.'));
+  const load = () => api.activeSessions().then((value) => setSessions(value.sessions ?? [])).catch(() => setNotice('Sessions are unavailable.'));
   useEffect(() => { void load(); }, []);
   return <section><h2>Active sessions</h2>{notice && <p role="status">{notice}</p>}{sessions.length ? <ul>{sessions.map((session) => <li key={session.id}>{session.subject} · expires {new Date(session.expires_at * 1000).toLocaleString()} <button onClick={() => void api.revokeSession(session.id).then(load).catch(() => setNotice('Unable to revoke session.'))}>Revoke</button></li>)}</ul> : <p>No active sessions.</p>}</section>;
 }
