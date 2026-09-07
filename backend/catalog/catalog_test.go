@@ -83,7 +83,7 @@ func TestScanProbesMediaAndKeepsIdentityOnMove(t *testing.T) {
 	}
 }
 
-func TestScanUsesContentFingerprint(t *testing.T) {
+func TestScanReplacementKeepsLogicalIdentity(t *testing.T) {
 	films := t.TempDir()
 	if err := os.WriteFile(filepath.Join(films, "One.mp4"), []byte("same-size"), 0600); err != nil {
 		t.Fatal(err)
@@ -118,8 +118,8 @@ func TestScanUsesContentFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].ID == before {
-		t.Fatalf("same-size changed content retained identity: %#v", items)
+	if len(items) != 1 || items[0].ID != before {
+		t.Fatalf("replacement changed logical identity: %#v", items)
 	}
 }
 

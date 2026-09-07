@@ -53,7 +53,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.catalog.PlaybackItem(body.CatalogID)
+	item, err := s.catalog.PlaybackItemContext(r.Context(), body.CatalogID)
 	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (item.Kind != "film" && item.Kind != "episode")) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -74,6 +74,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		playbackFailure(w, err)
 		return
 	}
+	plan.SourceKey = item.SourceKey()
 	profile, _ := s.house.Profile(s.session(r))
 	position, generation, err := s.house.ProgressState(s.session(r), item.ID)
 	if err != nil {
@@ -170,7 +171,7 @@ func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "playback_not_direct")
 		return
 	}
-	file, err := s.catalog.Open(session.CatalogID)
+	file, err := s.catalog.OpenSource(session.CatalogID, session.Plan.SourceKey)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -337,12 +338,12 @@ func (s *Server) playbackInput(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "playback_input_forbidden")
 		return
 	}
-	catalogID, ok := s.playback.InputCatalog(r.PathValue("token"))
+	catalogID, sourceKey, ok := s.playback.InputSource(r.PathValue("token"))
 	if !ok {
 		fail(w, http.StatusForbidden, "playback_input_invalid")
 		return
 	}
-	file, err := s.catalog.Open(catalogID)
+	file, err := s.catalog.OpenSource(catalogID, sourceKey)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
