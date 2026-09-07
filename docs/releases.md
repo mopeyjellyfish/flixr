@@ -47,13 +47,11 @@ event-trigger limitation. Authentication uses GitHub's job token with only
 See [GitHub's container publishing guidance](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)
 and [semantic-release's workflow](https://github.com/semantic-release/semantic-release).
 
-## First merge
+## First public image
 
-The repository is currently private. After the first publication, set the GHCR
-package visibility to **public** if anonymous downloads are intended; package
-visibility is separate from repository visibility. This one-time GitHub setting
-cannot be performed before the package exists. Check the package's Actions access
-if publishing permissions have been restricted. [GitHub package visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
+The source repository is public, but GHCR package visibility is separate. If
+anonymous downloads are intended, verify the package is publicly pullable and its
+Actions access permits publishing. [GitHub package visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
 
 The maintainer watching the first merge should:
 
