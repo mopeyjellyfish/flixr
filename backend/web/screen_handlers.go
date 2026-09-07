@@ -109,6 +109,10 @@ func (s *Server) screenReceiver(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
+			current, selected := s.house.Profile(s.session(r))
+			if !selected || current.ID != profileID {
+				return
+			}
 			message := screenMessage{Version: 1, Type: command.Type, CatalogID: command.CatalogID, PositionMS: command.PositionMS}
 			data, _ := json.Marshal(message)
 			writeCtx, cancel := context.WithTimeout(closed, 5*time.Second)

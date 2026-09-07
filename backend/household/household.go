@@ -2,6 +2,7 @@
 package household
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -270,8 +271,8 @@ func (m *Manager) RevokeSession(id string) error {
 }
 func (m *Manager) DeleteProfile(id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	_, ok := m.profiles[id]
-	m.mu.Unlock()
 	if !ok {
 		return ErrProfileNotFound
 	}
@@ -291,9 +292,7 @@ func (m *Manager) DeleteProfile(id string) error {
 			return err
 		}
 	}
-	m.mu.Lock()
 	delete(m.profiles, id)
-	m.mu.Unlock()
 	return nil
 }
 func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
@@ -334,8 +333,8 @@ func (m *Manager) Profiles() []Profile {
 }
 func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	p, ok := m.profiles[id]
-	m.mu.Unlock()
 	if !ok {
 		return Profile{}, ErrProfileNotFound
 	}
@@ -384,58 +383,71 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 			return Profile{}, err
 		}
 	}
-	m.mu.Lock()
 	m.profiles[id] = p
-	m.mu.Unlock()
 	return p.Profile, nil
 }
 func (m *Manager) Select(id, pin string) (string, error) {
-	m.mu.Lock()
-	p, ok := m.profiles[id]
-	m.mu.Unlock()
-	if !ok {
-		return "", ErrPIN
-	}
-	now := time.Now()
-	if now.Before(p.lockedUntil) {
-		return "", ErrRateLimited
-	}
-	valid := !p.Protected
-	if p.Protected {
-		derived, err := m.derive(pin, p.salt)
-		if err != nil {
-			return "", err
+	for {
+		m.mu.Lock()
+		p, ok := m.profiles[id]
+		if !ok {
+			m.mu.Unlock()
+			return "", ErrPIN
 		}
-		valid = subtle.ConstantTimeCompare(derived, p.hash) == 1
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	p, ok = m.profiles[id]
-	if !ok {
-		return "", ErrPIN
-	}
-	now = time.Now()
-	if now.Before(p.lockedUntil) {
-		return "", ErrRateLimited
-	}
-	if !valid {
-		p.attempts++
-		if p.attempts >= 5 {
-			p.attempts = 0
-			p.lockedUntil = now.Add(time.Minute)
+		if time.Now().Before(p.lockedUntil) {
+			m.mu.Unlock()
+			return "", ErrRateLimited
 		}
+		hashValue, saltValue := append([]byte(nil), p.hash...), append([]byte(nil), p.salt...)
+		m.mu.Unlock()
+		valid := !p.Protected
+		if p.Protected {
+			derived, err := m.derive(pin, saltValue)
+			if err != nil {
+				return "", err
+			}
+			valid = subtle.ConstantTimeCompare(derived, hashValue) == 1
+		}
+		m.mu.Lock()
+		current, ok := m.profiles[id]
+		if !ok {
+			m.mu.Unlock()
+			return "", ErrPIN
+		}
+		if !bytes.Equal(current.hash, hashValue) || !bytes.Equal(current.salt, saltValue) {
+			m.mu.Unlock()
+			continue
+		}
+		p = current
+		now := time.Now()
+		if now.Before(p.lockedUntil) {
+			m.mu.Unlock()
+			return "", ErrRateLimited
+		}
+		if !valid {
+			p.attempts++
+			if p.attempts >= 5 {
+				p.attempts = 0
+				p.lockedUntil = now.Add(time.Minute)
+			}
+			if err := m.persistAttempt(p); err != nil {
+				m.mu.Unlock()
+				return "", fmt.Errorf("persist pin rate limit: %w", err)
+			}
+			m.profiles[id] = p
+			m.mu.Unlock()
+			return "", ErrPIN
+		}
+		p.attempts = 0
 		if err := m.persistAttempt(p); err != nil {
+			m.mu.Unlock()
 			return "", fmt.Errorf("persist pin rate limit: %w", err)
 		}
 		m.profiles[id] = p
-		return "", ErrPIN
+		token, err := m.issueLocked(id)
+		m.mu.Unlock()
+		return token, err
 	}
-	p.attempts = 0
-	if err := m.persistAttempt(p); err != nil {
-		return "", fmt.Errorf("persist pin rate limit: %w", err)
-	}
-	m.profiles[id] = p
-	return m.issueLocked(id)
 }
 func (m *Manager) persistAttempt(p profile) error {
 	if m.db == nil {
