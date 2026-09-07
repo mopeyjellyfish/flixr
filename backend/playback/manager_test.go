@@ -48,12 +48,35 @@ type fakeExecutor struct {
 	processes    []*fakeProcess
 	commands     [][]string
 	ignoreSignal bool
+	skipManifest bool
+	onStart      func()
 	startErr     error
+}
+
+type pauseSuccessfulManifestStatFS struct {
+	afero.Fs
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
+	info, err := f.Fs.Stat(name)
+	if err == nil && filepath.Base(name) == "index.m3u8" {
+		f.once.Do(func() {
+			close(f.observed)
+			<-f.release
+		})
+	}
+	return info, err
 }
 
 func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
+	}
+	if e.onStart != nil {
+		e.onStart()
 	}
 	process := newFakeProcess(e.ignoreSignal)
 	e.mu.Lock()
@@ -66,14 +89,16 @@ func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, 
 	e.processes = append(e.processes, process)
 	e.commands = append(e.commands, append([]string(nil), args...))
 	e.mu.Unlock()
-	manifest := args[len(args)-1]
-	var playlist strings.Builder
-	playlist.WriteString("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n")
-	for index := range 15 {
-		fmt.Fprintf(&playlist, "#EXTINF:4.0,\nsegment-%06d.m4s\n", index)
-	}
-	if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
-		return nil, err
+	if !e.skipManifest {
+		manifest := args[len(args)-1]
+		var playlist strings.Builder
+		playlist.WriteString("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n")
+		for index := range 15 {
+			fmt.Fprintf(&playlist, "#EXTINF:4.0,\nsegment-%06d.m4s\n", index)
+		}
+		if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
+			return nil, err
+		}
 	}
 	return process, nil
 }
@@ -137,6 +162,213 @@ func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
 	}
 	if len(manager.Status().Generations) != 0 {
 		t.Fatal("generation remains after its final lease")
+	}
+}
+
+func TestManagerStopsOnlyPlaybackOwnedByOneViewerSession(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	first, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.CreateForViewer("viewer-b", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID != second.GenerationID {
+		t.Fatal("viewer sessions did not share the compatible generation")
+	}
+
+	manager.StopViewer("viewer-a")
+	if _, ok := manager.LookupForViewer(first.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("stopped viewer retained playback authority")
+	}
+	if _, ok := manager.LookupForViewer(second.ID, "viewer-b", "profile-a", false); !ok {
+		t.Fatal("stopping one viewer interrupted another viewer on the same profile")
+	}
+	if executor.processes[0].signaled.Load() {
+		t.Fatal("shared FFmpeg process stopped while another viewer held a lease")
+	}
+
+	manager.StopViewer("viewer-b")
+	if !executor.processes[0].signaled.Load() {
+		t.Fatal("FFmpeg process remained after its final viewer lease stopped")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("generation remained after its final viewer lease stopped")
+	}
+}
+
+func TestManagerSupersedesOnlyOlderPlansForTheSameViewerAndTitle(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDevice, err := manager.CreateForViewer("viewer-b", "profile-a", "film-1", plan, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopSupersededPlans(current)
+
+	if _, ok := manager.LookupForViewer(old.ID, old.ViewerID, old.ProfileID, false); ok {
+		t.Fatal("older plan retained its lease")
+	}
+	if _, ok := manager.LookupForViewer(otherDevice.ID, otherDevice.ViewerID, otherDevice.ProfileID, false); !ok {
+		t.Fatal("supersession interrupted another device")
+	}
+	if _, ok := manager.LookupForViewer(current.ID, current.ViewerID, current.ProfileID, false); !ok {
+		t.Fatal("supersession stopped the admitted plan")
+	}
+	if _, ok := manager.LookupForViewer(later.ID, later.ViewerID, later.ProfileID, false); !ok {
+		t.Fatal("an earlier response revoked later playback")
+	}
+}
+
+func TestManagerIgnoresEmptyViewerTeardownIdentity(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Direct}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopViewer("")
+	if _, ok := manager.Lookup(session.ID, "profile-a", false); !ok {
+		t.Fatal("an empty viewer identity stopped unrelated playback")
+	}
+}
+
+func TestManagerDoesNotRetainARevocationFenceWithoutPendingCreates(t *testing.T) {
+	manager, _ := testManager(t, nil)
+
+	manager.StopViewer("viewer-a")
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatalf("retained %d inactive viewer revocation fences", len(manager.revokedViewers))
+	}
+}
+
+func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	started := make(chan struct{})
+	resume := make(chan struct{})
+	executor.onStart = func() {
+		close(started)
+		<-resume
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		result <- err
+	}()
+	<-started
+
+	manager.StopViewer("viewer-a")
+	close(resume)
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("late create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("late FFmpeg candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("late create retained a generation")
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.revokedViewers) != 0 {
+		t.Fatal("viewer revocation fence remained after pending create finished")
+	}
+}
+
+func TestManagerRejectsAViewerCreateRevokedWhileWaitingForManifest(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	executor.skipManifest = true
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.mu.Lock()
+		registered := len(manager.sessions) == 1
+		manager.mu.Unlock()
+		if registered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("create did not register its pending viewer session")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	manager.StopViewer("viewer-a")
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("late manifest create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("revoked manifest candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("revoked manifest candidate retained a generation")
+	}
+}
+
+func TestManagerRejectsAViewerRevokedAfterSuccessfulManifestWait(t *testing.T) {
+	settings := DefaultSettings(t.TempDir())
+	settings.LeaseTTL = 3 * time.Second
+	settings.HeartbeatInterval = time.Second
+	settings.ProcessGrace = 10 * time.Millisecond
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 2 << 20
+	settings.MaxGenerations = 2
+	fs := &pauseSuccessfulManifestStatFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+	executor := &fakeExecutor{}
+	manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		result <- err
+	}()
+	<-fs.observed
+
+	manager.StopViewer("viewer-a")
+	close(fs.release)
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("revoked successful manifest candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("revoked successful manifest candidate retained a generation")
 	}
 }
 

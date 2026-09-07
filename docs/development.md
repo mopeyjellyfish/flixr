@@ -218,6 +218,18 @@ continue in receipt order within their generation; upgrading the client is
 required for ordering delayed messages within one playback. Lease expiry, stop,
 and shutdown never resave a cached position.
 
+The player retries transient server failures, expired playback leases, and
+compatibility-stream network errors with bounded delays. A reconnect event can
+advance a scheduled retry, while the retry timer also works without that event.
+Every replacement plan starts from the server's last acknowledged position;
+unsent browser time is not treated as durable progress. Revoked authorization,
+unsupported media, unavailable FFmpeg, and exhausted capacity stop recovery.
+Leaving playback, selecting another profile, or logging out cancels outstanding
+retries and releases replacement sessions that finish after cancellation. On
+player exit or unmount, the final progress acknowledgement gets at most two
+seconds before the player requests session stop; a hung request cannot retain
+the client or delay navigation.
+
 The legacy `GET /api/v1/progress/{id}` also returns `generation`. A legacy `PUT`
 must echo that value; each accepted write advances it. An omitted generation
 means zero and works only for initial or migrated progress that has not yet

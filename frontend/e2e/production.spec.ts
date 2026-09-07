@@ -68,6 +68,25 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i }).click();
   await page.getByRole('button', { name: /play blue horizon 2026/i }).click();
   await expectPlayback(page);
+  const directVideo = page.locator('video');
+  const acknowledgedHeartbeat = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/heartbeat') && response.ok());
+  await directVideo.dispatchEvent('pause');
+  const acknowledgedRequest = (await acknowledgedHeartbeat).request();
+  const acknowledgedPosition = Number((acknowledgedRequest.postDataJSON() as { position_ms: number }).position_ms);
+  expect(acknowledgedPosition).toBeGreaterThan(0);
+
+  await page.context().setOffline(true);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeFalsy();
+  const failedHeartbeat = page.waitForEvent('requestfailed', (request) => request.method() === 'POST' && request.url().endsWith('/heartbeat'));
+  const failedPlan = page.waitForEvent('requestfailed', (request) => request.method() === 'POST' && request.url().endsWith('/playback/plans'));
+  await directVideo.dispatchEvent('pause');
+  await Promise.all([failedHeartbeat, failedPlan]);
+  const reconnectPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
+  await page.context().setOffline(false);
+  await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeTruthy();
+  const reconnectBody = await (await reconnectPlan).json() as { resume_ms: number };
+  expect(reconnectBody.resume_ms).toBe(acknowledgedPosition);
+  await expect.poll(() => directVideo.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await page.screenshot({ path: testInfo.outputPath('production-direct-playback-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -75,8 +94,35 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('button', { name: /back to library/i }).click();
   await expect(page.locator('[data-catalog-id]:focus')).toHaveAccessibleName(/blue horizon 2026/i);
+  let faultSession = '';
+  let injectedSegmentFailures = 0;
+  const failInitialSegments = async (route: import('@playwright/test').Route) => {
+    const match = new URL(route.request().url()).pathname.match(/\/playback\/sessions\/([^/]+)\/segment-[^/]+\.m4s$/);
+    if (!match) return route.continue();
+    faultSession ||= match[1];
+    if (match[1] === faultSession) {
+      injectedSegmentFailures += 1;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'playback_failed' } }) });
+    }
+    return route.continue();
+  };
+  await page.route('**/api/v1/playback/sessions/*/segment-*.m4s', failInitialSegments);
+  const initialCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
   await page.getByRole('button', { name: /film compatibility check 2026/i }).click();
   await page.getByRole('button', { name: /play compatibility check 2026/i }).click();
+  const initialCompatibilityBody = await (await initialCompatibilityPlan).json() as { session_id: string; heartbeat_url: string };
+  const acknowledgedCompatibilityPosition = 750;
+  const compatibilityHeartbeat = await page.evaluate(async ({ heartbeatURL, positionMS }) => {
+    const response = await fetch(heartbeatURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ position_ms: positionMS, observation: 1 }) });
+    return response.status;
+  }, { heartbeatURL: initialCompatibilityBody.heartbeat_url, positionMS: acknowledgedCompatibilityPosition });
+  expect(compatibilityHeartbeat).toBe(200);
+  const recoveredCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
+  const recoveredCompatibilityBody = await (await recoveredCompatibilityPlan).json() as { session_id: string; resume_ms: number };
+  expect(recoveredCompatibilityBody.session_id).not.toBe(initialCompatibilityBody.session_id);
+  expect(recoveredCompatibilityBody.resume_ms).toBe(acknowledgedCompatibilityPosition);
+  expect(injectedSegmentFailures).toBeGreaterThan(0);
+  await page.unroute('**/api/v1/playback/sessions/*/segment-*.m4s', failInitialSegments);
   await expectPlayback(page);
   await page.screenshot({ path: testInfo.outputPath('production-transcode-playback-desktop.png'), fullPage: true });
   await page.getByRole('button', { name: /back to library/i }).click();
@@ -138,7 +184,20 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
   await acceptScreens(page, browser, testInfo);
-  expect(errors).toEqual([]);
+  const activeGenerations = await page.evaluate(async () => {
+    const login = await fetch('/api/v1/owner/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'production-owner-password' }),
+    });
+    if (!login.ok) throw new Error(`owner login failed with HTTP ${login.status}`);
+    const status = await fetch('/api/v1/owner/playback/status');
+    if (!status.ok) throw new Error(`playback status failed with HTTP ${status.status}`);
+    const body = await status.json() as { generations: unknown[] };
+    return body.generations;
+  });
+  expect(activeGenerations).toEqual([]);
+  expect(errors.filter((message) => !message.includes('ERR_INTERNET_DISCONNECTED') && !message.includes('503'))).toEqual([]);
   expect(externalRequests).toEqual([]);
 });
 

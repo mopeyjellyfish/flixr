@@ -3,7 +3,20 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
+import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
+
+const maxConsecutiveRecoveries = 3;
+const finalHeartbeatWaitMS = 2_000;
+
+async function settleWithin(promise: Promise<unknown>, timeoutMS: number): Promise<void> {
+  let timer = 0;
+  await Promise.race([
+    promise.catch(() => undefined),
+    new Promise<void>((resolve) => { timer = window.setTimeout(resolve, timeoutMS); }),
+  ]);
+  window.clearTimeout(timer);
+}
 
 const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
 
@@ -67,6 +80,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const observation = useRef(0);
   const initializingPosition = useRef(false);
   const finalizing = useRef(false);
+  const recovering = useRef(false);
+  const consecutiveRecoveries = useRef(0);
+  const recovery = useRef(new PlaybackRecovery());
+  const recoverRef = useRef<(error: unknown) => void>(() => undefined);
   const endedPlayback = useRef(false);
   const completionAck = useRef<Promise<boolean> | null>(null);
   const autoplayVersion = useRef(0);
@@ -104,36 +121,101 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     }
     const next = new Hls({ enableWorker: true, lowLatencyMode: false });
     next.on(Hls.Events.ERROR, (_event, data) => {
-      if (data.fatal) dispatch({ type: 'error', message: 'The compatibility stream stopped unexpectedly.' });
+      if (version !== sourceVersion.current || finalizing.current) return;
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        recoverRef.current(new PlaybackNetworkError());
+      } else if (data.fatal) {
+        dispatch({ type: 'error', message: 'The compatibility stream stopped unexpectedly.' });
+      }
     });
     next.loadSource(plan.media_url);
     next.attachMedia(video.current);
     hls.current = next;
   }, []);
 
+  const recover = useCallback(async (failure: unknown) => {
+    if (!isRetryablePlaybackFailure(failure)) {
+      playback.current = null;
+      dispatch({ type: 'error', message: failure instanceof ApiError ? failure.message : 'Playback stopped unexpectedly. Start the title again.' });
+      return;
+    }
+    if (finalizing.current || recovering.current) return;
+    if (consecutiveRecoveries.current >= maxConsecutiveRecoveries) {
+      const abandoned = playback.current;
+      playback.current = null;
+      sourceVersion.current += 1;
+      hls.current?.destroy();
+      hls.current = null;
+      video.current?.removeAttribute('src');
+      video.current?.load();
+      if (abandoned) void api.playbackStop(abandoned.session_id).catch(() => undefined);
+      dispatch({ type: 'error', message: 'Playback could not reconnect to Flixr after several attempts. Check this device\'s local network connection, then start the title again.' });
+      return;
+    }
+    consecutiveRecoveries.current += 1;
+    recovering.current = true;
+    const oldPlan = playback.current;
+    const continuePlaying = video.current ? !video.current.paused : false;
+    playback.current = null;
+    sourceVersion.current += 1;
+    hls.current?.destroy();
+    hls.current = null;
+    video.current?.removeAttribute('src');
+    video.current?.load();
+    dispatch({ type: 'buffering' });
+    try {
+      const next = await recovery.current.run(async () => {
+        if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
+        return api.playbackPlan(catalogID, browserCapabilities());
+      }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
+      if (!next || finalizing.current) return;
+      observation.current = 0;
+      autoStart.current = continuePlaying;
+      await attach(next);
+    } catch (error: unknown) {
+      if (!finalizing.current) {
+        const message = isRetryablePlaybackFailure(error)
+          ? 'Playback could not reconnect to Flixr after several attempts. Check this device\'s local network connection, then start the title again.'
+          : error instanceof ApiError ? error.message : 'Playback could not restart.';
+        dispatch({ type: 'error', message });
+      }
+    } finally {
+      recovering.current = false;
+    }
+  }, [attach, catalogID]);
+  recoverRef.current = (error) => { void recover(error); };
+
   const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
-    if (!plan || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
+    if (!plan || recovering.current || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
+    const version = sourceVersion.current;
     const positionMs = currentPosition();
     try {
       const acknowledgement = await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
+      if (version !== sourceVersion.current || finalizing.current || playback.current?.session_id !== plan.session_id) return false;
       if (ended && !acknowledgement.accepted) {
         dispatch({ type: 'error', message: 'Episode completion could not be saved. Return to your library and try again.' });
         return false;
       }
+      consecutiveRecoveries.current = 0;
       return true;
     } catch (error: unknown) {
-      if (playback.current?.session_id !== plan.session_id || replacingSession.current === plan.session_id) return false;
-      playback.current = null;
-      dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
+      if (version !== sourceVersion.current || (finalizing.current && !ended) || playback.current?.session_id !== plan.session_id || replacingSession.current === plan.session_id) return false;
+      if (ended || !isRetryablePlaybackFailure(error)) {
+        playback.current = null;
+        dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
+      } else {
+        void recover(error instanceof ApiError ? error : new PlaybackNetworkError());
+      }
       return false;
     }
-  }, [currentPosition]);
+  }, [currentPosition, recover]);
 
   useEffect(() => {
     let active = true;
     let timer = 0;
+    const recoveryController = recovery.current;
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
@@ -142,7 +224,11 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     completionAck.current = null;
     setAudioLocked(false);
     setAutoplay({ kind: 'idle' });
-    api.playbackPlan(catalogID, browserCapabilities()).then(async (initial) => {
+    recoveryController.run(
+      () => api.playbackPlan(catalogID, browserCapabilities()),
+      (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
+    ).then(async (initial) => {
+      if (!initial) return;
       if (!active) { void api.playbackStop(initial.session_id); return; }
       let plan = initial;
       playback.current = initial;
@@ -152,13 +238,21 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
           ? { ...initial, resume_ms: startPositionMS }
           : await api.playbackSeek(initial.session_id, startPositionMS, ++observation.current);
       }
-      if (!active) return;
+      if (!active || finalizing.current) {
+        if (plan.session_id !== initial.session_id) void api.playbackStop(plan.session_id).catch(() => undefined);
+        return;
+      }
       void attach(plan);
       const leaseRemaining = Math.max(3_000, plan.expires_at * 1_000 - Date.now());
       const heartbeatEvery = Math.max(1_000, Math.min(15_000, Math.floor(leaseRemaining / 3)));
       timer = window.setInterval(() => { void heartbeat(); }, heartbeatEvery);
     }).catch((error: unknown) => {
-      if (active) dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Playback could not start.' });
+      if (active) {
+        const message = isRetryablePlaybackFailure(error)
+          ? 'Playback could not connect to Flixr after several attempts. Check this device\'s local network connection and try again.'
+          : error instanceof ApiError ? error.message : 'Playback could not start.';
+        dispatch({ type: 'error', message });
+      }
     });
     const pageHide = () => {
       const plan = playback.current;
@@ -169,6 +263,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     window.addEventListener('pagehide', pageHide);
     return () => {
       active = false;
+      recoveryController.cancel();
       audioSwitchVersion.current += 1;
       autoplayVersion.current += 1;
       autoplayRequest.current?.abort();
@@ -183,7 +278,8 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         const save = endedPlayback.current
           ? completionAck.current?.then(() => undefined).catch(() => undefined) ?? Promise.resolve()
           : api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
-        void save.then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
+        void settleWithin(save, finalHeartbeatWaitMS)
+          .then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
   }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
@@ -256,7 +352,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const version = sourceVersion.current;
     try {
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
-      if (version !== sourceVersion.current || !video.current) return;
+      if (version !== sourceVersion.current || finalizing.current || !video.current) {
+        if (updated.session_id !== plan.session_id) void api.playbackStop(updated.session_id).catch(() => undefined);
+        return;
+      }
       if (updated.media_url !== plan.media_url || updated.session_id !== plan.session_id) {
         autoStart.current = !element.paused;
         void attach(updated);
@@ -265,9 +364,12 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         element.currentTime = Math.max(0, target - updated.stream_offset_ms) / 1000;
       }
     } catch (error: unknown) {
-      if (version === sourceVersion.current) dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+      if (version === sourceVersion.current) {
+        if (isRetryablePlaybackFailure(error)) void recover(error);
+        else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+      }
     }
-  }, [attach]);
+  }, [attach, recover]);
   useEffect(() => screenCoordinator.onCommand((command) => {
     if (command.type === 'pause') {
       video.current?.pause();
@@ -293,24 +395,20 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const finish = async () => {
     if (finalizing.current) return;
     finalizing.current = true;
+    recovery.current.cancel();
     setAudioLocked(true);
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
     await audioSwitchTask.current;
+    sourceVersion.current += 1;
     const plan = playback.current;
     if (plan) {
-      try {
-        // A failed progress write must not leave an FFmpeg session running.
-        if (endedPlayback.current) {
-          await completionAck.current?.catch(() => false);
-        } else {
-          await api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
-        }
-        await api.playbackStop(plan.session_id);
-      } catch {
-        // The durable progress write is best-effort during an explicit exit.
-      }
+      const save = endedPlayback.current
+        ? completionAck.current?.then(() => undefined).catch(() => undefined) ?? Promise.resolve()
+        : api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current).catch(() => undefined);
+      await settleWithin(save, finalHeartbeatWaitMS);
+      void api.playbackStop(plan.session_id).catch(() => undefined);
     }
     onExit();
   };
@@ -355,12 +453,20 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const plan = playback.current;
     if (!plan) return;
     if (plan.plan.kind === 'direct') { await heartbeat(); return; }
+    const version = sourceVersion.current;
     const target = currentPosition();
     try {
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
+      if (version !== sourceVersion.current || finalizing.current) {
+        if (updated.session_id !== plan.session_id) void api.playbackStop(updated.session_id).catch(() => undefined);
+        return;
+      }
       if (updated.session_id !== plan.session_id || updated.media_url !== plan.media_url) void attach(updated);
     } catch (error: unknown) {
-      dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+      if (version === sourceVersion.current && !finalizing.current) {
+        if (isRetryablePlaybackFailure(error)) void recover(error);
+        else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+      }
     }
   };
 
@@ -434,7 +540,12 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               }
             }}
             onCanPlay={() => dispatch({ type: video.current?.paused ? 'pause' : 'play' })}
-            onError={() => dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' })}
+            onError={() => {
+              if (recovering.current || finalizing.current) return;
+              const plan = playback.current;
+              if (video.current?.error?.code === 2 || (plan !== null && plan.plan.kind !== 'direct')) void recover(new PlaybackNetworkError());
+              else dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' });
+            }}
             onEnded={() => { dispatch({ type: 'pause' }); void complete(); }}
             onPlaying={() => dispatch({ type: 'play' })}
             onPause={() => {

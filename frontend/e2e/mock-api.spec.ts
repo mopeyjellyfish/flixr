@@ -422,7 +422,7 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   await expect(page.getByRole('alert')).toContainText(/playback limit/i);
 });
 
-test('mocked playback heartbeat, buffering, cross-client resume, expiry, recovery, stop, and interruption states', async ({ page, context }) => {
+test('mocked playback heartbeat, buffering, cross-client resume, lease recovery, stop, and network recovery', async ({ page, context }) => {
   await mockMediaSource(page);
   let heartbeats = 0;
   let stops = 0;
@@ -488,16 +488,31 @@ test('mocked playback heartbeat, buffering, cross-client resume, expiry, recover
   });
   expect(resumedAt).toBe(12);
   expired = true;
+  const plansBeforeExpiry = plans;
   await secondClient.locator('video').dispatchEvent('pause');
-  await expect(secondClient.getByRole('alert')).toContainText(/session expired/i);
+  await expect.poll(() => plans).toBeGreaterThan(plansBeforeExpiry);
+  const recoveredFromExpiry = await secondClient.locator('video').evaluate((video) => {
+    const media = video as HTMLVideoElement;
+    media.dispatchEvent(new Event('loadedmetadata'));
+    return media.currentTime;
+  });
+  expect(recoveredFromExpiry).toBe(12);
+  await expect(secondClient.getByRole('alert')).toHaveCount(0);
 
   expired = false;
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
   interrupted = true;
+  const plansBeforeInterruption = plans;
   await secondClient.locator('video').dispatchEvent('pause');
-  await expect(secondClient.getByRole('alert')).toContainText(/complete that request/i);
+  await expect.poll(() => plans).toBeGreaterThan(plansBeforeInterruption);
+  await expect(secondClient.getByRole('alert')).toHaveCount(0);
   expect(errors.every((message) => message.includes('403') || message.includes('500'))).toBeTruthy();
+
+  interrupted = false;
+  const stopsBeforeExit = stops;
+  await secondClient.getByRole('button', { name: /back to library/i }).click();
+  await expect.poll(() => stops).toBeGreaterThan(stopsBeforeExit);
 });
 
 test('personal history dates, clear undo, and rating persist across navigation', async ({ page }, testInfo) => {
