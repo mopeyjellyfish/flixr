@@ -328,6 +328,87 @@ func (c *Catalog) pendingArtwork(identity artworkIdentity) (Enrichment, error) {
 	return enrichment, rows.Err()
 }
 
+func (c *Catalog) pendingLegacyArtworkReconciliation(identity artworkIdentity) (bool, error) {
+	if c.db == nil || identity.providerID == "" {
+		return false, nil
+	}
+	var pending int
+	err := c.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=? AND provider_id=? AND parent_catalog_id=? AND parent_provider_id=?)`, identity.catalogKind, identity.catalogID, identity.providerID, identity.parentCatalogID, identity.parentProviderID).Scan(&pending)
+	return pending != 0, err
+}
+
+func (c *Catalog) completeLegacyArtworkReconciliation(identity artworkIdentity) error {
+	if c.db == nil {
+		return nil
+	}
+	_, err := c.db.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=? AND provider_id=? AND parent_catalog_id=? AND parent_provider_id=?`, identity.catalogKind, identity.catalogID, identity.providerID, identity.parentCatalogID, identity.parentProviderID)
+	return err
+}
+
+func (c *Catalog) stageLegacyArtworkRetries(identity artworkIdentity, enrichment Enrichment) error {
+	if c.db == nil {
+		return nil
+	}
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, value := range []struct {
+		kind, path string
+	}{{"poster", enrichment.Poster}, {"backdrop", enrichment.Backdrop}} {
+		if value.path == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO catalog_artwork_retries(catalog_kind,catalog_id,artwork_kind,provider_id,parent_catalog_id,parent_provider_id,provider_path) VALUES(?,?,?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id,artwork_kind) DO UPDATE SET provider_id=excluded.provider_id,parent_catalog_id=excluded.parent_catalog_id,parent_provider_id=excluded.parent_provider_id,provider_path=excluded.provider_path`, identity.catalogKind, identity.catalogID, value.kind, identity.providerID, identity.parentCatalogID, identity.parentProviderID, value.path); err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=? AND provider_id=? AND parent_catalog_id=? AND parent_provider_id=?`, identity.catalogKind, identity.catalogID, identity.providerID, identity.parentCatalogID, identity.parentProviderID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return errors.New("legacy artwork reconciliation identity is stale")
+	}
+	return tx.Commit()
+}
+
+func missingArtwork(enrichment Enrichment, existingPoster, existingBackdrop string) Enrichment {
+	if existingPoster != "" {
+		enrichment.Poster = ""
+	}
+	if existingBackdrop != "" {
+		enrichment.Backdrop = ""
+	}
+	return enrichment
+}
+
+func (c *Catalog) unlockedArtwork(kind, id string, enrichment Enrichment) Enrichment {
+	if kind == "episode" {
+		return enrichment
+	}
+	fields, err := c.MetadataFields(kind, id)
+	if err != nil {
+		return enrichment
+	}
+	for _, field := range fields {
+		if !field.Locked {
+			continue
+		}
+		switch field.Field {
+		case "poster":
+			enrichment.Poster = ""
+		case "backdrop":
+			enrichment.Backdrop = ""
+		}
+	}
+	return enrichment
+}
+
 func (c *Catalog) cacheEnrichmentArtwork(ctx context.Context, identity artworkIdentity, enrichment *Enrichment, existingPoster, existingBackdrop string) (bool, error) {
 	posterPath, backdropPath := enrichment.Poster, enrichment.Backdrop
 	c.mu.RLock()

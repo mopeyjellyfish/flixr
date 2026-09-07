@@ -112,6 +112,9 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=?`, kind, id); err != nil {
 			return Item{}, err
 		}
+		if _, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=?`, kind, id); err != nil {
+			return Item{}, err
+		}
 	}
 	seen := map[string]bool{}
 	for _, field := range edit.Fields {

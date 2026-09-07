@@ -736,10 +736,22 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 			var enrichment Enrichment
 			var err error
+			legacyReconciliation := false
+			identity := artworkIdentity{catalogKind: "film", catalogID: id, providerID: item.ProviderID}
 			if item.ProviderID != "" {
-				enrichment, err = c.pendingArtwork(artworkIdentity{catalogKind: "film", catalogID: id, providerID: item.ProviderID})
+				enrichment, err = c.pendingArtwork(identity)
 				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
-					continue
+					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
+					if err == nil && !legacyReconciliation {
+						continue
+					}
+					if err == nil {
+						if exact, ok := provider.(CandidateProvider); ok {
+							enrichment, err = exact.ByID(ctx, token, "film", item.ProviderID, item.Language, item.Region)
+						} else {
+							err = ErrProviderUnavailable
+						}
+					}
 				}
 			} else {
 				enrichment, err = provider.Lookup(ctx, token, "film", item.Title)
@@ -751,11 +763,25 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				observations = append(observations, providerFailure("film:"+id, "provider_failed"))
 				continue
 			}
+			if legacyReconciliation && enrichment.ProviderID != item.ProviderID {
+				if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
+					return nil, err
+				}
+				observations = append(observations, providerFailure("film:"+id, "unmatched"))
+				continue
+			}
 			if enrichment.ProviderID == "" {
 				observations = append(observations, providerFailure("film:"+id, "unmatched"))
 				continue
 			}
-			identity := artworkIdentity{catalogKind: "film", catalogID: id, providerID: enrichment.ProviderID}
+			identity = artworkIdentity{catalogKind: "film", catalogID: id, providerID: enrichment.ProviderID}
+			if legacyReconciliation {
+				enrichment = c.unlockedArtwork("film", id, enrichment)
+				enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
+				if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
+					return nil, err
+				}
+			}
 			artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
 			if err != nil {
 				return nil, err
@@ -797,13 +823,26 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 		var enrichment Enrichment
 		var enrichmentErr error
 		attempted := false
+		legacyReconciliation := false
+		identity := artworkIdentity{catalogKind: "series", catalogID: id, providerID: previous.ProviderID}
 		if retained && (previous.ProviderID != "" || previous.OwnerUnmatch) {
 			value.Title = previous.Title
 			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly
 			if !previous.OwnerUnmatch && provider != nil && token != "" {
-				enrichment, enrichmentErr = c.pendingArtwork(artworkIdentity{catalogKind: "series", catalogID: id, providerID: previous.ProviderID})
+				enrichment, enrichmentErr = c.pendingArtwork(identity)
 				attempted = enrichmentErr != nil || enrichment.Poster != "" || enrichment.Backdrop != ""
+				if !attempted {
+					legacyReconciliation, enrichmentErr = c.pendingLegacyArtworkReconciliation(identity)
+					attempted = enrichmentErr != nil || legacyReconciliation
+					if enrichmentErr == nil && legacyReconciliation {
+						if exact, ok := provider.(CandidateProvider); ok {
+							enrichment, enrichmentErr = exact.ByID(ctx, token, "series", previous.ProviderID, previous.Language, previous.Region)
+						} else {
+							enrichmentErr = ErrProviderUnavailable
+						}
+					}
+				}
 			}
 		} else if provider != nil && token != "" {
 			enrichment, enrichmentErr = provider.Lookup(ctx, token, "series", value.Title)
@@ -815,10 +854,22 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 					return nil, ctx.Err()
 				}
 				observations = append(observations, providerFailure("series:"+id, "provider_failed"))
+			} else if legacyReconciliation && enrichment.ProviderID != previous.ProviderID {
+				if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
+					return nil, err
+				}
+				observations = append(observations, providerFailure("series:"+id, "unmatched"))
 			} else if enrichment.ProviderID == "" {
 				observations = append(observations, providerFailure("series:"+id, "unmatched"))
 			} else {
-				identity := artworkIdentity{catalogKind: "series", catalogID: id, providerID: enrichment.ProviderID}
+				identity = artworkIdentity{catalogKind: "series", catalogID: id, providerID: enrichment.ProviderID}
+				if legacyReconciliation {
+					enrichment = c.unlockedArtwork("series", id, enrichment)
+					enrichment = missingArtwork(enrichment, value.Poster, value.Backdrop)
+					if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
+						return nil, err
+					}
+				}
 				artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, value.Poster, value.Backdrop)
 				if err != nil {
 					return nil, err
@@ -854,10 +905,18 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			}
 			var enrichment Enrichment
 			var err error
+			legacyReconciliation := false
+			identity := artworkIdentity{catalogKind: "episode", catalogID: id, providerID: item.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
 			if item.ProviderID != "" {
-				enrichment, err = c.pendingArtwork(artworkIdentity{catalogKind: "episode", catalogID: id, providerID: item.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID})
+				enrichment, err = c.pendingArtwork(identity)
 				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
-					continue
+					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
+					if err == nil && !legacyReconciliation {
+						continue
+					}
+					if err == nil {
+						enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+					}
 				}
 			} else {
 				enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
@@ -869,11 +928,24 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				observations = append(observations, providerFailure("episode:"+id, "provider_failed"))
 				continue
 			}
+			if legacyReconciliation && enrichment.ProviderID != item.ProviderID {
+				if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
+					return nil, err
+				}
+				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
+				continue
+			}
 			if enrichment.ProviderID == "" {
 				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
 				continue
 			}
-			identity := artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
+			identity = artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
+			if legacyReconciliation {
+				enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
+				if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
+					return nil, err
+				}
+			}
 			artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
 			if err != nil {
 				return nil, err
@@ -958,6 +1030,9 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 					if _, err = tx.Exec(`UPDATE catalog_artwork_retries SET catalog_id=? WHERE catalog_kind=? AND catalog_id=?`, x.ID, old.Kind, old.ID); err != nil {
 						return err
 					}
+					if _, err = tx.Exec(`UPDATE catalog_artwork_reconciliations SET catalog_id=? WHERE catalog_kind=? AND catalog_id=?`, x.ID, old.Kind, old.ID); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -1036,6 +1111,15 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='episode' AND NOT EXISTS (SELECT 1 FROM catalog_items JOIN catalog_series ON catalog_series.id=catalog_items.series_id WHERE catalog_items.id=catalog_artwork_retries.catalog_id AND catalog_items.series_id=catalog_artwork_retries.parent_catalog_id AND catalog_series.provider_id=catalog_artwork_retries.parent_provider_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind IN ('film','episode') AND NOT EXISTS (SELECT 1 FROM catalog_items WHERE catalog_items.id=catalog_artwork_reconciliations.catalog_id AND catalog_items.provider_id=catalog_artwork_reconciliations.provider_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind='series' AND NOT EXISTS (SELECT 1 FROM catalog_series WHERE catalog_series.id=catalog_artwork_reconciliations.catalog_id AND catalog_series.provider_id=catalog_artwork_reconciliations.provider_id)`); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind='episode' AND NOT EXISTS (SELECT 1 FROM catalog_items JOIN catalog_series ON catalog_series.id=catalog_items.series_id WHERE catalog_items.id=catalog_artwork_reconciliations.catalog_id AND catalog_items.series_id=catalog_artwork_reconciliations.parent_catalog_id AND catalog_series.provider_id=catalog_artwork_reconciliations.parent_provider_id)`); err != nil {
 			return err
 		}
 		if _, err = tx.Exec("DELETE FROM scan_files WHERE scan_id=?", status.ID); err != nil {

@@ -2,6 +2,7 @@ package catalog_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,239 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
+
+type legacyArtworkProvider struct {
+	exactCalls   map[string]int
+	episodeCalls int
+	artworkCalls map[string]int
+	exactErr     error
+	failArtwork  map[string]bool
+}
+
+func (p *legacyArtworkProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{}, errors.New("unexpected title lookup")
+}
+
+func (p *legacyArtworkProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
+	return nil, nil
+}
+
+func (p *legacyArtworkProvider) ByID(_ context.Context, _, kind, providerID, _, _ string) (catalog.Enrichment, error) {
+	p.exactCalls[kind+":"+providerID]++
+	if p.exactErr != nil {
+		return catalog.Enrichment{}, p.exactErr
+	}
+	switch kind {
+	case "film":
+		if providerID == "legacy-empty" {
+			return catalog.Enrichment{ProviderID: providerID}, nil
+		}
+		return catalog.Enrichment{ProviderID: providerID, Poster: "/film-poster.jpg", Backdrop: "/film-backdrop.jpg"}, nil
+	case "series":
+		return catalog.Enrichment{ProviderID: providerID, Backdrop: "/locked-series-backdrop.jpg"}, nil
+	default:
+		return catalog.Enrichment{}, errors.New("unexpected exact lookup kind")
+	}
+}
+
+func (p *legacyArtworkProvider) LookupEpisode(_ context.Context, _ string, seriesID string, season, episode int) (catalog.Enrichment, error) {
+	p.episodeCalls++
+	if p.exactErr != nil {
+		return catalog.Enrichment{}, p.exactErr
+	}
+	if seriesID != "legacy-series" || season != 1 || episode != 1 {
+		return catalog.Enrichment{}, fmt.Errorf("episode parent/number = %q S%02dE%02d", seriesID, season, episode)
+	}
+	return catalog.Enrichment{ProviderID: "legacy-episode", Backdrop: "/episode-still.jpg"}, nil
+}
+
+func (p *legacyArtworkProvider) FetchArtwork(_ context.Context, path string) (catalog.Artwork, error) {
+	p.artworkCalls[path]++
+	if p.failArtwork[path] && p.artworkCalls[path] == 1 {
+		return catalog.Artwork{}, errors.New("artwork temporarily unavailable")
+	}
+	return catalog.Artwork{Bytes: []byte("legacy:" + path), ContentType: "image/jpeg"}, nil
+}
+
+func TestPre020MatchedArtworkIsReconciledOnceAfterUpgrade(t *testing.T) {
+	films, tv, data := t.TempDir(), t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	writeMedia(t, filepath.Join(films, "No Artwork.mp4"))
+	writeMedia(t, filepath.Join(tv, "Show", "Season 01", "Show.S01E01.mp4"))
+	db, err := sqlite.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(films, tv) != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("seed local catalog: %v", err)
+	}
+	items := c.MetadataTargets()
+	var filmID, emptyFilmID, seriesID string
+	for _, item := range items {
+		if item.Title == "Film" {
+			filmID = item.ID
+		} else if item.Title == "No Artwork" {
+			emptyFilmID = item.ID
+		} else if item.Kind == "series" {
+			seriesID = item.ID
+		}
+	}
+	series, ok := c.Series(seriesID)
+	if !ok || len(series.Seasons) != 1 || len(series.Seasons[0].Episodes) != 1 {
+		t.Fatalf("seed series = %#v", series)
+	}
+	episodeID := series.Seasons[0].Episodes[0].ID
+	if _, err := db.Exec(`UPDATE catalog_items SET provider_id='legacy-film',poster='cached-film-poster',backdrop='',owner_matched=1 WHERE id=?`, filmID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE catalog_items SET provider_id='legacy-empty',poster='',backdrop='' WHERE id=?`, emptyFilmID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE catalog_series SET provider_id='legacy-series',poster='',backdrop='' WHERE id=?`, seriesID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE catalog_items SET provider_id='legacy-episode',poster='',backdrop='' WHERE id=?`, episodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_metadata_fields(catalog_kind,catalog_id,field,value,source,locked) VALUES('series',?,'backdrop','','owner',1)`, seriesID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('tmdb_token','secret') ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore the authentic pre-020 schema state while retaining legacy matched
+	// catalog rows, then exercise the embedded migration through sqlite.Open.
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(data, "flixr.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE catalog_artwork_reconciliations; DROP TABLE catalog_artwork_retries; DELETE FROM schema_migrations WHERE version=20`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = sqlite.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err = catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown(context.Background())
+	provider := &legacyArtworkProvider{exactCalls: map[string]int{}, artworkCalls: map[string]int{}, failArtwork: map[string]bool{"/film-backdrop.jpg": true}}
+	c.SetProvider(provider)
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	film, ok := c.Item(filmID)
+	if !ok || !film.OwnerMatch || film.Poster != "cached-film-poster" || film.Backdrop != "" || c.ScanStatus().Status != "partial" {
+		t.Fatalf("reconciled legacy film = %#v", film)
+	}
+	series, ok = c.Series(seriesID)
+	if !ok || series.Backdrop != "" || series.Seasons[0].Episodes[0].Backdrop == "" {
+		t.Fatalf("reconciled legacy series = %#v", series)
+	}
+	if provider.artworkCalls["/film-poster.jpg"] != 0 || provider.artworkCalls["/locked-series-backdrop.jpg"] != 0 {
+		t.Fatalf("cached or locked artwork fetched = %#v", provider.artworkCalls)
+	}
+	if provider.exactCalls["film:legacy-film"] != 1 || provider.exactCalls["film:legacy-empty"] != 1 || provider.exactCalls["series:legacy-series"] != 1 || provider.episodeCalls != 1 {
+		t.Fatalf("legacy exact requests = %#v episodes=%d", provider.exactCalls, provider.episodeCalls)
+	}
+	var retries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_artwork_retries WHERE catalog_kind='film' AND catalog_id=? AND artwork_kind='backdrop'`, filmID).Scan(&retries); err != nil || retries != 1 {
+		t.Fatalf("legacy failed-artwork retry = %d, %v", retries, err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	film, ok = c.Item(filmID)
+	if !ok || film.Backdrop == "" || c.ScanStatus().Status != "complete" || provider.artworkCalls["/film-backdrop.jpg"] != 2 {
+		t.Fatalf("retried legacy artwork = %#v calls=%#v status=%#v", film, provider.artworkCalls, c.ScanStatus())
+	}
+	if provider.exactCalls["film:legacy-film"] != 1 || provider.exactCalls["film:legacy-empty"] != 1 || provider.exactCalls["series:legacy-series"] != 1 || provider.episodeCalls != 1 {
+		t.Fatalf("completed reconciliation repeated provider requests = %#v episodes=%d", provider.exactCalls, provider.episodeCalls)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if provider.exactCalls["film:legacy-film"] != 1 || provider.exactCalls["film:legacy-empty"] != 1 || provider.exactCalls["series:legacy-series"] != 1 || provider.episodeCalls != 1 || provider.artworkCalls["/film-backdrop.jpg"] != 2 {
+		t.Fatalf("settled artwork made more provider requests: exact=%#v artwork=%#v episodes=%d", provider.exactCalls, provider.artworkCalls, provider.episodeCalls)
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_artwork_reconciliations`).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("reconciliation queue = %d, %v", pending, err)
+	}
+}
+
+func TestLegacyArtworkReconciliationSurvivesTemporaryProviderUnavailability(t *testing.T) {
+	// This covers an unavailable exact metadata request while the local scan is
+	// healthy. The separate offline acceptance flow covers total network loss.
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	db, c := openCatalog(t, data)
+	if err := c.SetRoots(films, ""); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatalf("seed local catalog: %v", err)
+	}
+	filmID := c.MetadataTargets()[0].ID
+	if _, err := db.Exec(`UPDATE catalog_items SET provider_id='legacy-film',poster='',backdrop='' WHERE id=?`, filmID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_artwork_reconciliations(catalog_kind,catalog_id,provider_id) VALUES('film',?,'legacy-film')`, filmID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('tmdb_token','secret') ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Shutdown(context.Background())
+	provider := &legacyArtworkProvider{exactCalls: map[string]int{}, artworkCalls: map[string]int{}, exactErr: errors.New("provider temporarily unavailable")}
+	reopened.SetProvider(provider)
+	if err := reopened.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if status := reopened.ScanStatus(); status.Status != "partial" || status.Failed != 1 {
+		t.Fatalf("provider-unavailable scan status = %#v", status)
+	}
+	provider.exactErr = nil
+	if err := reopened.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	film, ok := reopened.Item(filmID)
+	if !ok || film.Backdrop == "" || provider.exactCalls["film:legacy-film"] != 2 {
+		t.Fatalf("reconciled after provider recovery = %#v calls=%#v", film, provider.exactCalls)
+	}
+	if err := reopened.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if provider.exactCalls["film:legacy-film"] != 2 {
+		t.Fatalf("completed recovery repeated exact request: %#v", provider.exactCalls)
+	}
+}
 
 type metadataFake struct {
 	mu    sync.Mutex

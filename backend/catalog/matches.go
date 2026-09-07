@@ -264,8 +264,14 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 	if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
 		return Item{}, err
 	}
+	if _, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+		return Item{}, err
+	}
 	if kind == "series" {
 		if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind='episode' AND parent_catalog_id=?`, item.ID); err != nil {
+			return Item{}, err
+		}
+		if _, err := tx.Exec(`DELETE FROM catalog_artwork_reconciliations WHERE catalog_kind='episode' AND parent_catalog_id=?`, item.ID); err != nil {
 			return Item{}, err
 		}
 	}
