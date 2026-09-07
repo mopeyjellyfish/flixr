@@ -169,8 +169,8 @@ atomic temporary-file writes keyed by the original hash and one of eight width
 buckets. Startup and six-hour maintenance sweep at most 256 derivative entries,
 records its last run outcome, removes stale temporary files, and evicts expired or
 over-budget entries as encountered above 128 MiB or 64 entries. This does not touch SQLite, settings,
-history, media roots, or playback segments. SQLite remains WAL-backed; use normal
-backups and do not run a blocking `VACUUM` while playback is active.
+history, media roots, or playback segments. Database and deployment-log retention
+are documented separately in [the Docker guide](docker.md#database-and-log-maintenance).
 
 If port 4173 is already occupied, use `FLIXR_TEST_PORT=4180 npm --prefix frontend
 run test:e2e -- --project=chromium`. Tests refuse to reuse an unrelated server.
@@ -225,6 +225,24 @@ changed. A stale generation returns HTTP 409 `progress_conflict`; read the lates
 state and let the viewer decide whether to retry. Never automatically retry an
 old position with a newly read token. The shipped player uses playback sessions
 rather than this legacy route.
+
+### Episode sequence and autoplay
+
+When an episode ends and its completed heartbeat is acknowledged, Flixr asks the
+server for the next playable, unwatched episode for the active profile. Episodes
+are ordered by numeric season and episode numbers. Gaps in the files are skipped,
+as are episodes that this profile has already completed. Season 0 specials are
+excluded from the normal queue; API clients must opt in with
+`include_specials=true`.
+
+Automatic advancement stays within the current TV root and edition/version
+folder. If the next number has multiple playable files in that same context, or
+only a different cut/context is available, Flixr does not guess and shows that no
+next episode is available in this version. A ten-second countdown offers Play now
+and Cancel autoplay. Pause, a hidden tab, leaving the player, or cancellation
+prevents a pending advance. The player stops the completed session before opening
+a fresh playback session for the next episode; profile-scoped playback preferences
+are selected again for that new session.
 
 ## Personal history and ratings
 

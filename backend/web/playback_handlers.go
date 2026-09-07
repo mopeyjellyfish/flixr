@@ -282,6 +282,32 @@ func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, session.CatalogID, info.ModTime(), file)
 }
 
+func (s *Server) playbackNext(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.playbackSession(w, r, false)
+	if !ok {
+		return
+	}
+	includeSpecials := false
+	switch r.URL.Query().Get("include_specials") {
+	case "", "false":
+	case "true":
+		includeSpecials = true
+	default:
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	next, err := s.catalog.EpisodeAfter(session.ProfileID, session.CatalogID, includeSpecials)
+	if errors.Is(err, catalog.ErrCatalogNotFound) {
+		write(w, http.StatusOK, catalog.EpisodeSequence{State: catalog.EpisodeSequenceContextUnavailable})
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	write(w, http.StatusOK, next)
+}
+
 func (s *Server) playbackManifest(w http.ResponseWriter, r *http.Request) {
 	s.servePlaybackAsset(w, r, "index.m3u8")
 }
@@ -349,7 +375,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	write(w, http.StatusOK, map[string]any{"expires_at": updated.ExpiresAt.Unix()})
+	write(w, http.StatusOK, map[string]any{"accepted": accepted, "expires_at": updated.ExpiresAt.Unix()})
 }
 
 func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {

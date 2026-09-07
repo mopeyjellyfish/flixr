@@ -28,6 +28,9 @@ export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' |
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
+export type EpisodeSequence =
+  | { state: 'next'; episode: Episode }
+  | { state: 'end_of_series' | 'not_episodic' | 'context_unavailable'; episode?: never };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
