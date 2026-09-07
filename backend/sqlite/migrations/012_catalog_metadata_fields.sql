@@ -8,3 +8,6 @@ CREATE TABLE catalog_metadata_fields (
  PRIMARY KEY(catalog_kind,catalog_id,field)
 );
 CREATE INDEX catalog_metadata_fields_target ON catalog_metadata_fields(catalog_kind,catalog_id);
+
+ALTER TABLE catalog_artwork ADD COLUMN object_name TEXT NOT NULL DEFAULT '';
+CREATE INDEX catalog_artwork_object ON catalog_artwork(object_name);

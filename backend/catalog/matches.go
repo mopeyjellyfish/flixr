@@ -118,7 +118,7 @@ func (c *Catalog) stageMatchArtwork(ctx context.Context, enrichment Enrichment) 
 		if imagePath == "" || ctx.Err() != nil {
 			continue
 		}
-		if art, err := provider.FetchArtwork(ctx, imagePath); err == nil && len(art.Bytes) > 0 && allowedArtworkContentType(art.ContentType) {
+		if art, err := provider.FetchArtwork(ctx, imagePath); err == nil && len(art.Bytes) > 0 && len(art.Bytes) <= maxArtworkSource && allowedArtworkContentType(art.ContentType) {
 			out[kind] = art
 		}
 	}
@@ -186,11 +186,12 @@ func (c *Catalog) Unmatch(kind, id string) (Item, error) {
 func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
 	if kind == "film" {
 		item, ok := c.items[id]
+		item.metadataVersion = c.metadataVersions[refreshKey(kind, id)]
 		return item, ok && item.Kind == "film"
 	}
 	if kind == "series" {
 		series, ok := c.series[id]
-		return Item{ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}, ok
+		return Item{metadataVersion: c.metadataVersions[refreshKey(kind, id)], ID: series.ID, Title: series.Title, Kind: "series", LocalOnly: series.LocalOnly, ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}, ok
 	}
 	return Item{}, false
 }
@@ -210,6 +211,7 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 		if err := c.updateMatch(kind, item); err != nil {
 			return Item{}, err
 		}
+		c.advanceMetadataVersion(kind, id)
 		c.items[id] = item
 		return publicMetadataItem(item), nil
 	}
@@ -225,6 +227,7 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 		if err := c.updateMatch(kind, item); err != nil {
 			return Item{}, err
 		}
+		c.advanceMetadataVersion(kind, id)
 		c.series[id] = series
 		return item, nil
 	}
@@ -252,4 +255,13 @@ func (c *Catalog) updateMatch(kind string, item Item) error {
 	}
 	_, err := c.db.Exec(`UPDATE `+table+` SET provider_id=?,metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=?,year=?,synopsis=?,poster=?,backdrop=?,local_only=? WHERE id=?`, item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, boolInt(item.OwnerMatch), boolInt(item.OwnerUnmatch), item.Year, item.Synopsis, item.Poster, item.Backdrop, boolInt(item.LocalOnly), item.ID)
 	return err
+}
+
+// Called under mu after a successful owner identity change. Versions only need
+// to live for this process because refresh previews are never persisted.
+func (c *Catalog) advanceMetadataVersion(kind, id string) {
+	if c.metadataVersions == nil {
+		c.metadataVersions = make(map[string]uint64)
+	}
+	c.metadataVersions[refreshKey(kind, id)]++
 }

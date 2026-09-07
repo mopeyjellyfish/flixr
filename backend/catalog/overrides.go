@@ -27,6 +27,8 @@ type refreshPreview struct {
 	expires  time.Time
 }
 
+const maxRefreshPreviews = 4
+
 func refreshKey(kind, id string) string { return kind + ":" + id }
 
 var editableMetadataFields = map[string]bool{"title": true, "synopsis": true, "year": true, "poster": true, "backdrop": true, "tags": true, "content_rating": true}
@@ -60,10 +62,10 @@ func (c *Catalog) MetadataFields(kind, id string) ([]MetadataField, error) {
 }
 
 func (c *Catalog) EditMetadata(kind, id string, edit MetadataEdit) (Item, error) {
-	return c.editMetadata(context.Background(), kind, id, edit, false, nil)
+	return c.editMetadata(context.Background(), kind, id, edit, false, nil, nil)
 }
 
-func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit MetadataEdit, providerWrite bool, expected *Item) (Item, error) {
+func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit MetadataEdit, providerWrite bool, expected *Item, artwork map[string]Artwork) (Item, error) {
 	if len(edit.Fields) == 0 {
 		return Item{}, errors.New("metadata fields are required")
 	}
@@ -82,13 +84,26 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 	if !ok {
 		return Item{}, ErrMetadataNotFound
 	}
-	if expected != nil && (item.ProviderID != expected.ProviderID || item.Language != expected.Language || item.Region != expected.Region || item.OwnerMatch != expected.OwnerMatch || item.OwnerUnmatch != expected.OwnerUnmatch) {
+	if expected != nil && !sameMetadataIdentity(item, *expected) {
 		return Item{}, ErrMetadataStale
 	}
 	if c.db == nil {
 		return Item{}, errors.New("metadata persistence unavailable")
 	}
-	tx, err := c.db.Begin()
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	var created, replaced []string
+	committed := false
+	defer func() {
+		cleanup := created
+		if committed {
+			cleanup = replaced
+		}
+		for _, name := range cleanup {
+			c.removeArtworkObject(name)
+		}
+	}()
+	tx, err := c.db.Writer().BeginTx(ctx, nil)
 	if err != nil {
 		return Item{}, err
 	}
@@ -109,6 +124,13 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 			if locked != 0 {
 				continue
 			}
+		}
+		if art, ok := artwork[field.Field]; ok && field.Source == "provider" {
+			name, previous, err := c.replaceArtwork(tx, id, field.Field, art)
+			if err != nil {
+				return Item{}, err
+			}
+			created, replaced = append(created, name), append(replaced, previous)
 		}
 		if field.Field == "year" && field.Value != "" {
 			if _, err := strconv.Atoi(field.Value); err != nil {
@@ -142,9 +164,13 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 	if _, err := tx.Exec(`UPDATE `+table+` SET title=?,synopsis=?,year=?,poster=?,backdrop=? WHERE id=?`, item.Title, item.Synopsis, item.Year, item.Poster, item.Backdrop, id); err != nil {
 		return Item{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Item{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Item{}, err
 	}
+	committed = true
 	if kind == "film" {
 		c.items[id] = item
 	} else {
@@ -213,7 +239,33 @@ func (c *Catalog) RefreshPreview(ctx context.Context, kind, id string) ([]Metada
 	fields, err := c.PreviewMetadata(kind, id, edit)
 	if err == nil {
 		c.mu.Lock()
-		c.refreshPreviews[refreshKey(kind, id)] = refreshPreview{edit, artwork, expected, time.Now().Add(time.Minute)}
+		if err := ctx.Err(); err != nil {
+			c.mu.Unlock()
+			return nil, err
+		}
+		current, ok := c.metadataTarget(kind, id)
+		if !ok || !sameMetadataIdentity(current, expected) {
+			c.mu.Unlock()
+			return nil, ErrMetadataStale
+		}
+		now := time.Now()
+		for key, preview := range c.refreshPreviews {
+			if !now.Before(preview.expires) {
+				delete(c.refreshPreviews, key)
+			}
+		}
+		key := refreshKey(kind, id)
+		if _, exists := c.refreshPreviews[key]; !exists && len(c.refreshPreviews) >= maxRefreshPreviews {
+			var oldest string
+			var expiry time.Time
+			for candidate, preview := range c.refreshPreviews {
+				if oldest == "" || preview.expires.Before(expiry) {
+					oldest, expiry = candidate, preview.expires
+				}
+			}
+			delete(c.refreshPreviews, oldest)
+		}
+		c.refreshPreviews[key] = refreshPreview{edit, artwork, expected, now.Add(time.Minute)}
 		c.mu.Unlock()
 	}
 	return fields, err
@@ -239,6 +291,16 @@ func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdi
 		return MetadataEdit{}, nil, Item{}, err
 	}
 	artwork := c.stageMatchArtwork(ctx, enrichment)
+	if err := ctx.Err(); err != nil {
+		return MetadataEdit{}, nil, Item{}, err
+	}
+	for imageKind, path := range map[string]string{"poster": enrichment.Poster, "backdrop": enrichment.Backdrop} {
+		if path != "" {
+			if _, ok := artwork[imageKind]; !ok {
+				return MetadataEdit{}, nil, Item{}, ErrProviderUnavailable
+			}
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return MetadataEdit{}, nil, Item{}, err
 	}
@@ -276,50 +338,13 @@ func (c *Catalog) Refresh(ctx context.Context, kind, id string) (Item, error) {
 	if err := ctx.Err(); err != nil {
 		return Item{}, err
 	}
-	fields, err := c.PreviewMetadata(kind, id, edit)
-	if err != nil {
-		return Item{}, err
-	}
-	if err := c.cacheRefreshArtwork(kind, id, fields, artwork, expected); err != nil {
-		return Item{}, err
-	}
-	updated, err := c.editMetadata(ctx, kind, id, MetadataEdit{Fields: fields}, true, &expected)
+	updated, err := c.editMetadata(ctx, kind, id, edit, true, &expected, artwork)
 	if err != nil {
 		return Item{}, err
 	}
 	return c.metadataResult(kind, id, updated), nil
 }
 
-func (c *Catalog) cacheRefreshArtwork(kind, id string, preview []MetadataField, artwork map[string]Artwork, expected Item) error {
-	allowed := map[string]bool{}
-	for _, field := range preview {
-		if field.Source == "provider" && (field.Field == "poster" || field.Field == "backdrop") {
-			allowed[field.Field] = true
-		}
-	}
-	if len(allowed) == 0 {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	item, ok := c.metadataTarget(kind, id)
-	if !ok {
-		return ErrMetadataNotFound
-	}
-	if item.ProviderID != expected.ProviderID || item.Language != expected.Language || item.Region != expected.Region || item.OwnerMatch != expected.OwnerMatch || item.OwnerUnmatch != expected.OwnerUnmatch {
-		return ErrMetadataStale
-	}
-	for imageKind, art := range artwork {
-		if !allowed[imageKind] {
-			continue
-		}
-		var locked int
-		if c.db == nil || c.db.QueryRow(`SELECT locked FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field=?`, kind, id, imageKind).Scan(&locked) == nil && locked != 0 {
-			continue
-		}
-		if _, err := c.cacheArtwork(id, imageKind, art); err != nil {
-			return err
-		}
-	}
-	return nil
+func sameMetadataIdentity(item, expected Item) bool {
+	return item.metadataVersion == expected.metadataVersion && item.ProviderID == expected.ProviderID && item.Language == expected.Language && item.Region == expected.Region && item.OwnerMatch == expected.OwnerMatch && item.OwnerUnmatch == expected.OwnerUnmatch
 }

@@ -137,12 +137,13 @@ type Item struct {
 	Demo         bool     `json:"demo"`
 	MediaProperties
 
-	path          string
-	rootKind      string
-	fingerprint   string
-	size          int64
-	mtime         int64
-	probeRevision int
+	metadataVersion uint64
+	path            string
+	rootKind        string
+	fingerprint     string
+	size            int64
+	mtime           int64
+	probeRevision   int
 }
 
 const mediaProbeRevision = 1
@@ -216,10 +217,12 @@ type Catalog struct {
 	maintenanceDone   chan struct{}
 	maintenanceStatus ArtworkMaintenanceStatus
 	maintenanceDir    afero.File
+	artworkObjectsDir afero.File
 	derivativeBytes   int64
 	derivativeCount   int
 	derivativeReady   bool
 	refreshPreviews   map[string]refreshPreview
+	metadataVersions  map[string]uint64
 }
 
 func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {

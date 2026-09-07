@@ -182,6 +182,9 @@ func TestArtworkMaintenanceEvictsOnlyExpiredDerivatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: []byte("durable"), ContentType: "image/jpeg"}); err != nil {
 		t.Fatal(err)
 	}
@@ -359,4 +362,40 @@ func BenchmarkArtworkSizedCold30Warm30(b *testing.B) {
 			run()
 		}
 	})
+}
+
+func TestArtworkMaintenanceRemovesAbandonedObjectsButKeepsPublished(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.cacheArtwork("film", "poster", Artwork{Bytes: []byte("published"), ContentType: "image/jpeg"}); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(db.DataDir(), "artwork", "objects", "image-abandoned")
+	if err := os.WriteFile(orphan, []byte("uncommitted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned object survives restart: %v", err)
+	}
+	data, _, err := reopened.Artwork("film", "poster")
+	if err != nil || string(data) != "published" {
+		t.Fatalf("published object lost after restart: %q %v", data, err)
+	}
 }

@@ -67,6 +67,12 @@ func TestExistingDatabaseReceivesCatalogMetadataFieldsMigration(t *testing.T) {
 	if _, err := db.Exec("DROP TABLE catalog_metadata_fields"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec("DROP INDEX catalog_artwork_object"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("ALTER TABLE catalog_artwork DROP COLUMN object_name"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec("DELETE FROM schema_migrations WHERE version=12"); err != nil {
 		t.Fatal(err)
 	}
