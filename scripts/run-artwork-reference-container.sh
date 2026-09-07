@@ -7,6 +7,7 @@ result_dir="${FLIXR_MEASURE_RESULT_DIR:-$repo_root/artwork-reference-results-$(d
 name="flixr-artwork-reference-$$"
 image="$name-image"
 source_sha="${FLIXR_MEASURE_SOURCE_SHA:-$(git -C "$repo_root" rev-parse HEAD)}"
+host_user="$(id -u):$(id -g)"
 
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
@@ -17,8 +18,12 @@ trap cleanup EXIT
 require() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
 for command in docker git awk lscpu uname; do require "$command"; done
 [[ "$(uname -s)" == Linux ]] || { echo "reference-container measurement requires a Linux Docker host" >&2; exit 1; }
-mkdir -p "$result_dir"
-chmod 0777 "$result_dir"
+if [[ -e "$result_dir" || -L "$result_dir" ]]; then
+  echo "refusing existing measurement result directory: $result_dir" >&2
+  exit 1
+fi
+umask 077
+mkdir "$result_dir"
 
 {
   printf 'captured_at_utc='; date -u +%FT%TZ
@@ -30,11 +35,14 @@ chmod 0777 "$result_dir"
   printf 'mem_available_kib='; awk '/MemAvailable:/ {print $2}' /proc/meminfo
   printf 'docker_version='; docker version --format '{{.Server.Version}}'
   printf 'docker_resources='; docker info --format 'cpus={{.NCPU}} mem={{.MemTotal}} cgroup={{.CgroupVersion}}'
+  printf 'container_user=%s\n' "$host_user"
   printf 'container_cpus=4\ncontainer_memory_bytes=8589934592\ncontainer_memory_swap_bytes=8589934592\ncontainer_pids_limit=512\ncontainer_network=none\ncontainer_filesystem=read-only-with-tmpfs\n'
 } >"$result_dir/environment.txt"
 
 docker build --pull=false --build-arg "SOURCE_SHA=$source_sha" -f "$repo_root/Dockerfile.artwork-measurement" -t "$image" "$repo_root"
 docker run --name "$name" \
+  --user "$host_user" \
+  --env HOME=/tmp \
   --network none \
   --read-only \
   --tmpfs /tmp:rw,exec,size=2g \
