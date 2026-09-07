@@ -34,3 +34,8 @@ it('requests a capped derivative for catalog artwork', () => {
   const { container } = render(<Artwork src="/api/v1/catalog/artwork/film/poster" width={210} />);
   expect(container.querySelector('img')).toHaveAttribute('src', '/api/v1/catalog/artwork/film/poster?w=240');
 });
+it('keeps a missing artwork slot usable', () => {
+  const { container } = render(<Artwork src="/missing-artwork.jpg" />);
+  fireEvent.error(container.querySelector('img')!);
+  expect(screen.getByText('Artwork unavailable')).toBeInTheDocument();
+});
