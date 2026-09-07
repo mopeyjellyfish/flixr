@@ -40,9 +40,13 @@ await page.addInitScript(observer);
 async function measure(navigate) {
   await navigate();
   await page.waitForFunction(() => window.__issue56Artwork?.grid30Decoded !== null, null, { timeout: 30_000 });
-  return page.evaluate(() => ({ first_visible_decoded_ms: window.__issue56Artwork.firstVisibleDecoded, grid_30_decoded_ms: window.__issue56Artwork.grid30Decoded }));
+  return page.evaluate(() => {
+    const visibleArtworkImages = [...document.images].filter((image) => image.src.includes('/api/v1/catalog/artwork/') && image.getBoundingClientRect().bottom > 0 && image.getBoundingClientRect().top < innerHeight).length;
+    if (visibleArtworkImages < 30) throw new Error(`Expected 30 visible artwork images, got ${visibleArtworkImages}.`);
+    return { first_visible_decoded_ms: window.__issue56Artwork.firstVisibleDecoded, visible_grid_30_decoded_ms: window.__issue56Artwork.grid30Decoded, visible_artwork_images: visibleArtworkImages };
+  });
 }
-const cold = await measure(() => page.goto(`${baseURL}/movies`, { waitUntil: 'networkidle' }));
-const warm = await measure(() => page.reload({ waitUntil: 'networkidle' }));
-console.log(JSON.stringify({ cold, warm }, null, 2));
+const initial = await measure(() => page.goto(`${baseURL}/movies`, { waitUntil: 'networkidle' }));
+const repeat = await measure(() => page.reload({ waitUntil: 'networkidle' }));
+console.log(JSON.stringify({ initial, repeat }, null, 2));
 await browser.close();
