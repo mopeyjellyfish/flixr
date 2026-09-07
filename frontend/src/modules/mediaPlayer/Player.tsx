@@ -49,6 +49,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
+  const replacingSession = useRef<string | undefined>(undefined);
   const playback = useRef<PlaybackPlan | null>(null);
   const observation = useRef(0);
   const initializingPosition = useRef(false);
@@ -101,6 +102,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     try {
       await api.playbackHeartbeat(plan.session_id, positionMs, ++observation.current, ended);
     } catch (error: unknown) {
+      if (playback.current?.session_id !== plan.session_id || replacingSession.current === plan.session_id) return;
       playback.current = null;
       dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
     }
@@ -225,6 +227,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     autoStart.current = !element.paused;
     setSwitchingAudio(true);
     setTrackError(undefined);
+    replacingSession.current = plan.session_id;
     try {
       const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
       if (version !== sourceVersion.current || !video.current) {
@@ -235,6 +238,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     } catch (error: unknown) {
       if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
     } finally {
+      if (replacingSession.current === plan.session_id) replacingSession.current = undefined;
       if (switchVersion === audioSwitchVersion.current) setSwitchingAudio(false);
     }
   };

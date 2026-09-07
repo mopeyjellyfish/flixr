@@ -102,6 +102,11 @@ func selectedAudio(tracks []catalog.AudioTrack, requested *int, external bool, p
 	return tracks[0], true
 }
 
+func knownAudioLanguage(language string) bool {
+	language = strings.TrimSpace(language)
+	return language != "" && !strings.EqualFold(language, "und") && !strings.EqualFold(language, "unknown")
+}
+
 func sourceDefaultAudio(tracks []catalog.AudioTrack, selected catalog.AudioTrack) bool {
 	if selected.External {
 		return false
@@ -186,7 +191,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if body.AudioStreamIndex != nil && track.Language != "" {
+	if body.AudioStreamIndex != nil && knownAudioLanguage(track.Language) {
 		if err := s.house.SaveAudioLanguage(profile.ID, track.Language); err != nil {
 			s.playback.Stop(session.ID, profile.ID)
 			fail(w, http.StatusInternalServerError, "playback_failed")
@@ -413,12 +418,15 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "progress_conflict")
 		return
 	}
-	updated, err := s.playback.Replace(session.ID, profile.ID, plan, body.PositionMS)
+	updated, err := s.playback.ReplaceContext(r.Context(), session.ID, profile.ID, plan, body.PositionMS)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		playbackFailure(w, err)
 		return
 	}
-	if track.Language != "" {
+	if knownAudioLanguage(track.Language) {
 		if err := s.house.SaveAudioLanguage(profile.ID, track.Language); err != nil {
 			s.playback.Stop(updated.ID, profile.ID)
 			fail(w, http.StatusInternalServerError, "playback_failed")

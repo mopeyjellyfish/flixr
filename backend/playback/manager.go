@@ -589,6 +589,15 @@ func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) 
 
 // Replace creates a new rendition before releasing the existing session.
 func (m *Manager) Replace(id, profileID string, plan Plan, positionMS int64) (Session, error) {
+	return m.ReplaceContext(context.Background(), id, profileID, plan, positionMS)
+}
+
+// ReplaceContext creates a new rendition and preserves the existing session if
+// preparation fails or the caller leaves before the replacement is committed.
+func (m *Manager) ReplaceContext(ctx context.Context, id, profileID string, plan Plan, positionMS int64) (Session, error) {
+	if err := ctx.Err(); err != nil {
+		return Session{}, err
+	}
 	m.mu.Lock()
 	session, ok := m.sessions[id]
 	if !ok || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
@@ -599,6 +608,10 @@ func (m *Manager) Replace(id, profileID string, plan Plan, positionMS int64) (Se
 	m.mu.Unlock()
 	replacement, err := m.create(profileID, catalogID, plan, positionMS, session.GenerationID, session.ProgressGeneration)
 	if err != nil {
+		return Session{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = m.Stop(replacement.ID, profileID)
 		return Session{}, err
 	}
 	if !m.Stop(id, profileID) {

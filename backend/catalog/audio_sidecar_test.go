@@ -33,7 +33,7 @@ func TestAudioSidecarIsSelectablePathFreeAndDurable(t *testing.T) {
 			return catalog.MediaProperties{}, err
 		}
 		if info.Size() == int64(len("external-audio")) {
-			return catalog.MediaProperties{Audio: []catalog.AudioTrack{{Index: 0, Codec: "aac", Channels: 2}}}, nil
+			return catalog.MediaProperties{Audio: []catalog.AudioTrack{{Index: 0, Codec: "aac", Channels: 2, Language: "und"}}}, nil
 		}
 		return catalog.MediaProperties{Container: "matroska", VideoCodec: "h264", PrimaryVideoStreamIndex: 0, Audio: []catalog.AudioTrack{{Index: 1, Codec: "aac", Channels: 2, Language: "eng", Default: true}}}, nil
 	})

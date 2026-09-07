@@ -12,6 +12,11 @@ import (
 
 var sidecarLanguage = regexp.MustCompile(`(?i)^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$`)
 
+func unknownAudioLanguage(language string) bool {
+	language = strings.TrimSpace(language)
+	return language == "" || strings.EqualFold(language, "und") || strings.EqualFold(language, "unknown")
+}
+
 func externalAudio(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav":
@@ -118,7 +123,7 @@ func (c *Catalog) appendAudioSidecars(ctx context.Context, root *os.Root, file s
 			track.Index = next
 			track.External = true
 			track.path = sidecar.rel
-			if track.Language == "" {
+			if unknownAudioLanguage(track.Language) {
 				track.Language = language
 			}
 			if track.Title == "" {

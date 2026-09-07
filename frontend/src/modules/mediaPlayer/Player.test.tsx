@@ -233,3 +233,29 @@ it('keeps the active source when an audio change fails', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent(/playback limit/i);
   expect(video).toHaveAttribute('src', '/original.mp4');
 });
+
+it('ignores a retired session heartbeat after audio replacement', async () => {
+  let finishHeartbeat: ((value: Response) => void) | undefined;
+  const original = {
+    plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+    resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+    audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+  };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(original));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ ...original, plan: { kind: 'remux', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/selected.m3u8' }));
+    if (path.includes('session-1/heartbeat')) return await new Promise<Response>((resolve) => { finishHeartbeat = resolve; });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(finishHeartbeat).toBeTypeOf('function'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Audio track' }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(hls.attached).toBe(1));
+  await act(async () => { finishHeartbeat!(new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 })); });
+  expect(screen.queryByRole('heading', { name: 'Playback stopped' })).toBeNull();
+  expect(screen.getByRole('combobox', { name: 'Audio track' })).toHaveValue('embedded:2');
+});
