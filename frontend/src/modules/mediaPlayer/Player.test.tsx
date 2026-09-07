@@ -721,3 +721,174 @@ it('does not advance when stopping the completed session fails', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent(/session expired/i);
   expect(advance).not.toHaveBeenCalled();
 });
+
+it('locks audio selection while completion and next-episode resolution use the current session', async () => {
+  let releaseCompletion: (() => void) | undefined;
+  let resolveNext: ((response: Response) => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/episode-1.mp4',
+      heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/heartbeat')) {
+      await new Promise<void>((resolve) => { releaseCompletion = resolve; });
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    if (path.includes('/next?')) return new Promise<Response>((resolve) => { resolveNext = resolve; });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(releaseCompletion).toBeTypeOf('function'));
+
+  const audio = screen.getByRole('combobox', { name: /audio track/i });
+  expect(audio).toBeDisabled();
+  audio.removeAttribute('disabled');
+  fireEvent.change(audio, { target: { value: 'embedded:2' } });
+  expect(calls.some((path) => path.endsWith('/audio'))).toBe(false);
+  audio.setAttribute('disabled', '');
+
+  await act(async () => { releaseCompletion?.(); });
+  await waitFor(() => expect(resolveNext).toBeTypeOf('function'));
+  expect(audio).toBeDisabled();
+  audio.removeAttribute('disabled');
+  fireEvent.change(audio, { target: { value: 'embedded:2' } });
+  expect(calls.some((path) => path.endsWith('/audio'))).toBe(false);
+
+  await act(async () => { resolveNext?.(new Response(JSON.stringify({ state: 'end_of_series' }))); });
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+});
+
+it('waits for an in-flight audio replacement before completing its stable session', async () => {
+  let resolveAudio: ((response: Response) => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/episode-1.mp4',
+      heartbeat_url: '/heartbeat-1', seek_url: '/seek-1', stop_url: '/stop-1', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/audio')) return new Promise<Response>((resolve) => { resolveAudio = resolve; });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'end_of_series' }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  const view = render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(resolveAudio).toBeTypeOf('function'));
+
+  fireEvent.ended(video);
+  expect(calls.some((path) => path.endsWith('/heartbeat'))).toBe(false);
+  await act(async () => { resolveAudio?.(new Response(JSON.stringify({
+    plan: { kind: 'direct', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/episode-1-french.mp4',
+    heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/stop-2', resume_ms: 10_000, stream_offset_ms: 0, expires_at: 9999999999,
+    audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+  }))); });
+
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+  expect(calls.some((path) => path.includes('session-1/heartbeat') || path.includes('session-1/next'))).toBe(false);
+  expect(calls.some((path) => path.includes('session-2/heartbeat'))).toBe(true);
+  expect(calls.some((path) => path.includes('session-2/next'))).toBe(true);
+  expect(screen.queryByRole('heading', { name: /playback stopped/i })).toBeNull();
+
+  view.unmount();
+  await waitFor(() => expect(calls.some((path) => path.includes('session-2/stop'))).toBe(true));
+});
+
+it('labels audio tracks and preserves source time when changing tracks', async () => {
+  const requests: Array<{ path: string; body?: string }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    requests.push({ path, body: init?.body as string | undefined });
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+      heartbeat_url: '/heartbeat-1', seek_url: '/seek-1', stop_url: '/stop-1', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [
+        { index: 1, codec: 'aac', language: 'eng', title: 'English', default: true },
+        { index: 3, codec: 'aac', title: 'Director Commentary' },
+        { index: 4, codec: 'aac', language: 'not_a_language' },
+      ],
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({
+      plan: { kind: 'transcode', audio_stream_index: 3 }, session_id: 'session-2', media_url: '/selected.m3u8',
+      heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/stop-2', resume_ms: 12_500, stream_offset_ms: 10_000, expires_at: 9999999999,
+      audio_tracks: [
+        { index: 1, codec: 'aac', language: 'eng', title: 'English', default: true },
+        { index: 3, codec: 'aac', title: 'Director Commentary' },
+        { index: 4, codec: 'aac', language: 'not_a_language' },
+      ],
+    }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  expect(screen.getByRole('option', { name: /English.*Default/i })).toBeVisible();
+  expect(screen.getByRole('option', { name: /Director Commentary.*Unknown language/i })).toBeVisible();
+  expect(screen.getByRole('option', { name: 'not_a_language' })).toBeVisible();
+  video.currentTime = 12.5;
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:3' } });
+  await waitFor(() => expect(hls.attached).toBe(1));
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+  const switchRequest = requests.find((request) => request.path.endsWith('/audio'));
+  expect(switchRequest?.body).toContain('"audio_stream_index":3');
+  expect(switchRequest?.body).toContain('"position_ms":12500');
+  expect(switchRequest?.body).toContain('"observation":1');
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(2.5);
+});
+
+it('keeps the active source when an audio change fails', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+      heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng', default: true }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ error: { code: 'playback_capacity' } }), { status: 503 });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  expect(await screen.findByRole('alert')).toHaveTextContent(/playback limit/i);
+  expect(video).toHaveAttribute('src', '/original.mp4');
+});
+
+it('ignores a retired session heartbeat after audio replacement', async () => {
+  let finishHeartbeat: ((value: Response) => void) | undefined;
+  const original = {
+    plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/original.mp4',
+    resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+    audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+  };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(original));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ ...original, plan: { kind: 'remux', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/selected.m3u8' }));
+    if (path.includes('session-1/heartbeat')) return await new Promise<Response>((resolve) => { finishHeartbeat = resolve; });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(finishHeartbeat).toBeTypeOf('function'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Audio track' }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(hls.attached).toBe(1));
+  await act(async () => { finishHeartbeat!(new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 })); });
+  expect(screen.queryByRole('heading', { name: 'Playback stopped' })).toBeNull();
+  expect(screen.getByRole('combobox', { name: 'Audio track' })).toHaveValue('embedded:2');
+});

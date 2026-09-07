@@ -13,15 +13,9 @@ import (
 
 const hlsSegmentDuration = 4 * time.Second
 
-func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
-	parsed, err := url.Parse(inputURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", nil, fmt.Errorf("invalid loopback input URL")
-	}
-	host := parsed.Hostname()
-	ip := net.ParseIP(host)
-	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return "", nil, fmt.Errorf("input URL is not loopback")
+func ffmpegCommand(kind Kind, inputURL, audioInputURL string, audioStreamIndex int, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
+	if _, err := validatedLoopbackURL(inputURL); err != nil {
+		return "", nil, err
 	}
 	if kind != Remux && kind != Transcode {
 		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", kind)
@@ -37,7 +31,23 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 	if start > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
 	}
-	args = append(args, "-re", "-i", inputURL, "-map", "0:v:0", "-map", "0:a:0?")
+	args = append(args, "-re", "-i", inputURL)
+	audioInput := 0
+	if audioInputURL != "" {
+		if _, err := validatedLoopbackURL(audioInputURL); err != nil {
+			return "", nil, err
+		}
+		if start > 0 {
+			args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
+		}
+		args = append(args, "-re", "-i", audioInputURL)
+		audioInput = 1
+	}
+	audioMap := fmt.Sprintf("%d:a:0?", audioInput)
+	if audioStreamIndex >= 0 {
+		audioMap = fmt.Sprintf("%d:%d", audioInput, audioStreamIndex)
+	}
+	args = append(args, "-map", "0:v:0", "-map", audioMap)
 	if kind == Remux {
 		args = append(args, "-c", "copy")
 	} else {
@@ -64,4 +74,17 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 		}
 	}
 	return "ffmpeg", args, nil
+}
+
+func validatedLoopbackURL(value string) (*url.URL, error) {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("invalid loopback input URL")
+	}
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return nil, fmt.Errorf("input URL is not loopback")
+	}
+	return parsed, nil
 }

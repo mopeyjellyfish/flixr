@@ -18,6 +18,26 @@ async function settleWithin(promise: Promise<unknown>, timeoutMS: number): Promi
   window.clearTimeout(timer);
 }
 
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language' });
+
+function languageLabel(language?: string): string {
+  if (!language) return 'Unknown language';
+  try {
+    return languageNames.of(language) ?? language;
+  } catch {
+    return language;
+  }
+}
+
+function audioLabel(track: NonNullable<PlaybackPlan['audio_tracks']>[number]): string {
+  const language = languageLabel(track.language);
+  const parts = [track.title || language];
+  if (track.title && track.title.toLocaleLowerCase() !== language.toLocaleLowerCase()) parts.push(language);
+  if (track.default) parts.push('Default');
+  if (track.external) parts.push('External');
+  return parts.join(' · ');
+}
+
 function browserCapabilities(): PlaybackCapabilities {
   const probe = document.createElement('video');
   const mp4 = probe.canPlayType('video/mp4; codecs="avc1.64001f, mp4a.40.2"') !== '';
@@ -45,11 +65,17 @@ const autoplaySeconds = 10;
 
 export function Player({ catalogID, startPositionMS, active = true, onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onAdvance?: (catalogID: string) => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
+  const [trackError, setTrackError] = useState<string>();
+  const [switchingAudio, setSwitchingAudio] = useState(false);
+  const [audioLocked, setAudioLocked] = useState(false);
   const [autoplay, setAutoplay] = useState<AutoplayState>({ kind: 'idle' });
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
+  const audioSwitchVersion = useRef(0);
+  const audioSwitchTask = useRef<Promise<void> | null>(null);
+  const replacingSession = useRef<string | undefined>(undefined);
   const playback = useRef<PlaybackPlan | null>(null);
   const observation = useRef(0);
   const initializingPosition = useRef(false);
@@ -162,7 +188,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
-    if (!plan || finalizing.current || recovering.current || (endedPlayback.current && !ended)) return false;
+    if (!plan || recovering.current || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
     const version = sourceVersion.current;
     const positionMs = currentPosition();
     try {
@@ -175,7 +201,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       consecutiveRecoveries.current = 0;
       return true;
     } catch (error: unknown) {
-      if (version !== sourceVersion.current || finalizing.current) return false;
+      if (version !== sourceVersion.current || (finalizing.current && !ended) || playback.current?.session_id !== plan.session_id || replacingSession.current === plan.session_id) return false;
       if (ended || !isRetryablePlaybackFailure(error)) {
         playback.current = null;
         dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
@@ -196,6 +222,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     finalizing.current = false;
     endedPlayback.current = false;
     completionAck.current = null;
+    setAudioLocked(false);
     setAutoplay({ kind: 'idle' });
     recoveryController.run(
       () => api.playbackPlan(catalogID, browserCapabilities()),
@@ -237,6 +264,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     return () => {
       active = false;
       recoveryController.cancel();
+      audioSwitchVersion.current += 1;
       autoplayVersion.current += 1;
       autoplayRequest.current?.abort();
       autoplayRequest.current = null;
@@ -269,6 +297,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   }, []);
 
   const advanceTo = useCallback(async (episode: Episode) => {
+    setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
@@ -367,10 +396,12 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     if (finalizing.current) return;
     finalizing.current = true;
     recovery.current.cancel();
-    sourceVersion.current += 1;
+    setAudioLocked(true);
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
+    await audioSwitchTask.current;
+    sourceVersion.current += 1;
     const plan = playback.current;
     if (plan) {
       const save = endedPlayback.current
@@ -383,18 +414,23 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   };
 
   const complete = async () => {
-    const plan = playback.current;
-    if (!plan || finalizing.current || endedPlayback.current) return;
+    if (!playback.current || finalizing.current || endedPlayback.current) return;
     endedPlayback.current = true;
+    setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
     const controller = new AbortController();
     autoplayRequest.current = controller;
     setAutoplay({ kind: 'resolving' });
-    const acknowledgement = heartbeat(true);
+    const acknowledgement = (async () => {
+      await audioSwitchTask.current;
+      return heartbeat(true);
+    })();
     completionAck.current = acknowledgement;
     const accepted = await acknowledgement;
     if (completionAck.current === acknowledgement) completionAck.current = null;
+    const plan = playback.current;
+    if (!plan) return;
     if (!accepted || controller.signal.aborted || version !== autoplayVersion.current) return;
     try {
       const next = await api.playbackNext(plan.session_id, false, controller.signal);
@@ -431,6 +467,44 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         if (isRetryablePlaybackFailure(error)) void recover(error);
         else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
       }
+    }
+  };
+
+  const changeAudio = async (value: string) => {
+    const plan = playback.current;
+    const element = video.current;
+    if (!plan || !element || switchingAudio || audioSwitchTask.current || audioLocked || finalizing.current || endedPlayback.current) return;
+    const [source, indexValue] = value.split(':', 2);
+    const streamIndex = Number(indexValue);
+    if ((source !== 'embedded' && source !== 'external') || !Number.isInteger(streamIndex) || streamIndex < 0) return;
+    const version = sourceVersion.current;
+    const switchVersion = ++audioSwitchVersion.current;
+    const positionMs = currentPosition();
+    autoStart.current = !element.paused;
+    setSwitchingAudio(true);
+    setTrackError(undefined);
+    replacingSession.current = plan.session_id;
+    const performSwitch = async () => {
+      try {
+        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
+        if (version !== sourceVersion.current || !video.current) {
+          void api.playbackStop(updated.session_id).catch(() => undefined);
+          return;
+        }
+        await attach(updated);
+      } catch (error: unknown) {
+        if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
+      } finally {
+        if (replacingSession.current === plan.session_id) replacingSession.current = undefined;
+        if (switchVersion === audioSwitchVersion.current) setSwitchingAudio(false);
+      }
+    };
+    const task = performSwitch();
+    audioSwitchTask.current = task;
+    try {
+      await task;
+    } finally {
+      if (audioSwitchTask.current === task) audioSwitchTask.current = null;
     }
   };
 
@@ -498,11 +572,22 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         </div>
         <div className="player-toolbar">
           <p role="status" className="player-status"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
+          {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
+            <select
+              aria-busy={switchingAudio}
+              disabled={switchingAudio || audioLocked}
+              value={`${playback.current?.plan.audio_external ? 'external' : 'embedded'}:${playback.current?.plan.audio_stream_index ?? ''}`}
+              onChange={(event) => { void changeAudio(event.target.value); }}
+            >
+              {playback.current?.audio_tracks?.map((track) => <option key={`${track.external ? 'external' : 'embedded'}:${track.index}`} value={`${track.external ? 'external' : 'embedded'}:${track.index}`}>{audioLabel(track)}</option>)}
+            </select>
+          </label>}
           <div className="player-actions">
             <button className="primary" onClick={() => void play()}>Play</button>
             <button onClick={pause}>Pause</button>
           </div>
         </div>
+        {trackError && <p className="player-track-error" role="alert">{trackError}</p>}
         <p className="player-hint">Progress stays with this profile across your local devices.</p>
       </section>}
   </main>;

@@ -189,12 +189,15 @@ dialog::backdrop { background: #05070cdd; }
 .player-status { display: flex; align-items: center; gap: 0.65rem; margin: 0; color: var(--muted); }
 .player-status-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--interaction); box-shadow: 0 0 0.8rem #5b8cff99; }
 .player-status-dot.playing { background: var(--success); box-shadow: 0 0 0.8rem #64dfa099; }
+.player-audio { display: flex; align-items: center; gap: 0.65rem; color: var(--muted); font-size: 0.9rem; }
+.player-audio select { max-width: min(24rem, 38vw); }
 .player-actions { display: flex; gap: 0.65rem; }
 .player-actions button { min-width: 6.5rem; }
+.player-track-error { margin: 0.75rem 0 0; color: #ffb6b6; }
 .player-hint { margin: 0.85rem 0 0; color: var(--muted); font-size: 0.9rem; }
 .player-error { width: min(100%, 42rem); margin: 12vh auto 0; border-color: #56657e; box-shadow: 0 1.5rem 4rem #0008; }
 .player-error h2 { margin-top: 0; font: 800 1.8rem/1.1 Manrope, Arial, sans-serif; }
-@media (max-width: 700px) { .player { padding: 1rem; } .player-header { grid-template-columns: 1fr auto; align-items: center; } .player-heading { grid-column: 1 / -1; grid-row: 2; width: 100%; margin-top: 1rem; text-align: left; } .player-local { font-size: 0.68rem; } .player-frame video { max-height: calc(100dvh - 16rem); } .player-toolbar { align-items: flex-start; flex-direction: column; } .player-actions, .player-actions button { width: 100%; } .player-hint { line-height: 1.45; } }
+@media (max-width: 700px) { .player { padding: 1rem; } .player-header { grid-template-columns: 1fr auto; align-items: center; } .player-heading { grid-column: 1 / -1; grid-row: 2; width: 100%; margin-top: 1rem; text-align: left; } .player-local { font-size: 0.68rem; } .player-frame video { max-height: calc(100dvh - 16rem); } .player-toolbar { align-items: flex-start; flex-direction: column; } .player-audio, .player-audio select, .player-actions, .player-actions button { width: 100%; } .player-audio { align-items: flex-start; flex-direction: column; } .player-audio select { max-width: none; } .player-hint { line-height: 1.45; } }
 @media (max-width: 700px) { main, .profile-choice { padding: 1rem; } header { flex-wrap: wrap; } header nav { order: 3; width: 100%; } .hero { padding: 3rem 0 2rem; } .section-heading { align-items: flex-start; flex-direction: column; gap: 0; } .profile-choice h1 { margin: 2.5rem 0; } .auth-panel { margin: 2rem auto; } }
 @media (max-width: 700px) { .viewer-controls { justify-content: stretch; } .viewer-controls label, .viewer-controls select { flex: 1; min-width: 0; } .media-grid { min-height: 28rem; } }
 @media (max-width: 700px) { .setup-flow { padding-top: 0.5rem; } .setup-progress { margin: 3rem 0 2rem; } .setup-intro { text-align: left; } .setup-intro h1 { font-size: clamp(2.65rem, 14vw, 4rem); margin-left: 0; } .setup-flow .readiness.is-ready { display: flex; } .setup-actions { flex-direction: column; } .setup-promises { justify-content: flex-start; gap: 0.3rem 1rem; } }

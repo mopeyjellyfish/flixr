@@ -55,6 +55,10 @@ type AudioTrack struct {
 	Title    string `json:"title,omitempty"`
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
+	External bool   `json:"external,omitempty"`
+
+	sourceIndex int
+	path        string
 }
 
 // UnmarshalJSON treats indexes absent from pre-011 track JSON as unknown. Zero
@@ -290,6 +294,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := c.loadExternalAudio(); err != nil {
+		return nil, err
+	}
 	if err := c.loadMatchState("catalog_items", func(id, provider, language, region string, confidence float64, owner, unmatched int) {
 		x := c.items[id]
 		x.Provider, x.Language, x.Region, x.Confidence, x.OwnerMatch, x.OwnerUnmatch = provider, language, region, confidence, owner != 0, unmatched != 0
@@ -487,7 +494,9 @@ type scanFile struct {
 	changeToken     string
 	root, kind, rel string
 	size, mtime     int64
+	sidecars        []sidecarFile
 }
+type sidecarFile struct{ rel string }
 type scanKey struct{ kind, rel string }
 type scanResult struct {
 	item Item
@@ -609,6 +618,8 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		if r.path == "" {
 			continue
 		}
+		var rootFiles []scanFile
+		var sidecars []sidecarFile
 		err := afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				// A disconnected or unreadable mount is not an empty library.
@@ -617,19 +628,28 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !media(path) {
+			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 				return nil
 			}
 			rel, err := filepath.Rel(r.path, path)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return ErrOutsideRoot
 			}
-			files = append(files, scanFile{root: r.path, kind: r.kind, rel: filepath.ToSlash(rel), size: info.Size(), mtime: info.ModTime().UnixNano(), changeToken: fileChangeToken(info)})
+			rel = filepath.ToSlash(rel)
+			if media(path) {
+				rootFiles = append(rootFiles, scanFile{root: r.path, kind: r.kind, rel: rel, size: info.Size(), mtime: info.ModTime().UnixNano(), changeToken: fileChangeToken(info)})
+			} else if externalAudio(path) {
+				sidecars = append(sidecars, sidecarFile{rel: rel})
+			}
 			return nil
 		})
 		if err != nil {
 			return err
 		}
+		for index := range rootFiles {
+			rootFiles[index].sidecars = matchingAudioSidecars(rootFiles[index].rel, sidecars)
+		}
+		files = append(files, rootFiles...)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].kind+"/"+files[i].rel < files[j].kind+"/"+files[j].rel })
 	results := make(chan scanResult, len(files))
@@ -638,7 +658,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	for _, f := range files {
 		g.Go(func() error {
 			// A stable path, size and mtime never opens, hashes, or probes the file again.
-			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" {
+			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" && len(f.sidecars) == 0 && !hasExternalAudio(old.Audio) {
 				select {
 				case results <- scanResult{item: old, file: f}:
 					return nil
@@ -764,6 +784,9 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	}
 	if properties.VideoCodec == "" {
 		properties.PrimaryVideoStreamIndex = -1
+	}
+	if err := c.appendAudioSidecars(ctx, root, f, &properties); err != nil {
+		return Item{}, err
 	}
 	switch strings.ToLower(filepath.Ext(f.rel)) {
 	case ".mkv":
@@ -991,7 +1014,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			if err != nil {
 				return err
 			}
-			audio, err := json.Marshal(x.Audio)
+			audio, err := json.Marshal(embeddedAudio(x.Audio))
 			if err != nil {
 				return err
 			}
@@ -1011,6 +1034,17 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			}
 			if _, err = tx.Exec(`UPDATE catalog_items SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=? WHERE id=?`, x.Provider, x.Language, x.Region, x.Confidence, boolInt(x.OwnerMatch), boolInt(x.OwnerUnmatch), x.ID); err != nil {
 				return err
+			}
+			if _, err = tx.Exec("DELETE FROM catalog_audio_sidecars WHERE catalog_id=?", x.ID); err != nil {
+				return err
+			}
+			for _, track := range x.Audio {
+				if !track.External {
+					continue
+				}
+				if _, err = tx.Exec(`INSERT INTO catalog_audio_sidecars(catalog_id,selection_index,source_stream_index,relative_path,codec,channels,language,title,is_default,is_forced) VALUES(?,?,?,?,?,?,?,?,?,?)`, x.ID, track.Index, track.sourceIndex, track.path, track.Codec, track.Channels, track.Language, track.Title, boolInt(track.Default), boolInt(track.Forced)); err != nil {
+					return err
+				}
 			}
 		}
 		presentSources := map[string]bool{}
@@ -1200,6 +1234,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {
 			return nil, errors.New("decode catalog media properties")
 		}
+		x.Audio = append(x.Audio, externalAudioTracks(c.items[x.ID].Audio)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		out = append(out, x)
