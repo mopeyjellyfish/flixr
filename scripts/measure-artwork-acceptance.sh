@@ -56,7 +56,7 @@ wait_for_http() {
       echo "isolated Flixr server exited before becoming ready" >&2
       return 1
     fi
-    if status="$(curl --fail --silent --max-time 1 "http://127.0.0.1:$port/api/v1/setup/status")" && jq -e --argjson expected_demo "$expected_demo" '.demo == $expected_demo' <<<"$status" >/dev/null; then return 0; fi
+    if lsof -nP -a -p "$server_pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && status="$(curl --fail --silent --max-time 1 "http://127.0.0.1:$port/api/v1/setup/status")" && jq -e --argjson expected_demo "$expected_demo" '.demo == $expected_demo' <<<"$status" >/dev/null; then return 0; fi
     sleep 0.1
   done
   echo "isolated Flixr server did not start" >&2
