@@ -17,6 +17,24 @@ The short installation guide is in [the README](../README.md). Keep its registry
 access limitation until the anonymous checks below pass. Existing release mechanics
 are documented in [releases](releases.md); do not create another publisher.
 
+## Current qualification evidence
+
+On 7 September 2026, an unauthenticated download of the public `v0.3.0` source
+archive completed with HTTP 200. Source access is therefore available without a
+GitHub credential.
+
+The matching image did not qualify. The standard anonymous GHCR bearer-token flow
+returned a token after a request for `repository:mopeyjellyfish/flixr:pull`, but
+the subsequent manifest request for `ghcr.io/mopeyjellyfish/flixr:v0.3.0` returned HTTP 401. No
+anonymous image index or platform digest is available to record. This does not
+identify the package configuration causing the failure; it establishes that the
+documented anonymous pull cannot yet succeed.
+
+Until anonymous image access succeeds, native AMD64 and ARM64 pull/install checks
+remain blocked. Do not remove the README's registry-access limitation or close
+[#91](https://github.com/mopeyjellyfish/flixr/issues/91). No repository or package
+visibility was changed during this qualification.
+
 ## Anonymous source and image checks
 
 Run on a disposable **native Linux AMD64** host, then repeat on a **native Linux
