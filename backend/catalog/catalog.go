@@ -30,6 +30,8 @@ var (
 	ErrScanActive  = errors.New("scan already active")
 )
 
+const scanHistoryLimit = 32
+
 // MediaProperties is the path-free inspection result persisted with a catalog item.
 type MediaProperties struct {
 	Container               string          `json:"container,omitempty"`
@@ -566,11 +568,18 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	}
 	c.status.FinishedAt = time.Now().Unix()
 	status := c.status
+	c.mu.Unlock()
+
+	// Keep the scan active until its terminal report is persisted. Otherwise a
+	// new scan can publish its running report first and the older scan's
+	// retention transaction can prune that active row.
+	c.saveStatus(status)
+
+	c.mu.Lock()
 	c.scanning, c.cancel = false, nil
 	close(c.done)
 	c.done = nil
 	c.mu.Unlock()
-	c.saveStatus(status)
 }
 
 func (c *Catalog) scanError() error {
@@ -1101,7 +1110,23 @@ func (c *Catalog) saveStatus(status ScanStatus) {
 	if c.db == nil {
 		return
 	}
-	_, _ = c.db.Exec(`INSERT INTO scan_runs(id,started_at,finished_at,status,scanned,failed,unmatched,message) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,scanned=excluded.scanned,failed=excluded.failed,unmatched=excluded.unmatched,message=excluded.message`, status.ID, status.StartedAt, nullableTime(status.FinishedAt), status.Status, status.Scanned, status.Failed, status.Unmatched, status.Message)
+	tx, err := c.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO scan_runs(id,started_at,finished_at,status,scanned,failed,unmatched,message) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,scanned=excluded.scanned,failed=excluded.failed,unmatched=excluded.unmatched,message=excluded.message`, status.ID, status.StartedAt, nullableTime(status.FinishedAt), status.Status, status.Scanned, status.Failed, status.Unmatched, status.Message); err != nil {
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM scan_runs
+		WHERE id<>?
+		AND id NOT IN (
+			SELECT id FROM scan_runs WHERE id<>?
+			ORDER BY started_at DESC,id DESC LIMIT ?
+		)`, status.ID, status.ID, scanHistoryLimit-1); err != nil {
+		return
+	}
+	_ = tx.Commit()
 }
 func nullableTime(t int64) any {
 	if t == 0 {

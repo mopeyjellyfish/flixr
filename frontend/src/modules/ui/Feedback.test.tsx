@@ -3,7 +3,25 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Artwork, Avatar, profileAvatar } from './Feedback';
 import { BootSplash } from './BootSplash';
 
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+const motionState = vi.hoisted(() => ({ reduced: false, durations: [] as number[] }));
+vi.mock('motion/react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('motion/react')>();
+  const React = await import('react');
+  return {
+    ...actual,
+    useReducedMotion: () => motionState.reduced,
+    motion: {
+      img: React.forwardRef<HTMLImageElement, React.ImgHTMLAttributes<HTMLImageElement> & { transition?: { duration?: number }; initial?: unknown; animate?: unknown }>(({ transition, initial: _initial, animate: _animate, ...props }, ref) => {
+        void _initial;
+        void _animate;
+        motionState.durations.push(transition?.duration ?? -1);
+        return <img {...props} ref={ref} />;
+      }),
+    },
+  };
+});
+
+afterEach(() => { cleanup(); vi.useRealTimers(); motionState.reduced = false; motionState.durations = []; });
 it('keeps the splash until content is ready and cancels its exit on unmount', async () => {
   vi.useFakeTimers();
   const done = vi.fn();
@@ -38,4 +56,9 @@ it('keeps a missing artwork slot usable', () => {
   const { container } = render(<Artwork src="/missing-artwork.jpg" />);
   fireEvent.error(container.querySelector('img')!);
   expect(screen.getByText('Artwork unavailable')).toBeInTheDocument();
+});
+it('reveals artwork without motion when reduced motion is requested', () => {
+  motionState.reduced = true;
+  render(<Artwork src="/poster.jpg" />);
+  expect(motionState.durations.at(-1)).toBe(0);
 });
