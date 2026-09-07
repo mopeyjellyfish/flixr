@@ -23,6 +23,25 @@ test('Conventional Commits determine versions and generated notes', async () => 
   assert.match(notes, /recover sessions/);
   assert.match(notes, /0\.1\.1/);
 });
+
+test('pre-v1 notes keep conventional sections and ignore squash bullets and breaking footers', async () => {
+  // aa481d9, a GitHub squash merge whose ordinary body bullets were misparsed as notes.
+  const squash = 'feat(accounts): add local owner recovery (#145)\n\n* feat(accounts): add local owner recovery\n\n* fix(accounts): harden owner recovery preconditions';
+  const notes = await generateNotes(config.plugins[1][1], {
+    commits: [
+      { message: squash, hash: 'a'.repeat(40) },
+      { message: 'fix(storage): retain settings\n\nBREAKING CHANGE: migrate data\n\nBREAKING CHANGES: reconfigure cache', hash: 'b'.repeat(40) },
+    ],
+    logger, options: { repositoryUrl: 'https://github.com/mopeyjellyfish/flixr' },
+    lastRelease: { gitTag: 'v0.2.0' }, nextRelease: { gitTag: 'v0.3.0', version: '0.3.0' },
+  });
+  assert.match(notes, /### Features/);
+  assert.match(notes, /add local owner recovery/);
+  assert.match(notes, /### Bug Fixes/);
+  assert.match(notes, /retain settings/);
+  assert.doesNotMatch(notes, /BREAKING CHANGES/);
+  assert.doesNotMatch(notes, /harden owner recovery preconditions|migrate data|reconfigure cache/);
+});
 test('release publisher refuses malformed versions and non-main events before Docker runs', () => {
   for (const [version, env] of [['0.1.0;echo bad', {}], ['1.0.0', {}], ['0.1.0', { GITHUB_REF: 'refs/heads/feature', GITHUB_EVENT_NAME: 'push' }], ['0.1.0', { GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'pull_request' }]]) {
     const result = spawnSync('bash', ['scripts/release-image.sh', 'prepare', version], { env: { ...process.env, ...env }, encoding: 'utf8' });
