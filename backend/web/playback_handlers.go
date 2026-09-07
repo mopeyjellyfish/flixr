@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
@@ -303,13 +304,15 @@ func (s *Server) playbackSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	for _, key := range []string{"playback.segment_dir", "playback.generation_bytes", "playback.global_bytes", "playback.max_generations"} {
-		if s.settingsLocks[key] {
+	settings := s.playback.Settings()
+	requested := map[string]string{"playback.segment_dir": body.SegmentDir, "playback.generation_bytes": strconv.FormatInt(body.GenerationBytes, 10), "playback.global_bytes": strconv.FormatInt(body.GlobalBytes, 10), "playback.max_generations": strconv.Itoa(body.MaxGenerations)}
+	current := map[string]string{"playback.segment_dir": settings.SegmentDir, "playback.generation_bytes": strconv.FormatInt(settings.GenerationBytes, 10), "playback.global_bytes": strconv.FormatInt(settings.GlobalBytes, 10), "playback.max_generations": strconv.Itoa(settings.MaxGenerations)}
+	for key, value := range requested {
+		if s.settingsLocks[key] && value != current[key] {
 			fail(w, http.StatusConflict, "environment_locked")
 			return
 		}
 	}
-	settings := s.playback.Settings()
 	settings.SegmentDir = body.SegmentDir
 	settings.GenerationBytes = body.GenerationBytes
 	settings.GlobalBytes = body.GlobalBytes

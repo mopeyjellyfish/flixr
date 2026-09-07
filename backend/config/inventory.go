@@ -4,39 +4,41 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
+
+	"github.com/mopeyjellyfish/flixr/backend/playback"
 )
 
 // SettingDefinition is the supported server-settings contract. Values are
 // resolved as environment (including _FILE secrets), then persisted settings,
 // then this default. Startup-only settings are intentionally read-only in UI.
 type SettingDefinition struct {
-	Key, Category, Scope, Default, Environment, FileSecret, Persistence, Restart string
-	Secret, Advanced                                                             bool
+	Key, Category, Scope, Default, Environment, FileSecret, Persistence, Restart, Valid string
+	Secret, Advanced                                                                    bool
 }
 
 func Inventory(dataDir string) []SettingDefinition {
+	defaults := playback.DefaultSettings(dataDir)
 	return []SettingDefinition{
-		{"server.data_dir", "Administration", "server", filepath.Join(".", "flixr-data"), "FLIXR_DATA_DIR", "", "environment", "restart", false, true},
-		{"server.listen_addr", "Network", "server", "127.0.0.1:8787", "FLIXR_LISTEN_ADDR", "", "environment", "restart", false, false},
-		{"server.tls_cert", "Network", "server", "", "FLIXR_TLS_CERT", "", "environment", "restart", false, true},
-		{"server.tls_key", "Network", "server", "", "FLIXR_TLS_KEY", "", "environment", "restart", true, true},
-		{"server.demo", "Administration", "server", "false", "FLIXR_DEMO", "", "environment", "restart", false, true},
-		{"household.owner_password", "Household", "server", "", "FLIXR_OWNER_PASSWORD", "FLIXR_OWNER_PASSWORD_FILE", "startup only", "restart", true, true},
-		{"household.initial_profile", "Household", "server", "", "FLIXR_INITIAL_PROFILE", "", "startup only", "restart", false, true},
-		{"library.films_root", "Libraries", "server", "", "FLIXR_FILMS_ROOT", "", "database", "immediate", false, false},
-		{"library.tv_root", "Libraries", "server", "", "FLIXR_TV_ROOT", "", "database", "immediate", false, false},
-		{"metadata.tmdb_token", "Metadata", "server", "", "FLIXR_TMDB_TOKEN", "FLIXR_TMDB_TOKEN_FILE", "database", "immediate", true, false},
-		{"background.scan_on_start", "Background work", "server", "false", "FLIXR_SCAN_ON_START", "", "environment", "restart", false, true},
-		{"background.scan_workers", "Background work", "server", "4", "FLIXR_SCAN_WORKERS", "", "environment", "restart", false, true},
-		{"playback.segment_dir", "Playback", "server", filepath.Join(dataDir, "segments"), "FLIXR_SEGMENT_DIR", "", "sidecar and database", "restart", false, false},
-		{"playback.generation_bytes", "Playback", "server", strconv.FormatInt(256<<20, 10), "FLIXR_GENERATION_BYTES", "", "database", "immediate", false, true},
-		{"playback.global_bytes", "Playback", "server", strconv.FormatInt(512<<20, 10), "FLIXR_GLOBAL_BYTES", "", "database", "immediate", false, false},
-		{"playback.max_generations", "Playback", "server", "2", "FLIXR_MAX_GENERATIONS", "", "database", "immediate", false, false},
-		{"playback.lease_ttl", "Playback", "server", (45 * time.Second).String(), "FLIXR_LEASE_TTL", "", "environment", "restart", false, true},
-		{"playback.heartbeat_interval", "Playback", "server", (15 * time.Second).String(), "FLIXR_HEARTBEAT_INTERVAL", "", "environment", "restart", false, true},
-		{"playback.segment_window", "Playback", "server", (60 * time.Second).String(), "FLIXR_SEGMENT_WINDOW", "", "environment", "restart", false, true},
-		{"playback.process_grace", "Playback", "server", (2 * time.Second).String(), "FLIXR_PROCESS_GRACE", "", "environment", "restart", false, true},
+		{"server.data_dir", "Administration", "server", filepath.Join(".", "flixr-data"), "FLIXR_DATA_DIR", "", "environment", "restart", "writable directory", false, true},
+		{"server.listen_addr", "Network", "server", "127.0.0.1:8787", "FLIXR_LISTEN_ADDR", "", "environment", "restart", "valid host:port", false, false},
+		{"server.tls_cert", "Network", "server", "", "FLIXR_TLS_CERT", "", "environment", "restart", "readable certificate with matching key", false, true},
+		{"server.tls_key", "Network", "server", "", "FLIXR_TLS_KEY", "", "environment", "restart", "readable key with matching certificate", true, true},
+		{"server.demo", "Administration", "server", "false", "FLIXR_DEMO", "", "environment", "restart", "boolean", false, true},
+		{"household.owner_password", "Household", "server", "", "FLIXR_OWNER_PASSWORD", "FLIXR_OWNER_PASSWORD_FILE", "startup only", "restart", "non-empty", true, true},
+		{"household.initial_profile", "Household", "server", "", "FLIXR_INITIAL_PROFILE", "", "startup only", "restart", "valid profile name", false, true},
+		{"library.films_root", "Libraries", "server", "", "FLIXR_FILMS_ROOT", "", "database", "immediate", "empty or existing directory", false, false},
+		{"library.tv_root", "Libraries", "server", "", "FLIXR_TV_ROOT", "", "database", "immediate", "empty or existing directory", false, false},
+		{"metadata.tmdb_token", "Metadata", "server", "", "FLIXR_TMDB_TOKEN", "FLIXR_TMDB_TOKEN_FILE", "database", "immediate", "provider token", true, false},
+		{"background.scan_on_start", "Background work", "server", "false", "FLIXR_SCAN_ON_START", "", "environment", "restart", "boolean", false, true},
+		{"background.scan_workers", "Background work", "server", "4", "FLIXR_SCAN_WORKERS", "", "environment", "restart", "integer 1–32", false, true},
+		{"playback.segment_dir", "Playback", "server", defaults.SegmentDir, "FLIXR_SEGMENT_DIR", "", "sidecar and database", "restart", "absolute, Flixr-owned directory", false, false},
+		{"playback.generation_bytes", "Playback", "server", strconv.FormatInt(defaults.GenerationBytes, 10), "FLIXR_GENERATION_BYTES", "", "database", "immediate", "positive; no more than global bytes", false, true},
+		{"playback.global_bytes", "Playback", "server", strconv.FormatInt(defaults.GlobalBytes, 10), "FLIXR_GLOBAL_BYTES", "", "database", "immediate", "at least generation bytes", false, false},
+		{"playback.max_generations", "Playback", "server", strconv.Itoa(defaults.MaxGenerations), "FLIXR_MAX_GENERATIONS", "", "database", "immediate", "positive; fits global byte limit", false, false},
+		{"playback.lease_ttl", "Playback", "server", defaults.LeaseTTL.String(), "FLIXR_LEASE_TTL", "", "environment", "restart", "positive; over twice heartbeat", false, true},
+		{"playback.heartbeat_interval", "Playback", "server", defaults.HeartbeatInterval.String(), "FLIXR_HEARTBEAT_INTERVAL", "", "environment", "restart", "positive; under half lease TTL", false, true},
+		{"playback.segment_window", "Playback", "server", defaults.SegmentWindow.String(), "FLIXR_SEGMENT_WINDOW", "", "environment", "restart", "positive duration", false, true},
+		{"playback.process_grace", "Playback", "server", defaults.ProcessGrace.String(), "FLIXR_PROCESS_GRACE", "", "environment", "restart", "positive duration", false, true},
 	}
 }
 

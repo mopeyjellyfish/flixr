@@ -330,18 +330,8 @@ func seriesTitle(path, fallback string) string {
 }
 
 func (c *Catalog) SetRoots(film, tv string) error {
-	for _, p := range []string{film, tv} {
-		if p == "" {
-			continue
-		}
-		a, err := filepath.Abs(p)
-		if err != nil {
-			return err
-		}
-		info, err := c.fs.Stat(a)
-		if err != nil || !info.IsDir() {
-			return fmt.Errorf("root %q: %w", p, ErrOutsideRoot)
-		}
+	if err := c.ValidateRoots(film, tv); err != nil {
+		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -363,6 +353,24 @@ func (c *Catalog) SetRoots(film, tv string) error {
 			if _, err := c.db.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// ValidateRoots applies the same filesystem checks as SetRoots without saving.
+func (c *Catalog) ValidateRoots(film, tv string) error {
+	for _, p := range []string{film, tv} {
+		if p == "" {
+			continue
+		}
+		a, err := filepath.Abs(p)
+		if err != nil {
+			return err
+		}
+		info, err := c.fs.Stat(a)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("root %q: %w", p, ErrOutsideRoot)
 		}
 	}
 	return nil

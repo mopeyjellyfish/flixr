@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type EffectiveSetting } from '../../core/api';
 
@@ -8,8 +8,8 @@ export function SettingsPanel({ onNotice }: { onNotice: (message: string) => voi
   const [advanced, setAdvanced] = useState(false);
   const [importText, setImportText] = useState('');
   const [preview, setPreview] = useState<Record<string, { from: string; to: string }>>();
-  const load = () => api.settingsInventory().then((result) => setSettings(result.settings ?? [])).catch(() => onNotice('Settings inventory is unavailable.'));
-  useEffect(() => { void load(); }, []);
+  const load = useCallback(() => api.settingsInventory().then((result) => setSettings(result.settings ?? [])).catch(() => onNotice('Settings inventory is unavailable.')), [onNotice]);
+  useEffect(() => { void load(); }, [load]);
   const visible = useMemo(() => settings.filter((setting) => (advanced || !setting.advanced) && `${setting.category} ${setting.key} ${setting.environment}`.toLowerCase().includes(query.toLowerCase())), [advanced, query, settings]);
   const resetLibraries = async () => { try { await api.roots('', ''); await load(); onNotice('Library roots reset to their defaults.'); } catch (error) { onNotice(error instanceof ApiError ? error.message : 'Unable to reset library roots.'); } };
   const previewImport = async () => { try { const value: unknown = JSON.parse(importText); const result = await api.settingsImportPreview(value as { version: number; settings: Record<string, string> }); setPreview(result.changes); } catch (error) { onNotice(error instanceof ApiError ? error.message : 'Paste a valid exported settings file.'); } };

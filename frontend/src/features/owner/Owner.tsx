@@ -148,7 +148,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
             <LoadingButton onAction={refreshActivity} pendingLabel="Refreshing…" successLabel="Refresh activity">Refresh activity</LoadingButton>
             <ConnectedScreens screens={screens} />
-            {playbackSettings && <details><summary>Playback resource limits</summary><PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} locked={['playback.segment_dir', 'playback.generation_bytes', 'playback.global_bytes', 'playback.max_generations'].some((key) => locked.has(key))} /></details>}
+            {playbackSettings && <details><summary>Playback resource limits</summary><PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} locked={locked} /></details>}
           </section>
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
@@ -226,15 +226,15 @@ function TMDBForm({ configured, token, onTokenChange, onSave, onRemove, locked }
   );
 }
 
-function PlaybackPanel({ settings, status, onChange, onSubmit, locked }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void; locked: boolean }) {
+function PlaybackPanel({ settings, status, onChange, onSubmit, locked }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void; locked: Set<string> }) {
   return <PendingForm onSubmit={onSubmit}>
     <h2>Playback resources</h2>
     <p>{status?.generations?.length ? `${status.generations.length} compatibility generation${status.generations.length === 1 ? '' : 's'} active.` : 'No compatibility generations are active.'}</p>
-    {locked && <p>Managed by the server environment.</p>}<label>Segment directory<input disabled={locked} value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
-    <label>Per-generation bytes<input disabled={locked} type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
-    <label>Global bytes<input disabled={locked} type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
-    <label>Concurrent generations<input disabled={locked} type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
-    <button className="primary" disabled={locked}>Save playback limits</button>
+    {locked.size > 0 && <p>Environment-managed fields are read-only.</p>}<label>Segment directory<input disabled={locked.has('playback.segment_dir')} value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
+    <label>Per-generation bytes<input disabled={locked.has('playback.generation_bytes')} type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
+    <label>Global bytes<input disabled={locked.has('playback.global_bytes')} type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
+    <label>Concurrent generations<input disabled={locked.has('playback.max_generations')} type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
+    <button className="primary">Save playback limits</button>
   </PendingForm>;
 }
 

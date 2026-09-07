@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/mopeyjellyfish/flixr/backend/config"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
@@ -59,10 +58,18 @@ func (s *Server) effectiveSettings() []effectiveSetting {
 				value = "environment-managed"
 			}
 		}
-		mutable := !definition.Secret && (definition.Key == "library.films_root" || definition.Key == "library.tv_root" || strings.HasPrefix(definition.Key, "playback.")) && !s.settingsLocks[definition.Key]
+		mutable := !definition.Secret && writableOwnerSetting(definition.Key) && !s.settingsLocks[definition.Key]
 		settings = append(settings, effectiveSetting{SettingDefinition: definition, Value: value, Source: source, Mutable: mutable})
 	}
 	return settings
+}
+
+func writableOwnerSetting(key string) bool {
+	switch key {
+	case "library.films_root", "library.tv_root", "playback.segment_dir", "playback.generation_bytes", "playback.global_bytes", "playback.max_generations":
+		return true
+	}
+	return false
 }
 
 func configured(value bool) string {
@@ -81,143 +88,78 @@ func (s *Server) settingsExport(w http.ResponseWriter, r *http.Request) {
 	}
 	values := map[string]string{}
 	for _, setting := range s.effectiveSettings() {
-		if !setting.Secret && setting.Persistence != "environment" {
+		if setting.Mutable {
 			values[setting.Key] = setting.Value
 		}
 	}
 	write(w, http.StatusOK, map[string]any{"version": 1, "settings": values})
 }
 
+type settingsImportRequest struct {
+	Version  int               `json:"version"`
+	Settings map[string]string `json:"settings"`
+}
+type settingsImportPlan struct {
+	scope     string
+	settings  playback.Settings
+	films, tv string
+	changes   map[string]map[string]string
+}
+
 func (s *Server) settingsImportPreview(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) || !s.sameOrigin(w, r) {
 		return
 	}
-	var body struct {
-		Version  int               `json:"version"`
-		Settings map[string]string `json:"settings"`
-	}
-	if !decode(r, &body) || body.Version != 1 || body.Settings == nil {
+	var body settingsImportRequest
+	if !decode(r, &body) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	allowed := map[string]bool{"library.films_root": true, "library.tv_root": true, "playback.segment_dir": true, "playback.generation_bytes": true, "playback.global_bytes": true, "playback.max_generations": true}
-	for key := range body.Settings {
-		if !allowed[key] {
-			fail(w, http.StatusConflict, "import_requires_review")
-			return
+	plan, code := s.planSettingsImport(body)
+	if code != "" {
+		status := http.StatusBadRequest
+		if code == "environment_locked" || code == "import_requires_review" {
+			status = http.StatusConflict
 		}
+		fail(w, status, code)
+		return
 	}
-	changes := make(map[string]map[string]string)
-	for _, setting := range s.effectiveSettings() {
-		value, supplied := body.Settings[setting.Key]
-		if !supplied {
-			continue
-		}
-		if s.settingsLocks[setting.Key] {
-			fail(w, http.StatusConflict, "environment_locked")
-			return
-		}
-		if value != setting.Value {
-			changes[setting.Key] = map[string]string{"from": setting.Value, "to": value}
-		}
-	}
-	write(w, http.StatusOK, map[string]any{"changes": changes, "requires_review": false})
+	write(w, http.StatusOK, map[string]any{"changes": plan.changes, "requires_review": false, "restart_required": plan.scope == "playback" && plan.settings.SegmentDir != s.playback.Settings().SegmentDir})
 }
 
 func (s *Server) settingsImport(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) || !s.sameOrigin(w, r) {
 		return
 	}
-	var body struct {
-		Version  int               `json:"version"`
-		Settings map[string]string `json:"settings"`
-	}
-	if !decode(r, &body) || body.Version != 1 || len(body.Settings) == 0 {
+	var body settingsImportRequest
+	if !decode(r, &body) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	scope := ""
-	current := map[string]string{}
-	for _, setting := range s.effectiveSettings() {
-		current[setting.Key] = setting.Value
+	plan, code := s.planSettingsImport(body)
+	if code != "" {
+		status := http.StatusBadRequest
+		if code == "environment_locked" || code == "import_requires_review" {
+			status = http.StatusConflict
+		}
+		fail(w, status, code)
+		return
 	}
-	for key := range body.Settings {
-		if body.Settings[key] == current[key] {
-			continue
-		}
-		next := ""
-		if key == "library.films_root" || key == "library.tv_root" {
-			next = "library"
-		}
-		if key == "playback.segment_dir" || key == "playback.generation_bytes" || key == "playback.global_bytes" || key == "playback.max_generations" {
-			next = "playback"
-		}
-		if next == "" {
-			fail(w, http.StatusConflict, "import_requires_review")
-			return
-		}
-		if s.settingsLocks[key] {
-			fail(w, http.StatusConflict, "environment_locked")
-			return
-		}
-		if scope != "" && scope != next {
-			fail(w, http.StatusConflict, "import_requires_review")
-			return
-		}
-		scope = next
-	}
-	if scope == "" {
+	if plan.scope == "" {
 		write(w, http.StatusOK, map[string]bool{"imported": true})
 		return
 	}
-	if scope == "library" {
-		films, tv := s.catalog.Roots()
-		if value, ok := body.Settings["library.films_root"]; ok {
-			films = value
-		}
-		if value, ok := body.Settings["library.tv_root"]; ok {
-			tv = value
-		}
-		if err := s.catalog.SetRoots(films, tv); err != nil {
+	if plan.scope == "library" {
+		if err := s.catalog.SetRoots(plan.films, plan.tv); err != nil {
 			fail(w, http.StatusBadRequest, "invalid_roots")
 			return
 		}
 		write(w, http.StatusOK, map[string]bool{"imported": true})
 		return
 	}
-	settings := s.playback.Settings()
-	var err error
-	if value, ok := body.Settings["playback.segment_dir"]; ok {
-		settings.SegmentDir = value
-	}
-	if value, ok := body.Settings["playback.generation_bytes"]; ok {
-		settings.GenerationBytes, err = strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			fail(w, http.StatusBadRequest, "invalid_playback_settings")
-			return
-		}
-	}
-	if value, ok := body.Settings["playback.global_bytes"]; ok {
-		settings.GlobalBytes, err = strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			fail(w, http.StatusBadRequest, "invalid_playback_settings")
-			return
-		}
-	}
-	if value, ok := body.Settings["playback.max_generations"]; ok {
-		settings.MaxGenerations, err = strconv.Atoi(value)
-		if err != nil {
-			fail(w, http.StatusBadRequest, "invalid_playback_settings")
-			return
-		}
-	}
-	if err := s.playback.UpdateSettings(settings); err != nil {
+	if err := s.playback.UpdateSettings(plan.settings); err != nil {
 		if errors.Is(err, playback.ErrRestartRequired) {
 			write(w, http.StatusAccepted, map[string]any{"imported": true, "restart_required": true})
-			return
-		}
-		if errors.Is(err, playback.ErrInvalidSettings) {
-			fail(w, http.StatusBadRequest, "invalid_playback_settings")
 			return
 		}
 		if errors.Is(err, playback.ErrCapacity) {
@@ -228,4 +170,75 @@ func (s *Server) settingsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, map[string]bool{"imported": true})
+}
+
+func (s *Server) planSettingsImport(body settingsImportRequest) (settingsImportPlan, string) {
+	if body.Version != 1 || len(body.Settings) == 0 {
+		return settingsImportPlan{}, "invalid_request"
+	}
+	plan := settingsImportPlan{settings: s.playback.Settings(), changes: map[string]map[string]string{}}
+	plan.films, plan.tv = s.catalog.Roots()
+	current := map[string]string{}
+	for _, setting := range s.effectiveSettings() {
+		current[setting.Key] = setting.Value
+	}
+	for key, value := range body.Settings {
+		scope := ""
+		switch key {
+		case "library.films_root", "library.tv_root":
+			scope = "library"
+		case "playback.segment_dir", "playback.generation_bytes", "playback.global_bytes", "playback.max_generations":
+			scope = "playback"
+		default:
+			return settingsImportPlan{}, "import_requires_review"
+		}
+		if value == current[key] {
+			continue
+		}
+		if s.settingsLocks[key] {
+			return settingsImportPlan{}, "environment_locked"
+		}
+		if plan.scope != "" && plan.scope != scope {
+			return settingsImportPlan{}, "import_requires_review"
+		}
+		plan.scope = scope
+		plan.changes[key] = map[string]string{"from": current[key], "to": value}
+		switch key {
+		case "library.films_root":
+			plan.films = value
+		case "library.tv_root":
+			plan.tv = value
+		case "playback.segment_dir":
+			plan.settings.SegmentDir = value
+		case "playback.generation_bytes":
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return settingsImportPlan{}, "invalid_playback_settings"
+			}
+			plan.settings.GenerationBytes = parsed
+		case "playback.global_bytes":
+			parsed, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return settingsImportPlan{}, "invalid_playback_settings"
+			}
+			plan.settings.GlobalBytes = parsed
+		case "playback.max_generations":
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return settingsImportPlan{}, "invalid_playback_settings"
+			}
+			plan.settings.MaxGenerations = parsed
+		}
+	}
+	if plan.scope == "library" {
+		if err := s.catalog.ValidateRoots(plan.films, plan.tv); err != nil {
+			return settingsImportPlan{}, "invalid_roots"
+		}
+	}
+	if plan.scope == "playback" {
+		if err := plan.settings.Validate(); err != nil {
+			return settingsImportPlan{}, "invalid_playback_settings"
+		}
+	}
+	return plan, ""
 }
