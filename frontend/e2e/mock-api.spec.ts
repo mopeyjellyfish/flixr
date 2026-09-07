@@ -141,6 +141,13 @@ for (const viewport of viewports) {
     await mock(page, (path) => {
       if (path.endsWith('/setup/status')) return { json: { claimed: true, readiness: { ffprobe: false, ffmpeg: true } } };
       if (path.endsWith('/owner/roots')) return { json: { films: '/media/films', tv: '/media/tv' } };
+      if (path.endsWith('/owner/settings')) return { json: { settings: [
+        { key: 'library.films_root', category: 'Libraries', scope: 'server', default: '', environment: 'FLIXR_FILMS_ROOT', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'empty or existing directory', secret: false, advanced: false, value: '/media/films', source: 'saved', mutable: true },
+        { key: 'library.tv_root', category: 'Libraries', scope: 'server', default: '', environment: 'FLIXR_TV_ROOT', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'empty or existing directory', secret: false, advanced: false, value: '/media/tv', source: 'saved', mutable: true },
+        { key: 'metadata.tmdb_token', category: 'Metadata', scope: 'server', default: '', environment: 'FLIXR_TMDB_TOKEN', file_secret: 'FLIXR_TMDB_TOKEN_FILE', persistence: 'database', restart: 'immediate', valid: 'provider token', secret: true, advanced: false, value: 'configured', source: 'saved', mutable: false },
+        { key: 'playback.segment_dir', category: 'Playback', scope: 'server', default: '/tmp/flixr-segments', environment: 'FLIXR_SEGMENT_DIR', file_secret: '', persistence: 'sidecar and database', restart: 'restart', valid: 'absolute, Flixr-owned directory', secret: false, advanced: false, value: '/tmp/flixr-segments', source: 'environment', mutable: false },
+        { key: 'playback.global_bytes', category: 'Playback', scope: 'server', default: '536870912', environment: 'FLIXR_GLOBAL_BYTES', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'at least generation bytes', secret: false, advanced: false, value: '536870912', source: 'saved', mutable: true },
+      ] } };
       if (path.endsWith('/settings/tmdb')) return { json: { configured: true } };
       if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
