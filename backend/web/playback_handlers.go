@@ -104,6 +104,13 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 	write(w, http.StatusCreated, playbackResponse(session))
 }
 
+func completionEvent(catalogID string, item catalog.Item, completed bool) *household.ViewingEvent {
+	if !completed || item.ID == "" {
+		return nil
+	}
+	return &household.ViewingEvent{CatalogID: catalogID, Title: item.Title, Kind: item.Kind, Type: household.EventCompleted, Provenance: household.ProvenanceLocal}
+}
+
 func playbackResponse(session playback.Session) map[string]any {
 	base := "/api/v1/playback/sessions/" + session.ID
 	mediaURL := base + "/media"
@@ -230,7 +237,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
-	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
@@ -262,7 +269,7 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
-	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed)
+	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return

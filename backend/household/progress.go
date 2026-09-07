@@ -3,6 +3,7 @@ package household
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -49,7 +50,7 @@ func (m *Manager) BeginPlayback(profileID, catalogID string, expected ...int64) 
 // RecordPlaybackProgress compares observations only within a server generation.
 // Zero observations support older players in receipt order. Neither observations
 // nor legacy client clocks are ever used as durable wall-clock timestamps.
-func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, generation, observation int64, completed bool) (bool, error) {
+func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, generation, observation int64, completed bool, completion ...*ViewingEvent) (bool, error) {
 	if !m.validProgress(profileID, catalogID, position) || generation < 0 || observation < 0 {
 		return false, ErrCredentials
 	}
@@ -61,13 +62,42 @@ func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, 
 	if completed {
 		completedAt = now
 	}
-	result, err := m.db.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=CASE WHEN observation=0 THEN ? ELSE MAX(completed,?) END,completed_at=CASE WHEN observation>0 AND completed=1 THEN completed_at ELSE ? END,observation=CASE WHEN ?=0 THEN observation+1 ELSE ? END
+	tx, err := m.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=CASE WHEN observation=0 THEN ? ELSE MAX(completed,?) END,completed_at=CASE WHEN observation>0 AND completed=1 THEN completed_at ELSE ? END,observation=CASE WHEN ?=0 THEN observation+1 ELSE ? END
  WHERE profile_id=? AND catalog_id=? AND generation=? AND (?=0 OR observation<?)`, position, now, boolInt(completed), boolInt(completed), completedAt, observation, observation, profileID, catalogID, generation, observation, observation)
 	if err != nil {
 		return false, err
 	}
 	rows, err := result.RowsAffected()
-	return rows == 1, err
+	if err != nil || rows != 1 {
+		return rows == 1, err
+	}
+	if completed && len(completion) > 0 && completion[0] != nil {
+		e := *completion[0]
+		if e.SourceID == "" {
+			e.SourceID = fmt.Sprintf("%s:playback:%d", catalogID, generation)
+		}
+		if e.Type == "" {
+			e.Type = EventCompleted
+		}
+		if e.Provenance == "" {
+			e.Provenance = ProvenanceLocal
+		}
+		if e.RecordedAt == 0 {
+			e.RecordedAt = now
+		}
+		if err := m.recordViewingEvent(tx, profileID, e); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ProgressForProfile is a trusted server action. Session cleanup must not call it:
