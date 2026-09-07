@@ -1,0 +1,48 @@
+name: Bug report
+description: Report reproducible FlixR behavior.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, setup tokens, session cookies, API tokens, TLS material, media paths, or unredacted logs. Security vulnerabilities belong in SECURITY.md, not this public form.
+  - type: input
+    id: version
+    attributes:
+      label: FlixR version or image tag
+      placeholder: v0.x.y or ghcr.io/mopeyjellyfish/flixr:tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, installation method, browser and version when relevant. Omit hostnames, IP addresses, and paths.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Add the smallest relevant excerpt only. See SUPPORT.md for what to remove.
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed secrets and private household information.
+          required: true

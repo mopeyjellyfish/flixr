@@ -60,9 +60,10 @@ FlixR's saved data.
 
 - [Docker configuration, volumes, updates and backups](docs/docker.md)
 - [Build from source, run the demo and contribute](docs/development.md)
+- [Contributing](CONTRIBUTING.md), [support](SUPPORT.md), and [security reporting](SECURITY.md)
 - [Release process and versioning](docs/releases.md)
 - [Roadmap](https://github.com/mopeyjellyfish/flixr/issues/104)
-- [MIT license](LICENSE)
+- [MIT license](LICENSE) and [third-party notices](frontend/THIRD_PARTY_LICENSES.md)
 
 The banner shows the demo, which contains artwork and metadata for 50 movies and
 50 TV shows, without video files. See the [demo guide](docs/development.md#development-demo).
