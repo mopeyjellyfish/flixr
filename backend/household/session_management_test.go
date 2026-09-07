@@ -14,6 +14,12 @@ func TestDeleteProfileRevokesSessionAndCascadesProgress(t *testing.T) {
 	require.NoError(t, err)
 	p, err := m.CreateProfile("Ada", "")
 	require.NoError(t, err)
+	_, err = db.Exec("INSERT INTO catalog_items(id,kind,title,relative_path) VALUES('film','film','Film','film.mp4')")
+	require.NoError(t, err)
+	_, err = db.Exec("INSERT INTO progress(profile_id,catalog_id,position_ms) VALUES(?,?,1)", p.ID, "film")
+	require.NoError(t, err)
+	_, err = db.Exec("INSERT INTO profile_film_list(profile_id,catalog_id,added_at) VALUES(?,?,1)", p.ID, "film")
+	require.NoError(t, err)
 	token, err := m.Select(p.ID, "")
 	require.NoError(t, err)
 	require.NoError(t, m.DeleteProfile(p.ID))
@@ -22,6 +28,10 @@ func TestDeleteProfileRevokesSessionAndCascadesProgress(t *testing.T) {
 	}
 	var count int
 	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM profiles WHERE id=?", p.ID).Scan(&count))
+	require.Zero(t, count)
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM progress WHERE profile_id=?", p.ID).Scan(&count))
+	require.Zero(t, count)
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM profile_film_list WHERE profile_id=?", p.ID).Scan(&count))
 	require.Zero(t, count)
 }
 
