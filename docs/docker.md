@@ -104,6 +104,9 @@ environment values overlay saved settings without persisting that overlay. UI ch
 can apply during the process lifetime; an explicit environment value wins again on
 restart. To hand management back to the UI, remove that variable and recreate the
 container. Per-profile preferences/history remain application data, not environment.
+Owners can rename or delete household profiles and revoke active browser sessions from
+Server settings. Deleting a profile removes its profile-owned history and lists, and
+signs that profile out; changing or removing its PIN also signs its active sessions out.
 
 | Variable | Default / behavior |
 |---|---|

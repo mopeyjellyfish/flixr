@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type MetadataCandidate, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
+import { ApiError, type ActiveSession, type MetadataCandidate, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -142,7 +142,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
-            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} /></div>
+            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} /><SessionManager /></div>
           </section>
           <section id="playback" className="owner-section" aria-labelledby="playback-title">
             <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
@@ -271,6 +271,7 @@ export function ProfileManager({ version = 0 }: { version?: number }) {
 function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; name: string; protected: boolean }; onSaved: () => void; onNotice: (value: string) => void }) {
   const [name, setName] = useState(profile.name);
   const [pin, setPin] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const save = async (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -290,10 +291,23 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
       <label>New PIN<input type="password" value={pin} onChange={(event) => setPin(event.target.value)} /></label>
       <div className="actions">
         <button>Save</button>
+        <button type="button" disabled={deleting} onClick={() => {
+          if (!window.confirm(`Delete ${profile.name}? This permanently removes this profile's viewing history and My List.`)) return;
+          setDeleting(true);
+          void api.deleteProfile(profile.id).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to delete profile.')).finally(() => setDeleting(false));
+        }}>{deleting ? 'Deleting…' : 'Delete profile'}</button>
         {profile.protected && <button type="button" onClick={() => void api.updateProfile(profile.id, { unprotect: true }).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to remove PIN.'))}>Remove PIN</button>}
       </div>
     </PendingForm>
   );
+}
+
+function SessionManager() {
+  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  const [notice, setNotice] = useState('');
+  const load = () => api.activeSessions().then((value) => setSessions(value.sessions ?? [])).catch(() => setNotice('Sessions are unavailable.'));
+  useEffect(() => { void load(); }, []);
+  return <section><h2>Active sessions</h2>{notice && <p role="status">{notice}</p>}{sessions.length ? <ul>{sessions.map((session) => <li key={session.id}>{session.subject} · expires {new Date(session.expires_at * 1000).toLocaleString()} <button onClick={() => void api.revokeSession(session.id).then(load).catch(() => setNotice('Unable to revoke session.'))}>Revoke</button></li>)}</ul> : <p>No active sessions.</p>}</section>;
 }
 
 function PendingForm({ onSubmit, children, className }: { onSubmit: (event: FormEvent) => unknown; children: ReactNode; className?: string }) {
