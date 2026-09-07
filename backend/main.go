@@ -182,7 +182,7 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		}
 	}
 	screenManager := screens.New(time.Minute)
-	application := web.NewServerWithScreens(h, c, p, screenManager).Handler()
+	application := web.NewServerWithScreens(h, c, p, screenManager, web.Build{Version: version, Revision: revision}).Handler()
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: application, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	inputOnly := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "/api/v1/playback/input/"

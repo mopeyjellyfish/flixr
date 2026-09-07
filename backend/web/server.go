@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/diagnostics"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/screens"
@@ -23,15 +24,18 @@ type Readiness struct {
 	FFprobe bool `json:"ffprobe"`
 	FFmpeg  bool `json:"ffmpeg"`
 }
+type Build struct{ Version, Revision string }
 type Server struct {
-	house     *household.Manager
-	catalog   *catalog.Catalog
-	playback  *playback.Manager
-	screens   *screens.Manager
-	mux       *http.ServeMux
-	lookPath  func(string) (string, error)
-	readyMu   sync.RWMutex
-	readiness Readiness
+	house             *household.Manager
+	catalog           *catalog.Catalog
+	playback          *playback.Manager
+	screens           *screens.Manager
+	mux               *http.ServeMux
+	lookPath          func(string) (string, error)
+	readyMu           sync.RWMutex
+	readiness         Readiness
+	diagnostics       *diagnostics.Log
+	version, revision string
 }
 
 func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
@@ -42,13 +46,16 @@ func NewServerWithPlayback(h *household.Manager, c *catalog.Catalog, manager *pl
 	return NewServerWithScreens(h, c, manager, screens.New(time.Minute))
 }
 
-func NewServerWithScreens(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager) *Server {
-	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath}
+func NewServerWithScreens(h *household.Manager, c *catalog.Catalog, playbackManager *playback.Manager, screenManager *screens.Manager, builds ...Build) *Server {
+	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: "dev", revision: "unknown"}
+	if len(builds) > 0 {
+		s.version, s.revision = builds[0].Version, builds[0].Revision
+	}
 	s.checkReadiness()
 	s.routes()
 	return s
 }
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler { return s.observe(s.mux) }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/setup/status", s.status)
 	s.mux.HandleFunc("POST /api/v1/setup/claim", s.claim)
@@ -89,6 +96,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("GET /api/v1/owner/playback/status", s.playbackStatus)
+	s.mux.HandleFunc("GET /api/v1/owner/diagnostics", s.exportDiagnostics)
 	s.mux.HandleFunc("GET /api/v1/screens", s.listScreens)
 	s.mux.HandleFunc("POST /api/v1/screens/presence", s.advertiseScreen)
 	s.mux.HandleFunc("POST /api/v1/screens/{id}/sessions", s.authorizeScreen)

@@ -65,6 +65,15 @@ describe('owner operations', () => {
     expect(await screen.findByText('No scan has started.')).toBeInTheDocument();
   });
 
+  it('offers an owner-only local diagnostics download and explains its contents', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true }, profiles: [], films: '', tv: '', configured: false, scan: {} })));
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    const download = await screen.findByRole('link', { name: /download diagnostics/i });
+    expect(download).toHaveAttribute('href', '/api/v1/owner/diagnostics');
+    expect(screen.getByText(/versions, runtime health, and recent failure IDs/i)).toBeInTheDocument();
+    expect(screen.getByText(/never includes media names, paths, passwords, or tokens/i)).toBeInTheDocument();
+  });
+
   it('saves and removes a replacement TMDB token', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
