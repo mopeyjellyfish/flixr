@@ -30,3 +30,4 @@ CREATE TABLE viewing_history_clears (
  undone_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX viewing_history_clears_profile ON viewing_history_clears(profile_id, cleared_at DESC);
+ALTER TABLE progress ADD COLUMN completion_id TEXT NOT NULL DEFAULT '';

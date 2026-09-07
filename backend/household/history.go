@@ -70,16 +70,6 @@ func (m *Manager) RecordViewingEvent(profileID string, event ViewingEvent) error
 	if m.db == nil {
 		return nil
 	}
-	if event.ID == "" {
-		var err error
-		event.ID, err = random()
-		if err != nil {
-			return err
-		}
-	}
-	if event.RecordedAt == 0 {
-		event.RecordedAt = time.Now().UnixMilli()
-	}
 	return m.recordViewingEvent(m.db, profileID, event)
 }
 
@@ -88,20 +78,21 @@ type eventWriter interface {
 }
 
 func validViewingEvent(event ViewingEvent) bool {
-	return event.CatalogID != "" && strings.TrimSpace(event.Title) != "" && event.Kind != "" && (event.Type == EventCompleted || event.Type == EventSummary) && validProvenance(event.Provenance) && !(event.Provenance == ProvenanceLocal && event.SourceTime != nil)
+	return event.CatalogID != "" && strings.TrimSpace(event.Title) != "" && event.Kind != "" && (event.Type == EventCompleted || event.Type == EventSummary) && validProvenance(event.Provenance) && !(event.Provenance == ProvenanceLocal && event.SourceTime != nil) && (event.SourceTime == nil || *event.SourceTime >= 0)
 }
 func (m *Manager) recordViewingEvent(db eventWriter, profileID string, event ViewingEvent) error {
 	if !validViewingEvent(event) {
 		return ErrInvalidHistory
 	}
-	if event.ID == "" {
-		var err error
-		event.ID, err = random()
-		if err != nil {
-			return err
-		}
+	// Internal identity and receipt time belong to this server. Importers retain
+	// their original identity and timestamp in SourceID and SourceTime.
+	var err error
+	event.ID, err = random()
+	if err != nil {
+		return err
 	}
-	_, err := db.Exec(`INSERT INTO viewing_events(event_id,profile_id,catalog_id,title,kind,event_type,provenance,source_id,source_time,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,provenance,catalog_id,source_id) WHERE source_id<>'' DO NOTHING`, event.ID, profileID, event.CatalogID, event.Title, event.Kind, event.Type, event.Provenance, event.SourceID, event.SourceTime, event.RecordedAt)
+	event.RecordedAt = time.Now().UnixMilli()
+	_, err = db.Exec(`INSERT INTO viewing_events(event_id,profile_id,catalog_id,title,kind,event_type,provenance,source_id,source_time,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id,provenance,catalog_id,source_id) WHERE source_id<>'' DO NOTHING`, event.ID, profileID, event.CatalogID, event.Title, event.Kind, event.Type, event.Provenance, event.SourceID, event.SourceTime, event.RecordedAt)
 	return err
 }
 func (m *Manager) SetRating(profileID, catalogID string, value int, provenance EventProvenance, sourceID string) error {
@@ -229,12 +220,24 @@ func (m *Manager) ClearHistory(profileID string) (HistoryClear, error) {
 	if err != nil {
 		return HistoryClear{}, err
 	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return HistoryClear{}, err
+	}
+	defer tx.Rollback()
+	var cutoff int64
+	if err = tx.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM viewing_events WHERE profile_id=?`, profileID).Scan(&cutoff); err != nil {
+		return HistoryClear{}, err
+	}
 	now := time.Now().UnixMilli()
-	var cutoffRowID int64
-	_ = m.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM viewing_events WHERE profile_id=?`, profileID).Scan(&cutoffRowID)
 	clear := HistoryClear{ID: id, UndoUntil: now + historyUndoWindow.Milliseconds()}
-	_, err = m.db.Exec(`INSERT INTO viewing_history_clears(clear_id,profile_id,cleared_at,cleared_rowid,undo_until) VALUES(?,?,?,?,?)`, id, profileID, now, cutoffRowID, clear.UndoUntil)
-	return clear, err
+	if _, err = tx.Exec(`INSERT INTO viewing_history_clears(clear_id,profile_id,cleared_at,cleared_rowid,undo_until) VALUES(?,?,?,?,?)`, id, profileID, now, cutoff, clear.UndoUntil); err != nil {
+		return HistoryClear{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return HistoryClear{}, err
+	}
+	return clear, nil
 }
 func (m *Manager) UndoClearHistory(profileID, clearID string) error {
 	if !m.validHistoryProfile(profileID) || clearID == "" || m.db == nil {

@@ -190,9 +190,48 @@ function DetailDialog({ detail, error, loading, detailError, onRetry, dialog, on
   return <dialog className="media-dialog" ref={dialog} aria-labelledby="detail-title" onClose={onRestoreFocus} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}><article className="detail"><div className={`detail-hero ${!detail.backdrop ? 'detail-poster-hero' : ''}`}>
     {(detail.backdrop || detail.poster) && <Artwork src={detail.backdrop || detail.poster!} priority />}
     <button className="detail-close" aria-label="Close details" autoFocus onClick={onClose}>×</button><div className="detail-heading"><p className="eyebrow">{kindLabel(detail)}</p><h2 id="detail-title">{detail.title}</h2><div className="detail-actions">{(detail.kind === 'film' || detail.kind === 'episode') && playable && <button className="primary" onClick={() => onPlay(detail.id)}>▶ Play {detail.title}</button>}<button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, true)}>Mark watched</button><button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, false)}>Mark unwatched</button>{(detail.kind === 'film' || detail.kind === 'series') && <LoadingButton resetAfter={450} className="list-action" onAction={onToggleList} pendingLabel="Saving…" successLabel={detail.listed ? 'Added to My List' : 'Removed from My List'}>{detail.listed ? 'Remove from My List' : 'Add to My List'}</LoadingButton>}</div></div></div>
-    <div className="detail-body"><div className="detail-facts">{detail.year && <span>{detail.year}</span>}{detail.genres?.map((genre) => <span key={genre}>{genre}</span>)}{detail.demo && <span className="preview-badge">Metadata preview</span>}</div>{detail.synopsis && <ShowMore lines={4} className="detail-synopsis">{detail.synopsis}</ShowMore>}{(detail.kind === 'film' || detail.kind === 'episode') && <RatingControl catalogID={detail.id} />}{detail.demo && <p className="detail-note">Demo title · no media file</p>}{error && <p role="alert">{error}</p>}{(detail.kind === 'film' || detail.kind === 'episode') && <MediaMetadata item={detail} />}{playable && (detail.kind === 'film' || detail.kind === 'episode') && <ScreenReadiness catalogID={detail.id} />}{loading && <p role="status">Loading episodes…</p>}{detailError && <div role="alert">{detailError}<button onClick={onRetry}>Try again</button></div>}{detail.kind === 'series' && 'seasons' in detail && <SeriesEpisodes detail={detail} onPlay={onPlay} onWatched={(season, watched) => onWatched('season', detail.id, watched, season)} />}</div></article></dialog>;
+    <div className="detail-body"><div className="detail-facts">{detail.year && <span>{detail.year}</span>}{detail.genres?.map((genre) => <span key={genre}>{genre}</span>)}{detail.demo && <span className="preview-badge">Metadata preview</span>}</div>{detail.synopsis && <ShowMore lines={4} className="detail-synopsis">{detail.synopsis}</ShowMore>}{(detail.kind === 'film' || detail.kind === 'episode') && <RatingControl key={detail.id} catalogID={detail.id} />}{detail.demo && <p className="detail-note">Demo title · no media file</p>}{error && <p role="alert">{error}</p>}{(detail.kind === 'film' || detail.kind === 'episode') && <MediaMetadata item={detail} />}{playable && (detail.kind === 'film' || detail.kind === 'episode') && <ScreenReadiness catalogID={detail.id} />}{loading && <p role="status">Loading episodes…</p>}{detailError && <div role="alert">{detailError}<button onClick={onRetry}>Try again</button></div>}{detail.kind === 'series' && 'seasons' in detail && <SeriesEpisodes detail={detail} onPlay={onPlay} onWatched={(season, watched) => onWatched('season', detail.id, watched, season)} />}</div></article></dialog>;
 }
 function MediaMetadata({ item }: { item: CatalogItem }) { const metadata = [item.container, item.video_codec, item.audio_codec].filter(Boolean).join(' · '); return metadata ? <p>Media: {metadata}</p> : null; }
 function HomeRails({ sections, onOpen }: { sections: ViewerSection[]; onOpen: OpenDetail }) { return <>{sections.map((section) => <MediaCollection key={section.name} layout="rail" label={section.name} items={section.items} onOpen={onOpen} />)}</>; }
 
-function RatingControl({ catalogID }: { catalogID: string }) { const [value,setValue]=useState(0); const [error,setError]=useState(''); useEffect(()=>{let active=true;api.rating(catalogID).then(({rating})=>{if(active)setValue(rating?.value??0);}).catch(()=>{if(active)setError('Rating unavailable.');});return()=>{active=false;};},[catalogID]); const save=async(next:number)=>{try{setError('');if(next===0)await api.deleteRating(catalogID);else await api.setRating(catalogID,next);setValue(next);}catch{setError('Flixr could not save your rating.');}};return <label className="rating-control">Your rating<select aria-label="Your rating" value={value} onChange={(event)=>void save(Number(event.target.value))}><option value={0}>Not rated</option>{[1,2,3,4,5].map(stars=><option key={stars} value={stars}>{stars} star{stars===1?'':'s'}</option>)}</select>{error&&<span>{error}</span>}</label>; }
+function RatingControl({ catalogID }: { catalogID: string }) {
+  const [value, setValue] = useState(0);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(true);
+  const version = useRef(0);
+  const pending = useRef(true);
+  const invalidate = useCallback(() => { version.current++; }, []);
+  useEffect(() => {
+    const request = ++version.current;
+    pending.current = true;
+    setBusy(true);
+    setValue(0);
+    setError('');
+    api.rating(catalogID).then(({ rating }) => {
+      if (request === version.current) setValue(rating?.value ?? 0);
+    }).catch(() => {
+      if (request === version.current) setError('Rating unavailable.');
+    }).finally(() => {
+      if (request === version.current) { pending.current = false; setBusy(false); }
+    });
+    return invalidate;
+  }, [catalogID, invalidate]);
+  const save = async (next: number) => {
+    if (pending.current) return;
+    pending.current = true;
+    const request = ++version.current;
+    setBusy(true);
+    setError('');
+    try {
+      if (next === 0) await api.deleteRating(catalogID);
+      else await api.setRating(catalogID, next);
+      if (request === version.current) setValue(next);
+    } catch {
+      if (request === version.current) setError('Flixr could not save your rating.');
+    } finally {
+      if (request === version.current) { pending.current = false; setBusy(false); }
+    }
+  };
+  return <label className="rating-control">Your rating<select aria-label="Your rating" value={value} disabled={busy} onChange={(event) => void save(Number(event.target.value))}><option value={0}>Not rated</option>{[1, 2, 3, 4, 5].map(stars => <option key={stars} value={stars}>{stars} star{stars === 1 ? '' : 's'}</option>)}</select>{error && <span>{error}</span>}</label>;
+}

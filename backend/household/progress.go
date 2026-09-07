@@ -3,7 +3,6 @@ package household
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -34,10 +33,10 @@ func (m *Manager) BeginPlayback(profileID, catalogID string, expected ...int64) 
 		}
 	}
 	if compare > 0 {
-		err = m.db.Writer().QueryRow(`UPDATE progress SET generation=generation+1,observation=0 WHERE profile_id=? AND catalog_id=? AND generation=? RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID, compare).Scan(&generation, &position)
+		err = m.db.Writer().QueryRow(`UPDATE progress SET generation=generation+1,observation=0,completion_id='' WHERE profile_id=? AND catalog_id=? AND generation=? RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID, compare).Scan(&generation, &position)
 	} else {
 		err = m.db.Writer().QueryRow(`INSERT INTO progress(profile_id,catalog_id,position_ms,generation) VALUES(?,?,0,1)
- ON CONFLICT(profile_id,catalog_id) DO UPDATE SET generation=progress.generation+1,observation=0 WHERE ?=-1 OR progress.generation=?
+ ON CONFLICT(profile_id,catalog_id) DO UPDATE SET generation=progress.generation+1,observation=0,completion_id='' WHERE ?=-1 OR progress.generation=?
  RETURNING generation,CASE WHEN completed=1 THEN 0 ELSE position_ms END`, profileID, catalogID, compare, compare).Scan(&generation, &position)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -62,13 +61,21 @@ func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, 
 	if completed {
 		completedAt = now
 	}
+	completionID := ""
+	if completed && len(completion) > 0 && completion[0] != nil {
+		var tokenErr error
+		completionID, tokenErr = random()
+		if tokenErr != nil {
+			return false, tokenErr
+		}
+	}
 	tx, err := m.db.Begin()
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=CASE WHEN observation=0 THEN ? ELSE MAX(completed,?) END,completed_at=CASE WHEN observation>0 AND completed=1 THEN completed_at ELSE ? END,observation=CASE WHEN ?=0 THEN observation+1 ELSE ? END
- WHERE profile_id=? AND catalog_id=? AND generation=? AND (?=0 OR observation<?)`, position, now, boolInt(completed), boolInt(completed), completedAt, observation, observation, profileID, catalogID, generation, observation, observation)
+	result, err := tx.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=CASE WHEN observation=0 THEN ? ELSE MAX(completed,?) END,completed_at=CASE WHEN observation>0 AND completed=1 THEN completed_at ELSE ? END,completion_id=CASE WHEN completion_id='' AND ?=1 THEN ? ELSE completion_id END,observation=CASE WHEN ?=0 THEN observation+1 ELSE ? END
+ WHERE profile_id=? AND catalog_id=? AND generation=? AND (?=0 OR observation<?)`, position, now, boolInt(completed), boolInt(completed), completedAt, boolInt(completed), completionID, observation, observation, profileID, catalogID, generation, observation, observation)
 	if err != nil {
 		return false, err
 	}
@@ -79,16 +86,18 @@ func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, 
 	if completed && len(completion) > 0 && completion[0] != nil {
 		e := *completion[0]
 		if e.SourceID == "" {
-			e.SourceID = fmt.Sprintf("%s:playback:%d", catalogID, generation)
+			if err := tx.QueryRow(`SELECT completion_id FROM progress WHERE profile_id=? AND catalog_id=? AND generation=?`, profileID, catalogID, generation).Scan(&e.SourceID); err != nil {
+				return false, err
+			}
+			if e.SourceID == "" {
+				return false, ErrProgressConflict
+			}
 		}
 		if e.Type == "" {
 			e.Type = EventCompleted
 		}
 		if e.Provenance == "" {
 			e.Provenance = ProvenanceLocal
-		}
-		if e.RecordedAt == 0 {
-			e.RecordedAt = now
 		}
 		if err := m.recordViewingEvent(tx, profileID, e); err != nil {
 			return false, err
@@ -140,7 +149,7 @@ func (m *Manager) RecordProgress(profileID, catalogID string, position, observed
  VALUES(?,?,?,?,?,?,1)
  ON CONFLICT(profile_id,catalog_id) DO UPDATE SET position_ms=excluded.position_ms,updated_at=excluded.updated_at,completed=excluded.completed,completed_at=excluded.completed_at,generation=1,observation=0 WHERE progress.generation=0`, profileID, catalogID, position, now, boolInt(completed), completedAt)
 	} else {
-		result, err = m.db.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=?,completed_at=?,generation=generation+1,observation=0 WHERE profile_id=? AND catalog_id=? AND generation=?`, position, now, boolInt(completed), completedAt, profileID, catalogID, generation)
+		result, err = m.db.Exec(`UPDATE progress SET position_ms=?,updated_at=?,completed=?,completed_at=?,generation=generation+1,observation=0,completion_id='' WHERE profile_id=? AND catalog_id=? AND generation=?`, position, now, boolInt(completed), completedAt, profileID, catalogID, generation)
 	}
 
 	if err != nil {
