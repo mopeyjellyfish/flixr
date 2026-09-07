@@ -46,8 +46,12 @@ func (c *Catalog) startArtworkMaintenance() {
 		defer close(c.maintenanceDone)
 		run := func() {
 			c.artworkMu.Lock()
-			c.cleanupDerivativesLocked(time.Now())
-			c.maintenanceStatus = ArtworkMaintenanceStatus{LastRun: time.Now(), Outcome: "complete"}
+			err := c.cleanupDerivativesLocked(time.Now())
+			outcome := "complete"
+			if err != nil {
+				outcome = "failed"
+			}
+			c.maintenanceStatus = ArtworkMaintenanceStatus{LastRun: time.Now(), Outcome: outcome}
 			c.artworkMu.Unlock()
 		}
 		run()
@@ -275,19 +279,22 @@ func (c *Catalog) writeDerivative(path string, data []byte) error {
 	return c.fs.Rename(name, path)
 }
 
-func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
+func (c *Catalog) cleanupDerivativesLocked(now time.Time) error {
 	dir := filepath.Join(c.db.DataDir(), "artwork", "derivatives")
 	if c.maintenanceDir == nil {
 		directory, err := c.fs.Open(dir)
 		if err != nil {
 			c.derivativeReady = true
-			return
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
 		}
 		c.maintenanceDir, c.derivativeBytes, c.derivativeCount, c.derivativeReady = directory, 0, 0, false
 	}
 	entries, err := c.maintenanceDir.Readdir(maintenanceBatch)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return
+		return err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -301,7 +308,7 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 		if !strings.HasSuffix(entry.Name(), ".jpg") {
 			continue
 		}
-		if c.derivativeCount >= maintenanceMaxFiles || c.derivativeBytes+entry.Size() > maxDerivativeBytes {
+		if now.Sub(entry.ModTime()) > derivativeMaxAge || c.derivativeCount >= maintenanceMaxFiles || c.derivativeBytes+entry.Size() > maxDerivativeBytes {
 			_ = c.fs.Remove(path)
 			continue
 		}
@@ -313,4 +320,5 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) {
 		c.maintenanceDir = nil
 		c.derivativeReady = true
 	}
+	return nil
 }

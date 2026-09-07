@@ -148,8 +148,8 @@ requests, and limits resize work to two jobs. Failed, unsupported, or pressured
 derivative creation serves the original cached image instead. Derivatives are
 atomic temporary-file writes keyed by the original hash and one of eight width
 buckets. Startup and six-hour maintenance sweep at most 256 derivative entries,
-records its last run outcome, removes stale temporary files, and evicts overflow
-entries oldest-first above 128 MiB or 64 entries. This does not touch SQLite, settings,
+records its last run outcome, removes stale temporary files, and evicts expired or
+over-budget entries as encountered above 128 MiB or 64 entries. This does not touch SQLite, settings,
 history, media roots, or playback segments. SQLite remains WAL-backed; use normal
 backups and do not run a blocking `VACUUM` while playback is active.
 

@@ -182,7 +182,7 @@ func TestArtworkMaintenanceEvictsOnlyExpiredDerivatives(t *testing.T) {
 	c.cleanupDerivativesLocked(time.Now())
 	c.artworkMu.Unlock()
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != maintenanceMaxFiles {
+	if err != nil || len(entries) != 0 {
 		t.Fatalf("derivatives = %d, %v", len(entries), err)
 	}
 	data, _, err := c.Artwork("film", "poster")
