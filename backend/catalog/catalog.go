@@ -31,22 +31,36 @@ var (
 
 // MediaProperties is the path-free inspection result persisted with a catalog item.
 type MediaProperties struct {
-	Container    string          `json:"container,omitempty"`
-	VideoProfile string          `json:"video_profile,omitempty"`
-	VideoCodec   string          `json:"video_codec,omitempty"`
-	Audio        []AudioTrack    `json:"audio,omitempty"`
-	Subtitles    []SubtitleTrack `json:"subtitles,omitempty"`
+	Container               string          `json:"container,omitempty"`
+	DurationMS              int64           `json:"duration_ms,omitempty"`
+	VideoProfile            string          `json:"video_profile,omitempty"`
+	VideoCodec              string          `json:"video_codec,omitempty"`
+	PrimaryVideoStreamIndex int             `json:"primary_video_stream_index"`
+	Width                   int             `json:"width,omitempty"`
+	Height                  int             `json:"height,omitempty"`
+	Bitrate                 int64           `json:"bitrate,omitempty"`
+	HDR                     string          `json:"hdr,omitempty"`
+	Audio                   []AudioTrack    `json:"audio,omitempty"`
+	Subtitles               []SubtitleTrack `json:"subtitles,omitempty"`
 }
 
 type AudioTrack struct {
+	Index    int    `json:"index"`
 	Codec    string `json:"codec"`
 	Channels int    `json:"channels,omitempty"`
 	Language string `json:"language,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Default  bool   `json:"default,omitempty"`
+	Forced   bool   `json:"forced,omitempty"`
 }
 
 type SubtitleTrack struct {
+	Index    int    `json:"index"`
 	Codec    string `json:"codec"`
 	Language string `json:"language,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Default  bool   `json:"default,omitempty"`
+	Forced   bool   `json:"forced,omitempty"`
 }
 
 type Item struct {
@@ -74,12 +88,15 @@ type Item struct {
 	Demo         bool     `json:"demo"`
 	MediaProperties
 
-	path        string
-	rootKind    string
-	fingerprint string
-	size        int64
-	mtime       int64
+	path          string
+	rootKind      string
+	fingerprint   string
+	size          int64
+	mtime         int64
+	probeRevision int
 }
+
+const mediaProbeRevision = 1
 
 // Season is an ordered group of playable episode records.
 type Season struct {
@@ -182,7 +199,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if db == nil {
 		return c, nil
 	}
-	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, video_codec, video_profile, audio_json, subtitle_json, series_id, provider_id, year, synopsis, poster, backdrop, genres_json, added_at, playable, demo FROM catalog_items`)
+	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, fingerprint, size_bytes, mtime_unix, container, duration_ms, video_codec, video_profile, primary_video_stream_index, video_width, video_height, video_bitrate, video_hdr, audio_json, subtitle_json, probe_revision, series_id, provider_id, year, synopsis, poster, backdrop, genres_json, added_at, playable, demo FROM catalog_items`)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +208,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 		var x Item
 		var local, playable, demo int
 		var audio, subtitles, genres string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.HDR, &audio, &subtitles, &x.probeRevision, &x.SeriesID, &x.ProviderID, &x.Year, &x.Synopsis, &x.Poster, &x.Backdrop, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(audio), &x.Audio); err != nil {
@@ -526,7 +543,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	for _, f := range files {
 		g.Go(func() error {
 			// A stable path, size and mtime never opens, hashes, or probes the file again.
-			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime {
+			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.probeRevision == mediaProbeRevision {
 				select {
 				case results <- scanResult{item: old, file: f}:
 					return nil
@@ -604,13 +621,16 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	if err != nil {
 		return Item{}, err
 	}
+	if properties.VideoCodec == "" {
+		properties.PrimaryVideoStreamIndex = -1
+	}
 	switch strings.ToLower(filepath.Ext(f.rel)) {
 	case ".mkv":
 		properties.Container = "matroska"
 	case ".webm":
 		properties.Container = "webm"
 	}
-	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, AddedAt: time.Now().Unix(), Playable: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime}
+	x := Item{ID: id(f.kind, fingerprint), Title: title(f.rel), Kind: f.kind, LocalOnly: true, AddedAt: time.Now().Unix(), Playable: true, MediaProperties: properties, path: f.rel, rootKind: f.kind, fingerprint: fingerprint, size: f.size, mtime: f.mtime, probeRevision: mediaProbeRevision}
 	episodeFields(&x)
 	seriesFields(&x)
 	return x, nil
@@ -799,7 +819,7 @@ func (c *Catalog) persist(next map[string]Item, failures map[scanKey]string, obs
 					return err
 				}
 			}
-			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,video_codec=excluded.video_codec,video_profile=excluded.video_profile,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.VideoCodec, x.VideoProfile, string(audio), string(subtitles), x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix(), string(genres), x.AddedAt, boolInt(x.Playable)); err != nil {
+			if _, err = tx.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_hdr,audio_json,subtitle_json,probe_revision,series_id,season_id,provider_id,year,synopsis,poster,backdrop,updated_at,genres_json,added_at,playable,demo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,relative_path=excluded.relative_path,local_only=excluded.local_only,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,container=excluded.container,duration_ms=excluded.duration_ms,video_codec=excluded.video_codec,video_profile=excluded.video_profile,primary_video_stream_index=excluded.primary_video_stream_index,video_width=excluded.video_width,video_height=excluded.video_height,video_bitrate=excluded.video_bitrate,video_hdr=excluded.video_hdr,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,probe_revision=excluded.probe_revision,series_id=excluded.series_id,season_id=excluded.season_id,provider_id=excluded.provider_id,year=excluded.year,synopsis=excluded.synopsis,poster=excluded.poster,backdrop=excluded.backdrop,updated_at=excluded.updated_at,genres_json=excluded.genres_json,playable=excluded.playable`, x.ID, x.Kind, x.Title, x.path, boolInt(x.LocalOnly), x.rootKind, x.fingerprint, x.size, x.mtime, x.Container, x.DurationMS, x.VideoCodec, x.VideoProfile, x.PrimaryVideoStreamIndex, x.Width, x.Height, x.Bitrate, x.HDR, string(audio), string(subtitles), x.probeRevision, x.SeriesID, seasonID, x.ProviderID, x.Year, x.Synopsis, x.Poster, x.Backdrop, time.Now().Unix(), string(genres), x.AddedAt, boolInt(x.Playable)); err != nil {
 				return err
 			}
 			if _, err = tx.Exec(`UPDATE catalog_items SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=? WHERE id=?`, x.Provider, x.Language, x.Region, x.Confidence, boolInt(x.OwnerMatch), boolInt(x.OwnerUnmatch), x.ID); err != nil {
@@ -904,7 +924,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	if sqlLimit <= 0 {
 		sqlLimit = -1
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,video_codec,video_profile,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,primary_video_stream_index,video_width,video_height,video_bitrate,video_hdr,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
@@ -914,7 +934,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 		var x Item
 		var local, playable, demo int
 		var audio, subtitles, genres string
-		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.VideoCodec, &x.VideoProfile, &audio, &subtitles, &genres, &x.AddedAt, &playable, &demo); err != nil {
+		if err := rows.Scan(&x.ID, &x.Kind, &x.Title, &x.path, &local, &x.rootKind, &x.fingerprint, &x.size, &x.mtime, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.HDR, &audio, &subtitles, &genres, &x.AddedAt, &playable, &demo); err != nil {
 			return nil, fmt.Errorf("scan catalog item: %w", err)
 		}
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {

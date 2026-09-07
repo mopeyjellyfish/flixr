@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -73,30 +74,47 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 	var value struct {
 		Format struct {
 			FormatName string `json:"format_name"`
+			Duration   string `json:"duration"`
 		} `json:"format"`
 		Streams []struct {
-			CodecType string            `json:"codec_type"`
-			CodecName string            `json:"codec_name"`
-			Profile   string            `json:"profile"`
-			Channels  int               `json:"channels"`
-			Tags      map[string]string `json:"tags"`
+			Index         int               `json:"index"`
+			CodecType     string            `json:"codec_type"`
+			CodecName     string            `json:"codec_name"`
+			Profile       string            `json:"profile"`
+			Channels      int               `json:"channels"`
+			Width         int               `json:"width"`
+			Height        int               `json:"height"`
+			BitRate       string            `json:"bit_rate"`
+			ColorTransfer string            `json:"color_transfer"`
+			Tags          map[string]string `json:"tags"`
+			Disposition   struct {
+				Default int `json:"default"`
+				Forced  int `json:"forced"`
+			} `json:"disposition"`
 		} `json:"streams"`
 	}
 	if err := json.Unmarshal(out, &value); err != nil {
 		return MediaProperties{}, fmt.Errorf("decode ffprobe output: %w", err)
 	}
-	media := MediaProperties{Container: value.Format.FormatName}
+	media := MediaProperties{Container: value.Format.FormatName, PrimaryVideoStreamIndex: -1}
+	if seconds, err := strconv.ParseFloat(value.Format.Duration, 64); err == nil && seconds >= 0 {
+		media.DurationMS = int64(seconds * 1000)
+	}
 	for _, stream := range value.Streams {
 		switch stream.CodecType {
 		case "video":
 			if media.VideoCodec == "" {
 				media.VideoCodec = stream.CodecName
 				media.VideoProfile = stream.Profile
+				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = stream.Index, stream.Width, stream.Height, stream.ColorTransfer
+				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
+					media.Bitrate = bitrate
+				}
 			}
 		case "audio":
-			media.Audio = append(media.Audio, AudioTrack{Codec: stream.CodecName, Channels: stream.Channels, Language: stream.Tags["language"]})
+			media.Audio = append(media.Audio, AudioTrack{Index: stream.Index, Codec: stream.CodecName, Channels: stream.Channels, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		case "subtitle":
-			media.Subtitles = append(media.Subtitles, SubtitleTrack{Codec: stream.CodecName, Language: stream.Tags["language"]})
+			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: stream.Index, Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		}
 	}
 	return media, nil
