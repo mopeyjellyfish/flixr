@@ -1,60 +1,74 @@
 # Local artwork measurement — 2026-09-07
 
-This is local evidence for issue #56, not reference-host qualification.
+This is reproducible local evidence for issue #56. It does **not** qualify the
+issue's required 4-core, 8 GiB reference host.
 
+## Baseline and isolation
+
+- Source: exact `origin/main` release baseline
+  `b08929670b69498fc3efa6653167e10d60bf6968`.
 - Host: macOS 26.6.1, Apple M4 Pro, 24 GiB RAM.
-- Source for the decode harness run: `origin/main` revision `baa9c934da728e4b9f10729d75c523623d51f51c`.
-- Server: an isolated `FLIXR_DEMO=true` binary on loopback, with a temporary data directory populated by a copy of the repository's local `.demo` cache. No user service, volume, or media directory was used.
-Chromium against the same isolated server selected Alex and used a 1920 × 2160
-viewport so the initial grid mounted 30 cards. The timing observer calls
-`HTMLImageElement.decode()` on actual artwork responses, de-duplicates each
-resolved image URL, and records only completed decodes.
+- The reference 4-core, 8 GiB host was unavailable. These results must not be
+  used as its qualification or as a cross-host performance claim.
+- The checked-in harness copied the local demo cache into a `mktemp` data
+  directory, imported it once, and then ran the server in normal mode. It did
+  not write to the cache source, a user demo, a service, a Docker volume, or a
+  media root.
+- Before the timed browser visit, it deleted only
+  `<mktemp>/data/artwork/derivatives`. Cached originals remained in the
+  temporary data directory, which is the intended fresh-derivative baseline.
+  The cold visit created 26 JPEG derivatives.
 
-- Initial browser-run first visible decoded image: 368.1 ms.
-- Initial browser-run visible 30-image grid decoded: 597.6 ms.
-- Repeat browser-run first visible decoded image: 405.0 ms.
-- Repeat browser-run visible 30-image grid decoded: 465.6 ms.
+## Combined cold and warm result
 
-These are local Chromium decode completions, not device first paint. The
-isolated demo copy already had derivative cache state, so “initial” is not a
-fresh-derivative cold-cache baseline. They are not reference-host qualification.
+The normal-mode server first scanned the real
+`Long Duration Seek 2026.mkv` fixture. It then started a real fMP4-HLS remux
+of that fixture, added 300 isolated fixture copies, and started a second
+two-worker owner scan. Chromium selected the copied Alex profile and visited
+the film grid at 1920 × 2160 while that scan was active. The scan completed
+with `scanned=301`, `failed=0`, and `unmatched=0`.
 
-The concurrent case used a different, normal-mode loopback server with a
-temporary data directory and a copied real fixture corpus. It played the real
-600-second H.264/AAC `Long Duration Seek 2026.mkv` fixture through an active
-fMP4-HLS remux session while an owner scan re-probed 303 files (the fixture
-films plus 300 temporary hard-linked copies). It did not request an artwork
-grid during this run. `ps` sampled the server and its children during the
-8-second scan; the result was `scanned=303`, `failed=0`.
+The observer calls `HTMLImageElement.decode()` for actual authenticated artwork
+responses. It counts a URL only after its image both decodes and intersects the
+viewport; the grid had 45 visible decoded artwork images. It records the first
+visible decode and the 30th distinct visible decode.
 
-- Flixr server peak: 9.2% CPU, 27,504 KiB RSS.
-- Active FFmpeg remux peak: 0.3% CPU, 18,816 KiB RSS.
-- Server + active FFmpeg peak: 9.4% CPU, 46,320 KiB RSS.
-- Including observed short-lived FFprobe children: 22.2% CPU, 74,224 KiB RSS.
+| Visit | First visible decoded | 30 visible decoded | Visible decoded / visible artwork |
+| --- | ---: | ---: | ---: |
+| Cold derivative cache | 414.8 ms | 1459.5 ms | 45 / 45 |
+| Warm repeat | 390.7 ms | 523.2 ms | 45 / 45 |
 
-CPU is the point-in-time `%CPU` reported by macOS `ps`; RSS is KiB. The latter
-aggregate includes only processes observed at a sample, so it is an evidence
-measurement rather than a machine-wide resource ceiling.
+The warm repeat reloaded after the cold visit on the same isolated server. Both
+timings are Chromium decode completions, not device first-paint measurements.
 
-Reproduce browser decode timing from a disposable checkout with a populated
-local `.demo` cache:
+`ps` sampled the Flixr server and its immediate FFmpeg/FFprobe children every
+100 ms from scan start until scan completion. Its point-in-time combined peak
+was **80.8% CPU** and **118,672 KiB RSS**. This is an observed process-set peak,
+not a machine-wide limit or a reference-host resource ceiling. The browser run
+started at `2026-09-07T15:46:44Z` and finished at `2026-09-07T15:46:49Z`; the
+concurrent scan finished at `2026-09-07T15:47:21Z`, so the complete cold and
+warm browser sequence occurred during the active scan.
+
+## Reproduce
+
+Run from this checkout after the existing frontend dependencies and Playwright
+Chromium are available. The cache input is copied read-only; pass the path to a
+local cache that the operator is authorized to read.
 
 ```sh
-measure_dir="$(mktemp -d)"
-cp -R .demo "$measure_dir/demo"
-FLIXR_DEMO=true FLIXR_DATA_DIR="$measure_dir" FLIXR_LISTEN_ADDR=127.0.0.1:18989 ./flixr
+FLIXR_MEASURE_DEMO_SOURCE=/absolute/path/to/local-demo-cache \
+  bash scripts/measure-artwork-acceptance.sh
 ```
 
-Then run the checked-in harness against that isolated server:
+The script archives `origin/main`, runs `npm ci` and `npm run build:embed` in
+that archive, and builds its server binary there. It copies the supplied demo
+cache and the repository's committed media fixture into a temporary directory,
+then removes the temporary directory on exit. It writes JSON timing and scan
+results, phase timestamps, and the raw `ps` samples under ignored
+`frontend/test-results/artwork-acceptance-*`.
 
-```sh
-FLIXR_MEASURE_URL=http://127.0.0.1:18989 node frontend/scripts/measure-artwork-local.mjs
-```
-
-The harness uses no API or artwork mock. It requires the frontend's existing
-Playwright dependency and an isolated demo containing Alex. For the concurrent
-case, use a separate normal-mode server with `FLIXR_DATA_DIR` and
-`FLIXR_FILMS_ROOT` under a temporary directory; never point it at a live demo
-or media root. The demo records remain deliberately non-playable. Remaining
-issue #56 acceptance evidence is a freshly populated artwork-cache baseline
-and a run that combines real playback, scan, and browser artwork-grid work.
+Its useful controls are `FLIXR_MEASURE_BASELINE` (defaults to `origin/main`),
+`FLIXR_MEASURE_PORT`, and `FLIXR_MEASURE_COPY_COUNT` (defaults to 300). No API
+or artwork mock is used. The measured source SHA, fixture path, derivative
+count, scan result, timing data, and resource peak are all emitted in
+`summary.json`.

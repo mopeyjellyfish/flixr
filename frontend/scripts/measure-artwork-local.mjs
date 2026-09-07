@@ -4,17 +4,18 @@ const baseURL = process.env.FLIXR_MEASURE_URL;
 if (!baseURL) throw new Error('Set FLIXR_MEASURE_URL to the isolated server URL.');
 
 const observer = `(() => {
-  const state = { start: performance.now(), seen: new Set(), firstVisibleDecoded: null, grid30Decoded: null };
+  const state = { start: performance.now(), visibleDecoded: new Set(), watched: new WeakSet(), firstVisibleDecoded: null, grid30Decoded: null };
   const watch = (img) => {
-    if (!(img instanceof HTMLImageElement) || !img.src.includes('/api/v1/catalog/artwork/')) return;
+    if (!(img instanceof HTMLImageElement) || state.watched.has(img) || !img.src.includes('/api/v1/catalog/artwork/')) return;
+    state.watched.add(img);
     img.decode().then(() => {
       const source = img.currentSrc || img.src;
-      if (state.seen.has(source)) return;
-      state.seen.add(source);
-      const elapsed = performance.now() - state.start;
       const rect = img.getBoundingClientRect();
-      if (state.firstVisibleDecoded === null && rect.bottom > 0 && rect.top < innerHeight) state.firstVisibleDecoded = elapsed;
-      if (state.seen.size === 30) state.grid30Decoded = elapsed;
+      if (rect.bottom <= 0 || rect.top >= innerHeight || state.visibleDecoded.has(source)) return;
+      state.visibleDecoded.add(source);
+      const elapsed = performance.now() - state.start;
+      if (state.firstVisibleDecoded === null) state.firstVisibleDecoded = elapsed;
+      if (state.visibleDecoded.size === 30) state.grid30Decoded = elapsed;
     }).catch(() => {});
   };
   new MutationObserver((changes) => changes.forEach((change) => change.addedNodes.forEach((node) => {
@@ -43,7 +44,7 @@ async function measure(navigate) {
   return page.evaluate(() => {
     const visibleArtworkImages = [...document.images].filter((image) => image.src.includes('/api/v1/catalog/artwork/') && image.getBoundingClientRect().bottom > 0 && image.getBoundingClientRect().top < innerHeight).length;
     if (visibleArtworkImages < 30) throw new Error(`Expected 30 visible artwork images, got ${visibleArtworkImages}.`);
-    return { first_visible_decoded_ms: window.__issue56Artwork.firstVisibleDecoded, visible_grid_30_decoded_ms: window.__issue56Artwork.grid30Decoded, visible_artwork_images: visibleArtworkImages };
+    return { first_visible_decoded_ms: window.__issue56Artwork.firstVisibleDecoded, visible_grid_30_decoded_ms: window.__issue56Artwork.grid30Decoded, visible_decoded_images: window.__issue56Artwork.visibleDecoded.size, visible_artwork_images: visibleArtworkImages };
   });
 }
 const initial = await measure(() => page.goto(`${baseURL}/movies`, { waitUntil: 'networkidle' }));
