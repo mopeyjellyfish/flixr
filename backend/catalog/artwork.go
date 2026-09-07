@@ -311,9 +311,13 @@ func (c *Catalog) cleanupDerivativesLocked(now time.Time) error {
 			continue
 		}
 		if now.Sub(entry.ModTime()) > derivativeMaxAge || c.derivativeCount >= maintenanceMaxFiles || c.derivativeBytes+entry.Size() > maxDerivativeBytes {
+			c.derivativeBytes += entry.Size()
+			c.derivativeCount++
 			if err := c.fs.Remove(path); err != nil {
 				return err
 			}
+			c.derivativeBytes -= entry.Size()
+			c.derivativeCount--
 			continue
 		}
 		c.derivativeBytes += entry.Size()
