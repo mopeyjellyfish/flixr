@@ -54,6 +54,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const [trackError, setTrackError] = useState<string>();
   const [switchingAudio, setSwitchingAudio] = useState(false);
+  const [audioLocked, setAudioLocked] = useState(false);
   const [autoplay, setAutoplay] = useState<AutoplayState>({ kind: 'idle' });
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
@@ -138,6 +139,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     finalizing.current = false;
     endedPlayback.current = false;
     completionAck.current = null;
+    setAudioLocked(false);
     setAutoplay({ kind: 'idle' });
     api.playbackPlan(catalogID, browserCapabilities()).then(async (initial) => {
       if (!active) { void api.playbackStop(initial.session_id); return; }
@@ -198,6 +200,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   }, []);
 
   const advanceTo = useCallback(async (episode: Episode) => {
+    setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
@@ -289,6 +292,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const finish = async () => {
     if (finalizing.current) return;
     finalizing.current = true;
+    setAudioLocked(true);
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
@@ -313,6 +317,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const plan = playback.current;
     if (!plan || finalizing.current || endedPlayback.current) return;
     endedPlayback.current = true;
+    setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
     const controller = new AbortController();
@@ -356,7 +361,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const changeAudio = async (value: string) => {
     const plan = playback.current;
     const element = video.current;
-    if (!plan || !element || switchingAudio) return;
+    if (!plan || !element || switchingAudio || audioLocked || finalizing.current || endedPlayback.current) return;
     const [source, indexValue] = value.split(':', 2);
     const streamIndex = Number(indexValue);
     if ((source !== 'embedded' && source !== 'external') || !Number.isInteger(streamIndex) || streamIndex < 0) return;
@@ -444,7 +449,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}
-              disabled={switchingAudio}
+              disabled={switchingAudio || audioLocked}
               value={`${playback.current?.plan.audio_external ? 'external' : 'embedded'}:${playback.current?.plan.audio_stream_index ?? ''}`}
               onChange={(event) => { void changeAudio(event.target.value); }}
             >

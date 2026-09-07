@@ -416,6 +416,50 @@ it('does not advance when stopping the completed session fails', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent(/session expired/i);
   expect(advance).not.toHaveBeenCalled();
 });
+
+it('locks audio selection while completion and next-episode resolution use the current session', async () => {
+  let releaseCompletion: (() => void) | undefined;
+  let resolveNext: ((response: Response) => void) | undefined;
+  const calls: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    calls.push(path);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'direct', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/episode-1.mp4',
+      heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+      audio_tracks: [{ index: 1, codec: 'aac', language: 'eng' }, { index: 2, codec: 'aac', language: 'fra' }],
+    }));
+    if (path.endsWith('/heartbeat')) {
+      await new Promise<void>((resolve) => { releaseCompletion = resolve; });
+      return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
+    }
+    if (path.includes('/next?')) return new Promise<Response>((resolve) => { resolveNext = resolve; });
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+  render(<Player catalogID="episode-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+  await waitFor(() => expect(releaseCompletion).toBeTypeOf('function'));
+
+  const audio = screen.getByRole('combobox', { name: /audio track/i });
+  expect(audio).toBeDisabled();
+  audio.removeAttribute('disabled');
+  fireEvent.change(audio, { target: { value: 'embedded:2' } });
+  expect(calls.some((path) => path.endsWith('/audio'))).toBe(false);
+  audio.setAttribute('disabled', '');
+
+  await act(async () => { releaseCompletion?.(); });
+  await waitFor(() => expect(resolveNext).toBeTypeOf('function'));
+  expect(audio).toBeDisabled();
+  audio.removeAttribute('disabled');
+  fireEvent.change(audio, { target: { value: 'embedded:2' } });
+  expect(calls.some((path) => path.endsWith('/audio'))).toBe(false);
+
+  await act(async () => { resolveNext?.(new Response(JSON.stringify({ state: 'end_of_series' }))); });
+  expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
+});
+
 it('labels audio tracks and preserves source time when changing tracks', async () => {
   const requests: Array<{ path: string; body?: string }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
