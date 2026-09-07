@@ -80,6 +80,7 @@ func TestLockedMetadataSurvivesRefreshRescanAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Shutdown(context.Background())
 	fields, err := reopened.MetadataFields("film", got.ID)
 	if err != nil || fieldValue(fields, "tags") != "family" || fieldValue(fields, "content_rating") != "PG" {
 		t.Fatalf("restarted fields = %#v, %v", fields, err)

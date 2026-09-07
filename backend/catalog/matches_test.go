@@ -88,6 +88,7 @@ func TestOwnerMatchSurvivesRescanOutageAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Shutdown(context.Background())
 	persisted, _, err := reopened.Browse("", 0, 1)
 	if err != nil || len(persisted) != 1 || persisted[0].ProviderID != "42" || !persisted[0].OwnerMatch {
 		t.Fatalf("restart = %#v, %v", persisted, err)

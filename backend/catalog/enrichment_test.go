@@ -171,6 +171,11 @@ func openCatalog(t *testing.T, data string) (*sqlite.DB, *catalog.Catalog) {
 		db.Close()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := c.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
 	return db, c
 }
 
