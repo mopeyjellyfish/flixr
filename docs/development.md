@@ -169,8 +169,8 @@ atomic temporary-file writes keyed by the original hash and one of eight width
 buckets. Startup and six-hour maintenance sweep at most 256 derivative entries,
 records its last run outcome, removes stale temporary files, and evicts expired or
 over-budget entries as encountered above 128 MiB or 64 entries. This does not touch SQLite, settings,
-history, media roots, or playback segments. SQLite remains WAL-backed; use normal
-backups and do not run a blocking `VACUUM` while playback is active.
+history, media roots, or playback segments. Database and deployment-log retention
+are documented separately in [the Docker guide](docker.md#database-and-log-maintenance).
 
 If port 4173 is already occupied, use `FLIXR_TEST_PORT=4180 npm --prefix frontend
 run test:e2e -- --project=chromium`. Tests refuse to reuse an unrelated server.

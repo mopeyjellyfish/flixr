@@ -27,7 +27,7 @@ func TestConnectionPolicyAppliesToEveryPoolConnectionAndSurvivesReopen(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			var foreignKeys, timeout int
+			var foreignKeys, timeout, autoCheckpoint int
 			var journal string
 			if err := c.QueryRowContext(context.Background(), "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 				t.Fatal(err)
@@ -38,9 +38,12 @@ func TestConnectionPolicyAppliesToEveryPoolConnectionAndSurvivesReopen(t *testin
 			if err := c.QueryRowContext(context.Background(), "PRAGMA journal_mode").Scan(&journal); err != nil {
 				t.Fatal(err)
 			}
+			if err := c.QueryRowContext(context.Background(), "PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint); err != nil {
+				t.Fatal(err)
+			}
 			c.Close()
-			if foreignKeys != 1 || timeout != 5000 || journal != "wal" {
-				t.Fatalf("%s policy = foreign_keys=%d busy_timeout=%d journal=%q", conn.name, foreignKeys, timeout, journal)
+			if foreignKeys != 1 || timeout != 5000 || journal != "wal" || autoCheckpoint != 1000 {
+				t.Fatalf("%s policy = foreign_keys=%d busy_timeout=%d journal=%q wal_autocheckpoint=%d", conn.name, foreignKeys, timeout, journal, autoCheckpoint)
 			}
 		}
 	}

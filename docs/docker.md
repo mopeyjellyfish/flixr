@@ -176,6 +176,35 @@ Never run old and new containers against the same config or segment directory.
 Existing source/demo Compose files continue mounting their previous `/data` volumes
 and explicitly set `FLIXR_DATA_DIR`; no automatic data migration is performed.
 
+## Database and log maintenance
+
+FlixR retains the current catalog scan report and the 31 most recent earlier
+reports. Saving a scan status and pruning older reports is one database transaction;
+the matching per-file outcomes are removed with the report. Owner-recovery audit
+events are durable security records and are not deleted by scan, artwork, or log
+maintenance.
+
+SQLite remains in WAL mode and uses its conservative automatic checkpoint threshold
+of 1,000 WAL pages. FlixR does not schedule manual checkpoints or a full `VACUUM`.
+Stop FlixR before any operator-run database maintenance and keep the database, WAL,
+and shared-memory files together when backing up or restoring the data volume.
+
+FlixR writes application logs to stdout and stderr; the container runtime owns those
+logs. The shipped release Compose file uses Docker's `json-file` driver with three
+10 MiB files. If a deployment replaces that logging block or uses another runtime,
+configure an equivalent finite size and file count there. A Compose override can
+apply the same bound explicitly:
+
+```yaml
+services:
+  flixr:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
 ### Recover a forgotten owner password
 
 Recovery is a host-local command. It has no HTTP API, needs no network access, and
