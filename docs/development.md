@@ -40,7 +40,7 @@ count, and the latest 100 failure IDs. It contains no media names, filesystem
 paths, passwords, tokens, configuration values, or database content. A failed
 browser request shows its support ID; include that ID only when you choose to
 share the archive with support. The records are in memory, so restarting Flixr
-clears them.
+clears them. See [SUPPORT.md](../SUPPORT.md) before opening a public issue.
 
 ## Development demo
 
