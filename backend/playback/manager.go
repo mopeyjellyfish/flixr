@@ -303,7 +303,7 @@ func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int6
 		return Session{}, fmt.Errorf("create generation directory: %w", err)
 	}
 	inputURL := m.inputBase + "/api/v1/playback/input/" + inputToken
-	name, args, err := ffmpegCommand(plan.Kind, inputURL, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
+	name, args, err := ffmpegCommand(plan, inputURL, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
 	if err != nil {
 		releaseReservation(true)
 		_ = m.files.RemoveAll(dir)

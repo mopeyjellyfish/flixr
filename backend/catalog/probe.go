@@ -91,11 +91,15 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			Height        int               `json:"height"`
 			BitRate       string            `json:"bit_rate"`
 			AvgFrameRate  string            `json:"avg_frame_rate"`
+			RFrameRate    string            `json:"r_frame_rate"`
 			BitsPerSample json.Number       `json:"bits_per_sample"`
 			BitsPerRaw    json.Number       `json:"bits_per_raw_sample"`
 			ColorTransfer string            `json:"color_transfer"`
 			Tags          map[string]string `json:"tags"`
-			Disposition   struct {
+			SideDataList  []struct {
+				Rotation int `json:"rotation"`
+			} `json:"side_data_list"`
+			Disposition struct {
 				Default int `json:"default"`
 				Forced  int `json:"forced"`
 			} `json:"disposition"`
@@ -111,10 +115,23 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		switch stream.CodecType {
 		case "video":
 			if media.VideoCodec == "" {
+				width, height := nonNegative(stream.Width), nonNegative(stream.Height)
+				for _, sideData := range stream.SideDataList {
+					rotation := (sideData.Rotation%360 + 360) % 360
+					switch rotation {
+					case 90, 270:
+						width, height = height, width
+					case 0, 180:
+						continue
+					default:
+						width, height = 0, 0
+					}
+					break
+				}
 				media.VideoCodec = stream.CodecName
 				media.VideoProfile, media.VideoLevel = stream.Profile, nonNegative(stream.Level)
-				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), hdrTransfer(stream.ColorTransfer)
-				media.FrameRateMilli = frameRateMilli(stream.AvgFrameRate)
+				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), width, height, hdrTransfer(stream.ColorTransfer)
+				media.FrameRateMilli = max(frameRateMilli(stream.AvgFrameRate), frameRateMilli(stream.RFrameRate))
 				media.BitDepth = bitDepth(stream.BitsPerSample, stream.BitsPerRaw)
 				media.Bitrate = positiveInt64(stream.BitRate)
 				if media.Bitrate == 0 {

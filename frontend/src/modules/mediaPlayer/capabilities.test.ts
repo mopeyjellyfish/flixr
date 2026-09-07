@@ -86,3 +86,18 @@ it('does not assess an output with dimensions the fixed encoder cannot produce',
 	expect(decodingInfo).not.toHaveBeenCalled();
 	expect(result.supports_transcode).toBe(false);
 });
+
+it('assesses the rotated display geometry for a bounded portrait transcode', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
+
+	const result = await browserCapabilities({ ...media, container: 'avi', video_codec: 'mpeg4', width: 1080, height: 1920, audio: [{ codec: 'mp3' }] });
+
+	expect(decodingInfo).toHaveBeenCalledWith({
+		type: 'file',
+		video: { contentType: 'video/mp4; codecs="avc1.640028"', width: 1080, height: 1920, bitrate: 5_000_000, framerate: 30 },
+		audio: { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: '2', bitrate: 128_000, samplerate: 48_000 },
+	});
+	expect(result.supports_transcode).toBe(true);
+});

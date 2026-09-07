@@ -207,11 +207,11 @@ func directCompatible(media MediaProperties, client ClientCapabilities) bool {
 }
 
 func remuxCompatible(media MediaProperties, client ClientCapabilities) bool {
-	return client.SupportsRemux && codecCompatible(media, client) && limitsCompatible(media, client)
+	return client.SupportsRemux && media.VideoBitrate > 0 && (media.AudioCodec == "" || media.AudioBitrate > 0) && codecCompatible(media, client) && limitsCompatible(media, client)
 }
 
 func transcodeCompatible(media MediaProperties, client ClientCapabilities) bool {
-	if !client.SupportsTranscode || media.Width <= 0 || media.Height <= 0 || media.Width%2 != 0 || media.Height%2 != 0 || media.FrameRateMilli <= 0 || media.Width > compatibilityMaxWidth || media.Height > compatibilityMaxHeight || media.FrameRateMilli > compatibilityMaxFrameRate || media.HDR != "" {
+	if !client.SupportsTranscode || media.Width <= 0 || media.Height <= 0 || media.Width%2 != 0 || media.Height%2 != 0 || media.FrameRateMilli <= 0 || !compatibilityDimensions(media.Width, media.Height) || media.FrameRateMilli > compatibilityMaxFrameRate || media.HDR != "" {
 		return false
 	}
 	if _, ok := videoCodecNames[strings.ToLower(strings.TrimSpace(media.VideoCodec))]; !ok {
@@ -223,6 +223,11 @@ func transcodeCompatible(media MediaProperties, client ClientCapabilities) bool 
 		}
 	}
 	return true
+}
+
+func compatibilityDimensions(width, height int) bool {
+	return width <= compatibilityMaxWidth && height <= compatibilityMaxHeight ||
+		width <= compatibilityMaxHeight && height <= compatibilityMaxWidth
 }
 
 func limitsCompatible(media MediaProperties, client ClientCapabilities) bool {

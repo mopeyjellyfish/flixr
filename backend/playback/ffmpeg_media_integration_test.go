@@ -257,6 +257,52 @@ func assertFixtureStreams(t *testing.T, fixture string, want []string) {
 	}
 }
 
+func fixtureBitrateEvidence(t *testing.T, fixture string) (int64, string, int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-show_entries", "format=bit_rate:stream=codec_type,codec_name,bit_rate", "-of", "json", fixture).Output()
+	if err != nil {
+		t.Fatalf("ffprobe bitrates %s: %v", fixture, err)
+	}
+	var result struct {
+		Format struct {
+			Bitrate string `json:"bit_rate"`
+		} `json:"format"`
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+			Bitrate   string `json:"bit_rate"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
+	formatBitrate, _ := strconv.ParseInt(result.Format.Bitrate, 10, 64)
+	var videoBitrate, audioBitrate int64
+	var audioCodec string
+	for _, stream := range result.Streams {
+		bitrate, _ := strconv.ParseInt(stream.Bitrate, 10, 64)
+		if bitrate <= 0 {
+			bitrate = formatBitrate
+		}
+		switch stream.CodecType {
+		case "video":
+			if videoBitrate == 0 {
+				videoBitrate = bitrate
+			}
+		case "audio":
+			if audioCodec == "" {
+				audioCodec, audioBitrate = stream.CodecName, bitrate
+			}
+		}
+	}
+	if videoBitrate <= 0 || audioCodec != "" && audioBitrate <= 0 {
+		t.Fatalf("fixture %s lacks source bitrate evidence", fixture)
+	}
+	return videoBitrate, audioCodec, audioBitrate
+}
+
 func TestRealFFmpegRemuxAndTranscodeProducePlayableHLS(t *testing.T) {
 	for _, tool := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -312,7 +358,11 @@ func TestRealFFmpegRemuxAndTranscodeProducePlayableHLS(t *testing.T) {
 			}))
 			defer server.Close()
 			dir := t.TempDir()
-			name, args, err := ffmpegCommand(test.kind, server.URL, dir, test.start, time.Minute)
+			commandPlan := Plan{Kind: test.kind}
+			if test.kind == Remux {
+				commandPlan.VideoBitrate, commandPlan.AudioCodec, commandPlan.AudioBitrate = fixtureBitrateEvidence(t, fixture)
+			}
+			name, args, err := ffmpegCommand(commandPlan, server.URL, dir, test.start, time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,6 +405,52 @@ func TestRealFFmpegRemuxAndTranscodeProducePlayableHLS(t *testing.T) {
 			assertFragmentedMP4Segments(t, dir, manifest)
 			assertPlaylistDecodes(t, filepath.Join(dir, "index.m3u8"))
 		})
+	}
+}
+
+func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("FLIXR_REQUIRE_MEDIA_INTEGRATION") == "1" {
+				t.Fatalf("%s is required for media integration", tool)
+			}
+			t.Skipf("%s is unavailable", tool)
+		}
+	}
+	work := t.TempDir()
+	base := filepath.Join(work, "base.mp4")
+	rotated := filepath.Join(work, "rotated.mp4")
+	for _, command := range [][]string{
+		{"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24:duration=0.2", "-c:v", "mpeg4", "-q:v", "5", base},
+		{"-hide_banner", "-loglevel", "error", "-y", "-display_rotation:v:0", "90", "-i", base, "-c", "copy", rotated},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		output, err := exec.CommandContext(ctx, "ffmpeg", command...).CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("generate rotated fixture: %v\n%s", err, output)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, rotated)
+	}))
+	defer server.Close()
+	outputDir := filepath.Join(work, "output")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, outputDir, 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
+		t.Fatalf("transcode rotated fixture: %v\n%s", err, output)
+	}
+	rendered := probeAV(t, filepath.Join(outputDir, "index.m3u8"))
+	if rendered.Video.Width != 1080 || rendered.Video.Height != 1920 {
+		t.Fatalf("rotated output geometry = %dx%d, want 1080x1920", rendered.Video.Width, rendered.Video.Height)
 	}
 }
 
@@ -529,7 +625,7 @@ func TestRealFFmpegCancellationAllowsRestart(t *testing.T) {
 	}))
 	defer server.Close()
 	start := func(dir string) Process {
-		name, args, err := ffmpegCommand(Transcode, server.URL, dir, 0, time.Minute)
+		name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, dir, 0, time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}

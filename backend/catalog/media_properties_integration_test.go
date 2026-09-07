@@ -4,13 +4,82 @@ package catalog_test
 
 import (
 	"context"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
+
+func generateMedia(t *testing.T, args ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
+		t.Fatalf("generate media: %v\n%s", err, output)
+	}
+}
+
+func TestCatalogProbesActualVFRAndRotatedDisplayGeometry(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Fatalf("%s is required for media integration", tool)
+		}
+	}
+	root := t.TempDir()
+	work := t.TempDir()
+	vfr := filepath.Join(root, "VFR Burst Check 2026.mp4")
+	base := filepath.Join(work, "rotation-base.mp4")
+	rotated := filepath.Join(root, "Rotated Display Check 2026.mp4")
+	generateMedia(t, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=60:duration=1", "-vf", "select='eq(mod(n,7),0)+eq(mod(n,7),1)+eq(mod(n,7),2)'", "-fps_mode", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", vfr)
+	generateMedia(t, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24:duration=0.2", "-c:v", "mpeg4", "-q:v", "5", base)
+	generateMedia(t, "-hide_banner", "-loglevel", "error", "-y", "-display_rotation:v:0", "90", "-i", base, "-c", "copy", rotated)
+
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := catalog.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetRoots(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := c.Scan(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	items, err := c.List("", 0, 10)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items = %#v, err = %v", items, err)
+	}
+	byTitle := make(map[string]catalog.Item, len(items))
+	for _, item := range items {
+		byTitle[item.Title] = item
+	}
+	vfrItem := byTitle["VFR Burst Check 2026"]
+	if got := vfrItem.FrameRateMilli; got != 60000 {
+		t.Fatalf("VFR ceiling = %d, want 60000", got)
+	}
+	vfrPlan, err := playback.PlanFor(playback.MediaProperties{Container: vfrItem.Container, VideoCodec: vfrItem.VideoCodec, Width: vfrItem.Width, Height: vfrItem.Height, FrameRateMilli: vfrItem.FrameRateMilli, BitDepth: vfrItem.BitDepth}, playback.ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, SupportsRemux: true, SupportsTranscode: true, MaxWidth: 320, MaxHeight: 180, MaxFrameRateMilli: 30000, MaxBitDepth: 8}, playback.ServerReadiness{FFmpeg: true})
+	if vfrPlan.Kind != playback.Unsupported || err == nil {
+		t.Fatalf("VFR plan = %#v, err = %v", vfrPlan, err)
+	}
+	portrait := byTitle["Rotated Display Check 2026"]
+	if portrait.Width != 1080 || portrait.Height != 1920 {
+		t.Fatalf("rotated display geometry = %dx%d, want 1080x1920", portrait.Width, portrait.Height)
+	}
+	plan, err := playback.PlanFor(playback.MediaProperties{Container: portrait.Container, VideoCodec: portrait.VideoCodec, Width: portrait.Width, Height: portrait.Height, FrameRateMilli: portrait.FrameRateMilli}, playback.ClientCapabilities{VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}, playback.ServerReadiness{FFmpeg: true})
+	if err != nil || plan.Kind != playback.Transcode || plan.Width != 1080 || plan.Height != 1920 {
+		t.Fatalf("rotated plan = %#v, err = %v", plan, err)
+	}
+}
 
 func TestCatalogPersistsRealMultitrackCorpusProperties(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())

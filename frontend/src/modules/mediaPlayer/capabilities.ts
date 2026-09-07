@@ -17,6 +17,11 @@ const compatibility = {
 
 type DecodingType = 'file' | 'media-source';
 
+function compatibilityDimensions(width: number, height: number): boolean {
+	return width <= compatibility.maxWidth && height <= compatibility.maxHeight ||
+		width <= compatibility.maxHeight && height <= compatibility.maxWidth;
+}
+
 function h264ContentType(profile: string | undefined, level: number | undefined): string | undefined {
 	const prefix = ({ Baseline: '42e0', Main: '4d40', High: '6400' } as Record<string, string>)[profile ?? ''];
 	if (!prefix || !level || level <= 0 || level > 255) return undefined;
@@ -43,8 +48,8 @@ function transcodeConfiguration(media: CatalogItem, type: DecodingType): MediaDe
 	const videoCodec = media.video_codec?.toLowerCase();
 	const audioCodec = media.audio?.[0]?.codec.toLowerCase();
 	if (!videoCodec || !transcodableVideo.has(videoCodec) || audioCodec && !transcodableAudio.has(audioCodec) ||
-		!media.width || !media.height || media.width % 2 !== 0 || media.height % 2 !== 0 || !media.frame_rate_milli || media.width > compatibility.maxWidth ||
-		media.height > compatibility.maxHeight || media.frame_rate_milli > compatibility.maxFrameRateMilli || media.hdr) return undefined;
+		!media.width || !media.height || media.width % 2 !== 0 || media.height % 2 !== 0 || !media.frame_rate_milli || !compatibilityDimensions(media.width, media.height) ||
+		media.frame_rate_milli > compatibility.maxFrameRateMilli || media.hdr) return undefined;
 	return {
 		type,
 		video: { contentType: compatibility.videoContentType, width: media.width, height: media.height, bitrate: compatibility.videoBitrate, framerate: compatibility.maxFrameRateMilli / 1000 },

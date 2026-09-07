@@ -13,7 +13,7 @@ import (
 
 const hlsSegmentDuration = 4 * time.Second
 
-func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
+func ffmpegCommand(plan Plan, inputURL, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
 	parsed, err := url.Parse(inputURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", nil, fmt.Errorf("invalid loopback input URL")
@@ -23,8 +23,8 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return "", nil, fmt.Errorf("input URL is not loopback")
 	}
-	if kind != Remux && kind != Transcode {
-		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", kind)
+	if plan.Kind != Remux && plan.Kind != Transcode {
+		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", plan.Kind)
 	}
 	if outputDir == "" || !filepath.IsAbs(outputDir) {
 		return "", nil, fmt.Errorf("output directory must be absolute")
@@ -38,8 +38,14 @@ func ffmpegCommand(kind Kind, inputURL, outputDir string, start, segmentWindow t
 		args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
 	}
 	args = append(args, "-re", "-i", inputURL, "-map", "0:v:0", "-map", "0:a:0?")
-	if kind == Remux {
-		args = append(args, "-c", "copy")
+	if plan.Kind == Remux {
+		if plan.VideoBitrate <= 0 || plan.AudioCodec != "" && plan.AudioBitrate <= 0 {
+			return "", nil, fmt.Errorf("remux bitrate evidence is required")
+		}
+		args = append(args, "-c", "copy", "-b:v", strconv.FormatInt(plan.VideoBitrate, 10))
+		if plan.AudioCodec != "" {
+			args = append(args, "-b:a", strconv.FormatInt(plan.AudioBitrate, 10))
+		}
 	} else {
 		args = append(args,
 			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),

@@ -104,7 +104,7 @@ func testManager(t *testing.T, mutate func(*Settings)) (*Manager, *fakeExecutor)
 
 func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	first, err := manager.Create("profile-a", "film-1", plan, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestManagerForcesKillAfterGracePeriod(t *testing.T) {
 		settings.ProcessGrace = 5 * time.Millisecond
 	})
 	executor.ignoreSignal = true
-	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 
 func TestRetainedRangeUsesObservedSegmentDurations(t *testing.T) {
 	manager, _ := testManager(t, nil)
-	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestRetainedRangeUsesObservedSegmentDurations(t *testing.T) {
 	if !ok || start != 7_500 || end != 16_500 {
 		t.Fatalf("slid retained range = %d..%d, %v", start, end, ok)
 	}
-	shared, err := manager.Create("profile-b", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 8_000)
+	shared, err := manager.Create("profile-b", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 8_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestManagerExpiryAndByteLimitReclaimGenerations(t *testing.T) {
 		settings.GenerationBytes = 8
 		settings.GlobalBytes = 16
 	})
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	session, err := manager.Create("profile-a", "film-1", plan, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +331,7 @@ func TestCleanupOrphansRefusesUnownedNonEmptyDirectory(t *testing.T) {
 
 func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	dir := t.TempDir()
-	name, args, err := ffmpegCommand(Transcode, "http://127.0.0.1:8787/api/v1/playback/input/server-token", dir, time.Second, time.Minute)
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", dir, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,8 +344,21 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
 		}
 	}
-	if _, _, err := ffmpegCommand(Remux, "https://media.example/file", dir, 0, time.Minute); err == nil {
+	if _, _, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1}, "https://media.example/file", dir, 0, time.Minute); err == nil {
 		t.Fatal("accepted a non-loopback input")
+	}
+}
+
+func TestFFmpegCommandSuppliesRemuxBitrateEvidenceForTheMasterPlaylist(t *testing.T) {
+	_, args, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 4_000_000, AudioCodec: "aac", AudioBitrate: 192_000}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", t.TempDir(), 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, exact := range []string{"-b:v 4000000", "-b:a 192000"} {
+		if !strings.Contains(joined, exact) {
+			t.Fatalf("remux command %q lacks master-playlist evidence %q", joined, exact)
+		}
 	}
 }
 
@@ -403,7 +416,7 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
