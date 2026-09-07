@@ -149,6 +149,13 @@ a:focus-visible, summary:focus-visible { outline: 3px solid var(--text); outline
 .owner-section details { margin-top: 2rem; }
 .owner-section summary { cursor: pointer; min-height: 44px; padding: 0.7rem 0; }
 .owner-notice { padding: 1rem; border-left: 3px solid var(--interaction); background: var(--surface); }
+.identity-repair, .identity-repair-error { display: grid; gap: 0.9rem; max-width: 44rem; margin-top: 1.5rem; padding: 1.1rem; border: 1px solid var(--hairline); border-radius: 0.75rem; background: #ffffff04; }
+.identity-repair h4, .identity-repair p, .identity-repair-error p { margin: 0; }
+.identity-repair fieldset { gap: 0.75rem; }
+.identity-repair fieldset label { grid-template-columns: auto 1fr; align-items: start; font-weight: 400; line-height: 1.45; }
+.identity-repair fieldset input { width: 1.15rem; min-height: 1.15rem; margin-top: 0.15rem; }
+.identity-repair > button, .identity-repair-error > button { justify-self: start; }
+.identity-repair-error { border-left: 3px solid var(--interaction); }
 .settings-list { display: grid; gap: .65rem; margin: 1rem 0; }
 .setting-row { display: grid; gap: .2rem; padding: .8rem; border: 1px solid var(--hairline); border-radius: .55rem; }
 .setting-row span, .setting-row small { color: var(--muted); overflow-wrap: anywhere; }

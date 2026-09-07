@@ -167,10 +167,10 @@ func (c *Catalog) viewerItems(profileID, media string) ([]viewerItem, error) {
 	}
 	rows, err := c.db.Query(`SELECT id,kind,title,local_only,provider_id,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo,last_progress_at,list_added,completed FROM (
 		SELECT i.id,'film' AS kind,i.title,i.local_only,i.provider_id,i.year,i.synopsis,i.poster,i.backdrop,i.genres_json,i.added_at,i.playable,i.demo,COALESCE(p.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added,COALESCE(p.completed,0) AS completed
-		FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? LEFT JOIN profile_film_list l ON l.catalog_id=i.id AND l.profile_id=? WHERE i.series_id=''
+		FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? LEFT JOIN profile_film_list l ON l.catalog_id=i.id AND l.profile_id=? WHERE i.series_id='' AND i.merged_into=''
 		UNION ALL
 		SELECT s.id,'series' AS kind,s.title,s.local_only,s.provider_id,s.year,s.synopsis,s.poster,s.backdrop,s.genres_json,s.added_at,s.playable,s.demo,COALESCE(w.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added,COALESCE(w.completed,0) AS completed
-		FROM catalog_series s LEFT JOIN (SELECT i.series_id,MAX(COALESCE(p.updated_at,0)) AS updated_at,MIN(COALESCE(p.completed,0)) AS completed FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? WHERE i.series_id<>'' GROUP BY i.series_id) w ON w.series_id=s.id LEFT JOIN profile_series_list l ON l.catalog_id=s.id AND l.profile_id=?
+		FROM catalog_series s LEFT JOIN (SELECT i.series_id,MAX(COALESCE(p.updated_at,0)) AS updated_at,MIN(COALESCE(p.completed,0)) AS completed FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? WHERE i.series_id<>'' GROUP BY i.series_id) w ON w.series_id=s.id LEFT JOIN profile_series_list l ON l.catalog_id=s.id AND l.profile_id=? WHERE s.merged_into=''
 	) WHERE ?='all' OR kind=?`, profileID, profileID, profileID, profileID, media, media)
 	if err != nil {
 		return nil, fmt.Errorf("query viewer catalog: %w", err)
@@ -297,12 +297,20 @@ func publicItems(items []viewerItem) []ViewerItem {
 }
 
 func (c *Catalog) PlaybackItem(id string) (Item, error) {
-	item, ok := c.Item(id)
+	c.mu.RLock()
+	item, ok := c.playbackSource(id)
+	c.mu.RUnlock()
 	if !ok {
 		return Item{}, ErrCatalogNotFound
 	}
 	if !item.Playable {
 		return Item{}, ErrNotPlayable
 	}
+	c.mu.RLock()
+	item.sourceRoot = c.film
+	if item.rootKind == "episode" {
+		item.sourceRoot = c.tv
+	}
+	c.mu.RUnlock()
 	return item, nil
 }

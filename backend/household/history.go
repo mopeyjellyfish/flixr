@@ -30,15 +30,16 @@ const (
 )
 
 type ViewingEvent struct {
-	ID         string          `json:"id"`
-	CatalogID  string          `json:"catalog_id"`
-	Title      string          `json:"title"`
-	Kind       string          `json:"kind"`
-	Type       EventType       `json:"type"`
-	Provenance EventProvenance `json:"provenance"`
-	SourceID   string          `json:"source_id,omitempty"`
-	SourceTime *int64          `json:"source_time"`
-	RecordedAt int64           `json:"recorded_at"`
+	OriginalCatalogID string          `json:"original_catalog_id"`
+	ID                string          `json:"id"`
+	CatalogID         string          `json:"catalog_id"`
+	Title             string          `json:"title"`
+	Kind              string          `json:"kind"`
+	Type              EventType       `json:"type"`
+	Provenance        EventProvenance `json:"provenance"`
+	SourceID          string          `json:"source_id,omitempty"`
+	SourceTime        *int64          `json:"source_time"`
+	RecordedAt        int64           `json:"recorded_at"`
 }
 type HistoryPage struct {
 	Events []ViewingEvent `json:"events"`
@@ -173,7 +174,7 @@ func (m *Manager) History(profileID string, limit int, before string) (HistoryPa
 	if m.db == nil {
 		return HistoryPage{Events: []ViewingEvent{}}, nil
 	}
-	rows, err := m.db.Query(`SELECT e.event_id,e.catalog_id,e.title,e.kind,e.event_type,e.provenance,e.source_id,e.source_time,e.recorded_at FROM viewing_events e WHERE e.profile_id=? AND (e.recorded_at<? OR (e.recorded_at=? AND e.event_id<?)) AND NOT EXISTS (SELECT 1 FROM viewing_history_clears h WHERE h.profile_id=e.profile_id AND h.undone_at=0 AND (e.rowid<=h.cleared_rowid)) ORDER BY e.recorded_at DESC,e.event_id DESC LIMIT ?`, profileID, func() int64 {
+	rows, err := m.db.Query(`SELECT e.event_id,COALESCE((SELECT m.survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=e.catalog_id AND m.state='active'),e.catalog_id),e.catalog_id,e.title,e.kind,e.event_type,e.provenance,e.source_id,e.source_time,e.recorded_at FROM viewing_events e WHERE e.profile_id=? AND (e.recorded_at<? OR (e.recorded_at=? AND e.event_id<?)) AND NOT EXISTS (SELECT 1 FROM viewing_history_clears h WHERE h.profile_id=e.profile_id AND h.undone_at=0 AND (e.rowid<=h.cleared_rowid)) ORDER BY e.recorded_at DESC,e.event_id DESC LIMIT ?`, profileID, func() int64 {
 		if c.At == 0 {
 			return 1 << 62
 		}
@@ -197,7 +198,7 @@ func (m *Manager) History(profileID string, limit int, before string) (HistoryPa
 	for rows.Next() {
 		var e ViewingEvent
 		var source sql.NullInt64
-		if err := rows.Scan(&e.ID, &e.CatalogID, &e.Title, &e.Kind, &e.Type, &e.Provenance, &e.SourceID, &source, &e.RecordedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.CatalogID, &e.OriginalCatalogID, &e.Title, &e.Kind, &e.Type, &e.Provenance, &e.SourceID, &source, &e.RecordedAt); err != nil {
 			return HistoryPage{}, err
 		}
 		if source.Valid {
