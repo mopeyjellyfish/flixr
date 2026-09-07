@@ -387,8 +387,7 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		settings.HeartbeatInterval = time.Second
 		settings.ProcessGrace = 100 * time.Millisecond
 		executor := &fakeExecutor{}
-		var saved atomic.Int64
-		manager, err := NewManager(ManagerConfig{Settings: settings, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second, SaveProgress: func(_, _ string, positionMS int64) error { saved.Store(positionMS); return nil }})
+		manager, err := NewManager(ManagerConfig{Settings: settings, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,9 +405,6 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		}
 		if !executor.processes[0].signaled.Load() {
 			t.Fatal("abandoned generation process was not interrupted")
-		}
-		if got := saved.Load(); got != 222 {
-			t.Fatalf("saved progress = %d, want 222", got)
 		}
 		if err := manager.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)

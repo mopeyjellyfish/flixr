@@ -782,11 +782,8 @@ func (m *Manager) Sweep(now time.Time) {
 		}
 	}
 	m.mu.Unlock()
-	if m.saveProgress != nil {
-		for _, session := range expired {
-			_ = m.saveProgress(session.ProfileID, session.CatalogID, session.PositionMS)
-		}
-	}
+	// Progress is durably recorded by ordered heartbeat/seek requests. Cleanup must
+	// not manufacture a newer observation and overwrite an explicit watched action.
 	for _, gen := range retire {
 		m.retireGeneration(context.Background(), gen)
 	}
@@ -814,11 +811,8 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.sessions = map[string]Session{}
 	m.mu.Unlock()
-	if m.saveProgress != nil {
-		for _, session := range sessions {
-			_ = m.saveProgress(session.ProfileID, session.CatalogID, session.PositionMS)
-		}
-	}
+	// See Sweep: session teardown has no observation timestamp and cannot safely
+	// supersede a durable explicit action.
 	startsDone := make(chan struct{})
 	go func() {
 		m.startWG.Wait()

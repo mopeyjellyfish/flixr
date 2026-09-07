@@ -69,13 +69,13 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     hls.current = next;
   }, []);
 
-  const heartbeat = useCallback(async () => {
+  const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
     if (!plan || finalizing.current) return;
     const positionMs = currentPosition();
     try {
-      await api.playbackHeartbeat(plan.session_id, positionMs);
+      await api.playbackHeartbeat(plan.session_id, positionMs, ended);
     } catch (error: unknown) {
       playback.current = null;
       dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'The local playback connection was interrupted.' });
@@ -105,7 +105,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
     const pageHide = () => {
       const plan = playback.current;
       if (!plan || finalizing.current) return;
-      const body = new Blob([JSON.stringify({ position_ms: currentPosition() })], { type: 'application/json' });
+      const body = new Blob([JSON.stringify({ position_ms: currentPosition(), observed_at: Date.now() })], { type: 'application/json' });
       navigator.sendBeacon(plan.heartbeat_url, body);
     };
     window.addEventListener('pagehide', pageHide);
@@ -218,7 +218,7 @@ export function Player({ catalogID, startPositionMS, active = true, onExit }: { 
             }}
             onCanPlay={() => dispatch({ type: video.current?.paused ? 'pause' : 'play' })}
             onError={() => dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' })}
-            onEnded={() => { dispatch({ type: 'pause' }); void heartbeat(); }}
+            onEnded={() => { dispatch({ type: 'pause' }); void heartbeat(true); }}
             onPlaying={() => dispatch({ type: 'play' })}
             onPause={() => {
               dispatch({ type: 'pause' });

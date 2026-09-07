@@ -41,6 +41,7 @@ type viewerItem struct {
 	Item
 	lastProgress int64
 	listAdded    int64
+	completed    bool
 }
 
 func validMedia(media string) bool { return media == "all" || media == "film" || media == "series" }
@@ -100,6 +101,47 @@ func (c *Catalog) SetListed(profileID, kind, id string, listed bool) error {
 	return nil
 }
 
+// WatchedItems resolves a public action target to the playable records it owns.
+func (c *Catalog) WatchedItems(kind, id string, season int) ([]string, error) {
+	if c.db == nil || id == "" {
+		return nil, ErrCatalogNotFound
+	}
+	query, args := "", []any{}
+	switch kind {
+	case "film", "episode":
+		query, args = "SELECT id FROM catalog_items WHERE id=? AND kind=?", []any{id, kind}
+	case "series":
+		query, args = "SELECT id FROM catalog_items WHERE series_id=?", []any{id}
+	case "season":
+		if season < 1 {
+			return nil, ErrCatalogNotFound
+		}
+		query, args = "SELECT id FROM catalog_items WHERE series_id=? AND season_id=?", []any{id, season}
+	default:
+		return nil, ErrCatalogNotFound
+	}
+	rows, err := c.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("resolve watched items: %w", err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var itemID string
+		if err := rows.Scan(&itemID); err != nil {
+			return nil, fmt.Errorf("scan watched item: %w", err)
+		}
+		ids = append(ids, itemID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate watched items: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, ErrCatalogNotFound
+	}
+	return ids, nil
+}
+
 func (c *Catalog) Viewer(profileID, media string) (ViewerModel, error) {
 	preference, err := c.Preference(profileID, media)
 	if err != nil {
@@ -123,12 +165,12 @@ func (c *Catalog) viewerItems(profileID, media string) ([]viewerItem, error) {
 	if c.db == nil {
 		return nil, ErrInvalidViewerMode
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,local_only,provider_id,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo,last_progress_at,list_added FROM (
-		SELECT i.id,'film' AS kind,i.title,i.local_only,i.provider_id,i.year,i.synopsis,i.poster,i.backdrop,i.genres_json,i.added_at,i.playable,i.demo,COALESCE(p.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added
+	rows, err := c.db.Query(`SELECT id,kind,title,local_only,provider_id,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo,last_progress_at,list_added,completed FROM (
+		SELECT i.id,'film' AS kind,i.title,i.local_only,i.provider_id,i.year,i.synopsis,i.poster,i.backdrop,i.genres_json,i.added_at,i.playable,i.demo,COALESCE(p.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added,COALESCE(p.completed,0) AS completed
 		FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? LEFT JOIN profile_film_list l ON l.catalog_id=i.id AND l.profile_id=? WHERE i.series_id=''
 		UNION ALL
-		SELECT s.id,'series' AS kind,s.title,s.local_only,s.provider_id,s.year,s.synopsis,s.poster,s.backdrop,s.genres_json,s.added_at,s.playable,s.demo,COALESCE(w.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added
-		FROM catalog_series s LEFT JOIN (SELECT i.series_id,MAX(p.updated_at) AS updated_at FROM catalog_items i JOIN progress p ON p.catalog_id=i.id WHERE p.profile_id=? GROUP BY i.series_id) w ON w.series_id=s.id LEFT JOIN profile_series_list l ON l.catalog_id=s.id AND l.profile_id=?
+		SELECT s.id,'series' AS kind,s.title,s.local_only,s.provider_id,s.year,s.synopsis,s.poster,s.backdrop,s.genres_json,s.added_at,s.playable,s.demo,COALESCE(w.updated_at,0) AS last_progress_at,COALESCE(l.added_at,0) AS list_added,COALESCE(w.completed,0) AS completed
+		FROM catalog_series s LEFT JOIN (SELECT i.series_id,MAX(COALESCE(p.updated_at,0)) AS updated_at,MIN(COALESCE(p.completed,0)) AS completed FROM catalog_items i LEFT JOIN progress p ON p.catalog_id=i.id AND p.profile_id=? WHERE i.series_id<>'' GROUP BY i.series_id) w ON w.series_id=s.id LEFT JOIN profile_series_list l ON l.catalog_id=s.id AND l.profile_id=?
 	) WHERE ?='all' OR kind=?`, profileID, profileID, profileID, profileID, media, media)
 	if err != nil {
 		return nil, fmt.Errorf("query viewer catalog: %w", err)
@@ -137,15 +179,15 @@ func (c *Catalog) viewerItems(profileID, media string) ([]viewerItem, error) {
 	items := []viewerItem{}
 	for rows.Next() {
 		var item viewerItem
-		var local, playable, demo int
+		var local, playable, demo, completed int
 		var genres string
-		if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &local, &item.ProviderID, &item.Year, &item.Synopsis, &item.Poster, &item.Backdrop, &genres, &item.AddedAt, &playable, &demo, &item.lastProgress, &item.listAdded); err != nil {
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Title, &local, &item.ProviderID, &item.Year, &item.Synopsis, &item.Poster, &item.Backdrop, &genres, &item.AddedAt, &playable, &demo, &item.lastProgress, &item.listAdded, &completed); err != nil {
 			return nil, fmt.Errorf("scan viewer catalog: %w", err)
 		}
 		if err := json.Unmarshal([]byte(genres), &item.Genres); err != nil {
 			return nil, fmt.Errorf("decode viewer genres: %w", err)
 		}
-		item.LocalOnly, item.Playable, item.Demo = local != 0, playable != 0, demo != 0
+		item.LocalOnly, item.Playable, item.Demo, item.completed = local != 0, playable != 0, demo != 0, completed != 0
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -156,7 +198,7 @@ func (c *Catalog) viewerItems(profileID, media string) ([]viewerItem, error) {
 
 func viewerSections(items []viewerItem) []ViewerSection {
 	sections := []ViewerSection{
-		{Name: "Continue Watching", Items: publicItems(filterViewerItems(items, func(item viewerItem) bool { return item.lastProgress > 0 }, "watched"))},
+		{Name: "Continue Watching", Items: publicItems(filterViewerItems(items, func(item viewerItem) bool { return item.lastProgress > 0 && !item.completed }, "watched"))},
 		{Name: "New", Items: publicItems(sortedViewerItems(items, "added"))},
 		{Name: "My List", Items: publicItems(filterViewerItems(items, func(item viewerItem) bool { return item.listAdded > 0 }, "list"))},
 	}

@@ -101,7 +101,7 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
   const video = document.querySelector('video') as HTMLVideoElement;
   video.currentTime = 5;
   fireEvent.seeked(video);
-  await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && request.body === JSON.stringify({ position_ms: 7_000 }))).toBe(true));
+  await waitFor(() => expect(requests.some((request) => request.path.endsWith('/seek') && JSON.parse(request.body ?? '{}').position_ms === 7_000)).toBe(true));
   hls.error?.({}, { fatal: true });
   expect(await screen.findByRole('alert')).toHaveTextContent(/compatibility stream stopped unexpectedly/i);
 });

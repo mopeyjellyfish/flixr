@@ -18,6 +18,8 @@ type playbackPlanRequest struct {
 
 type playbackPositionRequest struct {
 	PositionMS int64 `json:"position_ms"`
+	ObservedAt int64 `json:"observed_at"`
+	Ended      bool  `json:"ended"`
 }
 
 type playbackSettingsRequest struct {
@@ -207,7 +209,9 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 		playbackFailure(w, err)
 		return
 	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, body.PositionMS); err != nil {
+	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
+	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS*10 >= item.DurationMS*9)
+	if err := s.house.RecordProgress(session.ProfileID, session.CatalogID, body.PositionMS, body.ObservedAt, completed); err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
@@ -232,7 +236,9 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 		playbackFailure(w, err)
 		return
 	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, body.PositionMS); err != nil {
+	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
+	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS*10 >= item.DurationMS*9)
+	if err := s.house.RecordProgress(session.ProfileID, session.CatalogID, body.PositionMS, body.ObservedAt, completed); err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
@@ -245,10 +251,6 @@ func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.playbackSession(w, r, false)
 	if !ok {
-		return
-	}
-	if err := s.house.Progress(s.session(r), session.CatalogID, session.PositionMS); err != nil {
-		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
 	if !s.playback.Stop(session.ID, session.ProfileID) {
