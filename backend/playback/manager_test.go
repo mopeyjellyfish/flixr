@@ -53,6 +53,24 @@ type fakeExecutor struct {
 	startErr     error
 }
 
+type pauseSuccessfulManifestStatFS struct {
+	afero.Fs
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
+	info, err := f.Fs.Stat(name)
+	if err == nil && filepath.Base(name) == "index.m3u8" {
+		f.once.Do(func() {
+			close(f.observed)
+			<-f.release
+		})
+	}
+	return info, err
+}
+
 func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
@@ -309,6 +327,48 @@ func TestManagerRejectsAViewerCreateRevokedWhileWaitingForManifest(t *testing.T)
 	}
 	if len(manager.Status().Generations) != 0 {
 		t.Fatal("revoked manifest candidate retained a generation")
+	}
+}
+
+func TestManagerRejectsAViewerRevokedAfterSuccessfulManifestWait(t *testing.T) {
+	settings := DefaultSettings(t.TempDir())
+	settings.LeaseTTL = 3 * time.Second
+	settings.HeartbeatInterval = time.Second
+	settings.ProcessGrace = 10 * time.Millisecond
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 2 << 20
+	settings.MaxGenerations = 2
+	fs := &pauseSuccessfulManifestStatFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+	executor := &fakeExecutor{}
+	manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		result <- err
+	}()
+	<-fs.observed
+
+	manager.StopViewer("viewer-a")
+	close(fs.release)
+
+	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("create error = %v, want session invalid", err)
+	}
+	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
+		t.Fatal("revoked successful manifest candidate was not interrupted")
+	}
+	if len(manager.Status().Generations) != 0 {
+		t.Fatal("revoked successful manifest candidate retained a generation")
 	}
 }
 

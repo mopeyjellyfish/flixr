@@ -422,11 +422,19 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 		}
 	}
 	m.mu.Lock()
-	if current := m.generations[gen.id]; current == gen {
+	currentGeneration := m.generations[gen.id]
+	currentSession, sessionAdmitted := m.sessions[session.ID]
+	_, viewerRevoked = m.revokedViewers[viewerID]
+	admitted := !m.closed && (viewerID == "" || !viewerRevoked) && currentGeneration == gen && sessionAdmitted && currentSession.GenerationID == gen.id && currentSession.ViewerID == viewerID && currentSession.ProfileID == profileID
+	if admitted {
 		gen.ready = true
 	}
 	delete(m.pendingJobs, jobKey)
 	m.mu.Unlock()
+	if !admitted {
+		_ = m.StopForViewer(session.ID, viewerID, profileID)
+		return Session{}, ErrSessionInvalid
+	}
 	return session, nil
 }
 
