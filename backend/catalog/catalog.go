@@ -21,6 +21,7 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 	"github.com/spf13/afero"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -122,22 +123,42 @@ type ScanStatus struct {
 	Message    string `json:"message,omitempty"`
 }
 
+type ArtworkMaintenanceStatus struct {
+	LastRun time.Time
+	Outcome string
+}
+
 type Catalog struct {
-	demo       bool
-	demoSource string
-	mu         sync.RWMutex
-	db         *sqlite.DB
-	fs         afero.Fs
-	film, tv   string
-	items      map[string]Item
-	series     map[string]Series
-	prober     Prober
-	provider   MetadataProvider
-	token      string
-	scanning   bool
-	cancel     context.CancelFunc
-	done       chan struct{}
-	status     ScanStatus
+	demo              bool
+	demoSource        string
+	mu                sync.RWMutex
+	db                *sqlite.DB
+	fs                afero.Fs
+	film, tv          string
+	items             map[string]Item
+	series            map[string]Series
+	prober            Prober
+	provider          MetadataProvider
+	token             string
+	scanning          bool
+	cancel            context.CancelFunc
+	done              chan struct{}
+	status            ScanStatus
+	artworkMu         sync.Mutex
+	artworkGroup      singleflight.Group
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	maintenanceStatus ArtworkMaintenanceStatus
+	maintenanceDir    afero.File
+	derivativeBytes   int64
+	derivativeCount   int
+	derivativeReady   bool
+}
+
+func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
+	c.artworkMu.Lock()
+	defer c.artworkMu.Unlock()
+	return c.maintenanceStatus
 }
 
 func New() *Catalog {
@@ -229,6 +250,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	_ = db.QueryRow("SELECT value FROM settings WHERE key='tv_root'").Scan(&c.tv)
 	_ = db.QueryRow("SELECT value FROM settings WHERE key='tmdb_token'").Scan(&c.token)
 	c.status = c.lastStatus()
+	c.startArtworkMaintenance()
 	return c, nil
 }
 
@@ -848,18 +870,25 @@ func (c *Catalog) Cancel() {
 }
 func (c *Catalog) Shutdown(ctx context.Context) error {
 	c.mu.RLock()
-	cancel, done := c.cancel, c.done
+	cancel, done, maintenanceCancel, maintenanceDone := c.cancel, c.done, c.maintenanceCancel, c.maintenanceDone
 	c.mu.RUnlock()
-	if cancel == nil {
-		return nil
+	if cancel != nil {
+		cancel()
 	}
-	cancel()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	if maintenanceCancel != nil {
+		maintenanceCancel()
 	}
+	for _, wait := range []chan struct{}{done, maintenanceDone} {
+		if wait == nil {
+			continue
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {

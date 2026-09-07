@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { Avatar, profileAvatar } from './Feedback';
+import { Artwork, Avatar, profileAvatar } from './Feedback';
 import { BootSplash } from './BootSplash';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -29,4 +29,8 @@ it('generates stable offline pictures and falls back when a supplied picture fai
   const image = container.querySelector('img')!;
   fireEvent.error(image);
   expect(image).toHaveAttribute('src', profileAvatar('Alex'));
+});
+it('requests a capped derivative for catalog artwork', () => {
+  const { container } = render(<Artwork src="/api/v1/catalog/artwork/film/poster" width={210} />);
+  expect(container.querySelector('img')).toHaveAttribute('src', '/api/v1/catalog/artwork/film/poster?w=240');
 });

@@ -427,14 +427,19 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return
 	}
-	data, contentType, err := s.catalog.Artwork(r.PathValue("id"), r.PathValue("kind"))
+	width, _ := strconv.Atoi(r.URL.Query().Get("w"))
+	data, contentType, err := s.catalog.ArtworkSized(r.Context(), r.PathValue("id"), r.PathValue("kind"), width)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_artwork_not_found")
 		return
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	// Artwork is refreshed at a stable catalog URL, so a browser must revalidate it.
+	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
