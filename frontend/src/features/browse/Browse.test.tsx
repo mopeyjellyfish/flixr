@@ -2,8 +2,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Browse } from './Browse';
 import { strictFetch } from '../../test/http';
+import workflow from '../../../../docs/features/viewer-experience/workflow-regression.v1.json';
 
 const viewerFetch = (json: unknown) => strictFetch([{ path: /^\/api\/v1\/catalog\/view\?media=(all|film|series)$/, handle: () => ({ json }) }]);
+const workflowTask = (id: string) => {
+  const task = workflow.tasks.find((candidate) => candidate.id === id);
+  if (!task || !('actions' in task)) throw new Error(`Missing action-count fixture for ${id}`);
+  return task;
+};
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/home'); });
 describe('browse', () => {
@@ -15,10 +21,14 @@ describe('browse', () => {
     render(<Browse onExit={() => undefined} />);
     const first = await screen.findByTestId('card-0');
     expect(document.querySelectorAll('[data-card]').length).toBeLessThan(30);
+    let actions = 0;
+    actions += 1;
     fireEvent.click(first);
     await waitFor(() => expect(screen.getByRole('dialog')).toBeVisible());
+    actions += 1;
     fireEvent.click(screen.getByRole('button', { name: /close details/i }));
     await waitFor(() => expect(first).toHaveFocus());
+    expect(actions).toBe(workflowTask('return-from-details').actions);
   });
 
   it('opens the focal title through a semantic detail action', async () => {
@@ -78,18 +88,29 @@ describe('browse', () => {
 
   it('renders persistent destinations and lets the route update the active destination', async () => {
     const viewer = { preference: { view: 'rows' as const, sort: 'title' as const }, sections: [{ name: 'Continue Watching', items: [] }, { name: 'New', items: [{ id: 'film-1', title: 'Arrival', kind: 'film', local_only: false, playable: true, listed: false }] }, { name: 'My List', items: [] }, { name: 'Drama', items: [] }] };
-    const navigate = vi.fn();
+    let actions = 0;
+    const navigate = vi.fn(() => { actions += 1; });
     vi.spyOn(globalThis, 'fetch').mockImplementation(viewerFetch(viewer));
     const { rerender } = render(<Browse onExit={() => undefined} onNavigate={navigate} />);
 		expect(await screen.findByRole('navigation', { name: 'Main navigation' })).toHaveTextContent('HomeMoviesTV');
     fireEvent.click(await screen.findByRole('button', { name: 'Play Arrival' }));
     expect(navigate).toHaveBeenLastCalledWith('/play/film-1');
+		actions = 0;
 		expect((await screen.findAllByRole('heading', { level: 2 })).map((heading) => heading.textContent)).toEqual(['Continue Watching', 'New', 'My List', 'Drama']);
 		fireEvent.click(screen.getByRole('button', { name: 'Movies' }));
     expect(navigate).toHaveBeenLastCalledWith('/movies');
+    expect(actions).toBe(workflowTask('library-entry').actions);
     rerender(<Browse mode="movies" onExit={() => undefined} onNavigate={navigate} />);
 		expect(screen.getByRole('button', { name: 'Movies' })).toHaveAttribute('aria-current', 'page');
 		expect(screen.getByRole('button', { name: 'Home' })).not.toHaveAttribute('aria-current');
+		actions = 0;
+		fireEvent.click(screen.getByRole('button', { name: 'TV' }));
+		expect(navigate).toHaveBeenLastCalledWith('/tv');
+		expect(actions).toBe(workflowTask('media-destination-switching').actions);
+		actions = 0;
+		fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+		expect(navigate).toHaveBeenLastCalledWith('/search');
+		expect(actions).toBe(workflowTask('search').actions);
 	});
 
 it('persists viewer controls, updates My List, and never offers Play for a demo title', async () => {

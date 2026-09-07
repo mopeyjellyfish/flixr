@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "issue": 116,
+  "status": "partial",
+  "purpose": "Executable baseline for familiar local-library workflows. Action counts exclude typing and playback time.",
+  "coverage": {
+    "desktop": "covered by mocked Chromium, Firefox, and WebKit journeys",
+    "touch": "pending physical-device acceptance",
+    "remote": "pending physical remote-control acceptance"
+  },
+  "tasks": [
+    {
+      "id": "library-entry",
+      "starting_route": "/home",
+      "actions": 1,
+      "expected": "Movies and TV are direct visible destinations; neither requires a promotional row or hosted sign-in.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked viewer journey"
+    },
+    {
+      "id": "media-destination-switching",
+      "starting_route": "/movies",
+      "actions": 1,
+      "expected": "Switching between Movies and TV keeps each profile's saved view and sort choice.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked viewer journey"
+    },
+    {
+      "id": "folder-navigation",
+      "status": "pending-issues-114-and-40",
+      "expected": "Folder hierarchy, back navigation, and folder scroll restoration require named libraries and folder browsing.",
+      "evidence": "Issues #40 and #114 own the implementation and acceptance."
+    },
+    {
+      "id": "search",
+      "starting_route": "/home",
+      "actions": 1,
+      "expected": "Search is reachable from the visible header and accepts a local title query.",
+      "evidence": "frontend/e2e/mock-api.spec.ts: mocked delivery-unit states"
+    },
+    {
+      "id": "return-from-details",
+      "starting_route": "/home",
+      "actions": 2,
+      "expected": "Open then close details restores focus to the originating library card and preserves its rail position.",
+      "evidence": "frontend/src/features/browse/Browse.test.tsx and frontend/e2e/mock-api.spec.ts: mocked delivery-unit states"
+    },
+    {
+      "id": "layout-after-restart",
+      "starting_route": "/movies",
+      "actions": 0,
+      "expected": "A saved per-profile view and sort are returned after the local database is reopened.",
+      "evidence": "backend/catalog/viewer_test.go: TestViewerPreferenceSurvivesDatabaseReopen"
+    },
+    {
+      "id": "resume",
+      "status": "covered-by-existing-playback-acceptance",
+      "expected": "Selecting a local title resumes through the existing playback flow.",
+      "evidence": "frontend/e2e/production.spec.ts"
+    },
+    {
+      "id": "track-changes",
+      "status": "pending-issues-30-and-31",
+      "expected": "Audio-track controls (#30) and captions/subtitles (#31) remain visible in-player controls when delivered.",
+      "evidence": "Issues #30 and #31 own their respective implementation and acceptance."
+    },
+    {
+      "id": "next-episode",
+      "status": "pending-issue-29",
+      "expected": "Episode continuation returns predictably to the prior series context when delivered.",
+      "evidence": "Issue #29 owns the implementation and acceptance."
+    },
+    {
+      "id": "home-customization",
+      "status": "pending-issue-83",
+      "expected": "Profiles can hide/reorder home sections and keep optional recommendations from displacing local-library access after upgrades.",
+      "evidence": "Issue #83 owns the implementation and acceptance."
+    },
+    {
+      "id": "artwork-and-reduced-motion",
+      "status": "pending-issue-56",
+      "expected": "Slow, missing, and corrupt artwork never blocks usable browsing; reduced-motion behavior remains usable.",
+      "evidence": "Issue #56 owns the artwork/splash implementation and targeted tests."
+    }
+  ]
+}
