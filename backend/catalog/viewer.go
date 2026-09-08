@@ -305,6 +305,9 @@ func (c *Catalog) PlaybackItemContext(ctx context.Context, id string) (Item, err
 	if err := c.hydrateLegacySource(ctx, id); err != nil {
 		return Item{}, err
 	}
+	if err := c.refreshSourceProof(ctx, id); err != nil {
+		return Item{}, err
+	}
 	c.mu.RLock()
 	item, ok := c.playbackSource(id)
 	c.mu.RUnlock()

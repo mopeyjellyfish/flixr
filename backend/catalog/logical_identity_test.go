@@ -557,6 +557,132 @@ func TestPlaybackSourceContextRejectsReplacement(t *testing.T) {
 	}
 }
 
+func TestPlaybackItemRefreshesProofForIdenticalFileOnNewFilesystem(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	path := filepath.Join(films, "Film.mp4")
+	contents := []byte("identical media bytes")
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots(films, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	item, err := c.PlaybackItem(c.MetadataTargets()[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := item.SourceKey()
+	var oldToken string
+	if err := db.QueryRow(`SELECT change_token FROM catalog_physical_files WHERE catalog_id=? AND present=1`, item.ID).Scan(&oldToken); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(films, "migrated.mp4")
+	if err := os.WriteFile(replacement, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+
+	item, err = c.PlaybackItem(item.ID)
+	if err != nil {
+		t.Fatalf("admit identical migrated source: %v", err)
+	}
+	if item.SourceKey() == oldKey {
+		t.Fatal("migrated source proof was not refreshed")
+	}
+	var refreshedToken string
+	if err := db.QueryRow(`SELECT change_token FROM catalog_physical_files WHERE catalog_id=? AND present=1`, item.ID).Scan(&refreshedToken); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedToken == oldToken {
+		t.Fatal("migrated source proof was not persisted")
+	}
+	file, err := c.OpenSource(item.ID, item.SourceKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	if file, err := c.OpenSource(item.ID, oldKey); err == nil {
+		file.Close()
+		t.Fatal("old source proof admitted after migration")
+	}
+	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		t.Fatal("reopening a refreshed source proof reprobed media")
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	reopenedItem, err := reopened.PlaybackItem(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopenedItem.SourceKey() != item.SourceKey() {
+		t.Fatal("reopened catalog lost refreshed source proof")
+	}
+	file, err = reopened.OpenSource(reopenedItem.ID, reopenedItem.SourceKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+}
+
+func TestPlaybackItemRejectsChangedBytesWithPreservedMetadata(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	path := filepath.Join(films, "Film.mp4")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots(films, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	item, err := c.PlaybackItem(c.MetadataTargets()[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(films, "replacement.mp4")
+	if err := os.WriteFile(replacement, []byte("replaced"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.PlaybackItem(item.ID); err == nil {
+		t.Fatal("changed source admitted with preserved size and mtime")
+	}
+}
+
 func TestIdentityHistoryMappingIsImmutableAndReversible(t *testing.T) {
 	films, data := t.TempDir(), t.TempDir()
 	for name, content := range map[string]string{"A.mp4": "first", "B.mp4": "second"} {

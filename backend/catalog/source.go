@@ -30,6 +30,110 @@ func (c *Catalog) loadSourceProof() error {
 	return rows.Err()
 }
 
+// refreshSourceProof accepts a file moved to a new filesystem only after its
+// complete contents match the durable proof established by the catalog scan.
+// Refreshing before the caller captures SourceKey keeps OpenSource strict for
+// every admitted playback session.
+func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
+	c.mu.RLock()
+	x, ok := c.playbackSource(id)
+	rootPath := c.film
+	if x.rootKind == "episode" {
+		rootPath = c.tv
+	}
+	x.sourceRoot = rootPath
+	c.mu.RUnlock()
+	if !ok || !x.Playable || x.probeRevision == 0 || x.digest == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	file, err := root.Open(x.path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	token := fileChangeToken(before)
+	if before.Size() != x.size || before.ModTime().UnixNano() != x.mtime {
+		return ErrNotPlayable
+	}
+	if token == x.changeToken {
+		return nil
+	}
+	digest, err := digestFile(ctx, file)
+	if err != nil {
+		return err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if digest != x.digest || after.Size() != before.Size() || after.ModTime() != before.ModTime() || fileChangeToken(after) != token {
+		return ErrNotPlayable
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.scanning {
+		return ErrMetadataBusy
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	current, ok := c.playbackSource(id)
+	current.sourceRoot = c.film
+	if current.rootKind == "episode" {
+		current.sourceRoot = c.tv
+	}
+	if !ok {
+		return ErrNotPlayable
+	}
+	if current.SourceKey() != x.SourceKey() {
+		refreshed := x
+		refreshed.changeToken = token
+		if current.SourceKey() == refreshed.SourceKey() {
+			return nil
+		}
+		return ErrNotPlayable
+	}
+	tx, err := c.db.Writer().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var physicalID, sourceID string
+	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE root_kind=? AND relative_path=? AND present=1`, x.rootKind, x.path).Scan(&physicalID, &sourceID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET change_token=? WHERE id=? AND full_digest=? AND change_token=?`, token, physicalID, x.digest, x.changeToken)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return ErrNotPlayable
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	source := c.items[sourceID]
+	source.changeToken = token
+	c.items[sourceID] = source
+	return nil
+}
+
 // OpenSource refuses a source change instead of silently changing the media for
 // an admitted session. os.Root confines every reopen, including symlink races.
 func (c *Catalog) OpenSource(id, key string) (*os.File, error) {
