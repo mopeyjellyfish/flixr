@@ -101,3 +101,12 @@ it('assesses the rotated display geometry for a bounded portrait transcode', asy
 	});
 	expect(result.supports_transcode).toBe(true);
 });
+
+it('assesses MSE when both native HLS and MSE are advertised', async () => {
+ vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+ vi.stubGlobal('MediaSource', {isTypeSupported:()=>true});
+ const decodingInfo=vi.fn().mockResolvedValue({supported:true});
+ Object.defineProperty(navigator,'mediaCapabilities',{configurable:true,value:{decodingInfo}});
+ await browserCapabilities(media);
+ expect(decodingInfo.mock.calls.slice(1).map(([configuration])=>configuration.type)).toEqual(['media-source','media-source']);
+});

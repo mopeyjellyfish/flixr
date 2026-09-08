@@ -190,7 +190,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     element.removeAttribute('src');
     element.load();
     element.playbackRate = rate;
-    if (plan.plan.kind === 'direct' || element.canPlayType('application/vnd.apple.mpegurl')) {
+    // Prefer the bundled engine for live/sliding HLS; native MIME support alone
+    // does not establish reliable live playback (notably in Chromium).
+    const mse = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.40.2"');
+    if (plan.plan.kind === 'direct' || (!mse && element.canPlayType('application/vnd.apple.mpegurl'))) {
       element.src = plan.media_url;
       return;
     }
