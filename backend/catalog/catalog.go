@@ -627,8 +627,9 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	c.status.FinishedAt = time.Now().Unix()
 	status := c.status
 	credentialRevision := c.scanCredentialRevision
+	metadataFailure := c.metadataFailure
 	c.mu.Unlock()
-	if status.Status == "complete" && credentialRevision != "" {
+	if status.Status != "failed" && metadataFailure == "" && credentialRevision != "" {
 		c.recordMetadataRefresh(credentialRevision)
 	}
 

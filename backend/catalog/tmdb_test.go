@@ -76,6 +76,20 @@ func TestTMDBLoadsEpisodeDetailsSeparatelyFromSeries(t *testing.T) {
 	}
 }
 
+func TestTMDBTreatsMissingExactRecordsAsUnmatched(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	if got, err := provider.ByID(context.Background(), "valid", "series", "7", "", ""); err != nil || got.ProviderID != "" {
+		t.Fatalf("missing series = %+v, %v", got, err)
+	}
+	if got, err := provider.LookupEpisode(context.Background(), "valid", "7", 1, 2); err != nil || got.ProviderID != "" {
+		t.Fatalf("missing episode = %+v, %v", got, err)
+	}
+}
+
 func TestTMDBRejectsUnsafeAndOversizedArtwork(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
