@@ -72,7 +72,7 @@ export async function browserCapabilities(media: CatalogItem): Promise<PlaybackC
 	const webm = probe.canPlayType('video/webm; codecs="vp9, opus"') !== '';
 	const nativeHLS = probe.canPlayType('application/vnd.apple.mpegurl') !== '';
 	const mediaSourceHLS = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.40.2"');
-	const hlsType: DecodingType | undefined = nativeHLS ? 'file' : mediaSourceHLS ? 'media-source' : undefined;
+	const hlsType: DecodingType | undefined = mediaSourceHLS ? 'media-source' : nativeHLS ? 'file' : undefined;
 	const isMP4 = media.container?.split(',').some((value) => mp4Aliases.has(value.trim().toLowerCase())) ?? false;
 	const sourceHDR = ['smpte2084', 'arib-std-b67'].includes(media.hdr ?? '') ? media.hdr : undefined;
 	const displaySupportsSource = !sourceHDR || typeof matchMedia !== 'undefined' && matchMedia('(dynamic-range: high)').matches;

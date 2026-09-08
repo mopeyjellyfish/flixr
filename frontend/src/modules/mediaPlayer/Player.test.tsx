@@ -1081,3 +1081,17 @@ it('starts ordinary user-requested playback once metadata is ready without a sec
   fireEvent.loadedMetadata(element);
   expect(start).toHaveBeenCalledTimes(1);
 });
+
+it('uses the bundled HLS engine even when the browser also advertises native HLS', async () => {
+ vi.stubGlobal('MediaSource',{isTypeSupported:()=>true});
+ vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+ vi.spyOn(globalThis,'fetch').mockImplementation(async input=> {
+  const path=String(input);
+  if(path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+  if(path.endsWith('/playback/plans')) return new Response(JSON.stringify({plan:{kind:'transcode'},session_id:'engine-session',media_url:'/manifest.m3u8',resume_ms:0,stream_offset_ms:0,expires_at:9999999999}));
+  return new Response(JSON.stringify({accepted:true}));
+ });
+ render(<Player catalogID="film-1" onExit={()=>{}} />);
+ try { await waitFor(()=>expect(hls.attached).toBe(1)); }
+ finally { vi.unstubAllGlobals(); }
+});
