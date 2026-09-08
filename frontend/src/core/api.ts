@@ -71,6 +71,7 @@ export type ApiErrorCode =
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
+export type SubtitleTrack = { index: number; codec: string; language?: string; title?: string; default?: boolean; forced?: boolean; sdh?: boolean; external?: boolean };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean };
   session_id: string;
@@ -82,6 +83,9 @@ export type PlaybackPlan = {
   stream_offset_ms: number;
   expires_at: number;
   audio_tracks?: AudioTrack[];
+  subtitle_tracks?: SubtitleTrack[];
+  selected_subtitle?: SubtitleTrack;
+  subtitle_url?: string;
 };
 export class ApiError extends Error {
   constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string) {

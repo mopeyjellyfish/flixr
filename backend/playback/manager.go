@@ -125,6 +125,7 @@ type Manager struct {
 	starting       int
 	pendingJobs    map[string]struct{}
 	replacements   map[string]struct{}
+	subtitleJobs   map[string]map[string]context.CancelFunc
 	startWG        sync.WaitGroup
 	cancel         context.CancelFunc
 	janitorDone    chan struct{}
@@ -143,6 +144,7 @@ func NewDirectManager() *Manager {
 		pendingViewers: map[string]int{},
 		pendingJobs:    map[string]struct{}{},
 		replacements:   map[string]struct{}{},
+		subtitleJobs:   map[string]map[string]context.CancelFunc{},
 	}
 }
 
@@ -185,6 +187,7 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		pendingViewers: map[string]int{},
 		pendingJobs:    map[string]struct{}{},
 		replacements:   map[string]struct{}{},
+		subtitleJobs:   map[string]map[string]context.CancelFunc{},
 		cancel:         cancel,
 		janitorDone:    make(chan struct{}),
 	}
@@ -576,6 +579,73 @@ func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (S
 	return session, true
 }
 
+// SelectSubtitle updates native text-track state without replacing video or FFmpeg work.
+func (m *Manager) SelectSubtitle(id, viewerID, profileID string, index int, external, selected bool) (Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, ok := m.sessions[id]
+	if !ok || session.ViewerID != viewerID || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
+		return Session{}, ErrSessionInvalid
+	}
+	if selected {
+		found := false
+		for _, source := range session.Plan.SubtitleSources {
+			if source.Index == index && source.External == external {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Session{}, ErrSessionInvalid
+		}
+	}
+	session.Plan.SubtitleSelectionIndex = index
+	session.Plan.SubtitleExternal = external
+	session.Plan.SubtitleSelected = selected
+	m.sessions[id] = session
+	return session, nil
+}
+
+// SubtitleContext binds bounded extraction work to the playback session lifetime.
+func (m *Manager) SubtitleContext(parent context.Context, id, viewerID, profileID string) (context.Context, func(), error) {
+	jobID, err := randomToken()
+	if err != nil {
+		return nil, nil, err
+	}
+	m.mu.Lock()
+	session, ok := m.sessions[id]
+	if !ok || session.ViewerID != viewerID || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
+		m.mu.Unlock()
+		return nil, nil, ErrSessionInvalid
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if m.subtitleJobs[id] == nil {
+		m.subtitleJobs[id] = map[string]context.CancelFunc{}
+	}
+	m.subtitleJobs[id][jobID] = cancel
+	m.mu.Unlock()
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			m.mu.Lock()
+			delete(m.subtitleJobs[id], jobID)
+			if len(m.subtitleJobs[id]) == 0 {
+				delete(m.subtitleJobs, id)
+			}
+			m.mu.Unlock()
+		})
+	}
+	return ctx, release, nil
+}
+
+func (m *Manager) cancelSubtitleJobsLocked(sessionID string) {
+	for _, cancel := range m.subtitleJobs[sessionID] {
+		cancel()
+	}
+	delete(m.subtitleJobs, sessionID)
+}
+
 func (m *Manager) Heartbeat(id, profileID string, positionMS int64) (Session, error) {
 	return m.HeartbeatForViewer(id, "", profileID, positionMS)
 }
@@ -685,6 +755,7 @@ func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {
 		return false
 	}
 	delete(m.sessions, id)
+	m.cancelSubtitleJobsLocked(id)
 	if gen := m.generations[session.GenerationID]; gen != nil {
 		delete(gen.leases, id)
 		if len(gen.leases) == 0 {
@@ -769,6 +840,7 @@ func (m *Manager) detachGenerationLocked(id string) *generation {
 	}
 	for sessionID := range gen.leases {
 		delete(m.sessions, sessionID)
+		m.cancelSubtitleJobsLocked(sessionID)
 	}
 	return gen
 }
@@ -963,6 +1035,7 @@ func (m *Manager) Sweep(now time.Time) {
 		if !now.Before(session.ExpiresAt) {
 			expired = append(expired, session)
 			delete(m.sessions, id)
+			m.cancelSubtitleJobsLocked(id)
 			if gen := m.generations[session.GenerationID]; gen != nil {
 				delete(gen.leases, id)
 			}
@@ -1023,9 +1096,8 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	sessions := make([]Session, 0, len(m.sessions))
-	for _, session := range m.sessions {
-		sessions = append(sessions, session)
+	for id := range m.sessions {
+		m.cancelSubtitleJobsLocked(id)
 	}
 	generations := make([]*generation, 0, len(m.generations))
 	for id := range m.generations {

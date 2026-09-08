@@ -100,8 +100,9 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 				Rotation int `json:"rotation"`
 			} `json:"side_data_list"`
 			Disposition struct {
-				Default int `json:"default"`
-				Forced  int `json:"forced"`
+				Default         int `json:"default"`
+				Forced          int `json:"forced"`
+				HearingImpaired int `json:"hearing_impaired"`
 			} `json:"disposition"`
 		} `json:"streams"`
 	}
@@ -145,7 +146,7 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 			}
 			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Profile: stream.Profile, Channels: nonNegative(stream.Channels), SampleRate: positiveInt(stream.SampleRate), Bitrate: bitrate, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		case "subtitle":
-			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
+			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0, SDH: stream.Disposition.HearingImpaired != 0})
 		}
 	}
 	return media, nil
