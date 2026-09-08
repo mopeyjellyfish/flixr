@@ -113,6 +113,10 @@ input { width: 100%; min-height: 44px; border: 1px solid var(--strong); border-r
 .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .rail { overflow: auto hidden; padding: 0.5rem; }
 .rail-inner { height: 100%; position: relative; }
+.curatable-card { position: absolute; top: 0; height: 100%; }
+.curatable-card > .card { left: 0; width: 100%; }
+.card-dismiss { position: absolute; top: 0.45rem; left: 0.45rem; z-index: 3; width: 2rem; height: 2rem; padding: 0; border-radius: 50%; background: #090b10cc; color: #fff; font-size: 1.25rem; line-height: 1; }
+.continue-watching-undo { position: fixed; right: max(1rem, env(safe-area-inset-right)); bottom: max(1rem, env(safe-area-inset-bottom)); z-index: 20; display: flex; align-items: center; gap: 1rem; max-width: min(30rem, calc(100vw - 2rem)); padding: 0.8rem 1rem; border: 1px solid var(--line); border-radius: 0.75rem; background: var(--panel); box-shadow: 0 0.75rem 2rem #0008; }
 .card { isolation: isolate; position: absolute; top: 0; min-height: 0; aspect-ratio: 2 / 3; display: flex; flex-direction: column; justify-content: flex-end; text-align: left; gap: 0.55rem; border-radius: 1rem; overflow: hidden; background: linear-gradient(145deg, #1c2940, var(--canvas) 65%); }
 .card-artwork, .card-scrim, .card img { position: absolute; inset: 0; pointer-events: none; }
 .card-artwork { z-index: -2; background-position: center; background-size: cover; }

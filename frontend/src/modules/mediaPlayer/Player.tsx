@@ -62,7 +62,7 @@ type AutoplayState =
 
 const autoplaySeconds = 10;
 
-export function Player({ catalogID, startPositionMS, active = true, onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onAdvance?: (catalogID: string) => void; onExit: () => void }) {
+export function Player({ catalogID, startPositionMS, active = true, continueWatchingIntent = 'user', onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; continueWatchingIntent?: 'user' | 'automatic'; onAdvance?: (catalogID: string, intent: 'user' | 'automatic') => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const stage = useRef<HTMLElement>(null);
   const [item, setItem] = useState<CatalogItem>();
@@ -250,7 +250,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     try {
       const next = await recovery.current.run(async () => {
         if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
-        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)));
+        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)), 'recovery');
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
       observation.current = 0;
@@ -315,7 +315,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         setItem(detail);
         const capabilities: PlaybackCapabilities = await browserCapabilities(detail);
         if (!active) throw new Error('player unmounted');
-        return api.playbackPlan(catalogID, capabilities);
+        return api.playbackPlan(catalogID, capabilities, continueWatchingIntent);
       },
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
     ).then(async (initial) => {
@@ -373,7 +373,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
           .then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
-  }, [attach, catalogID, currentPosition, heartbeat, startPositionMS]);
+  }, [attach, catalogID, continueWatchingIntent, currentPosition, heartbeat, startPositionMS]);
 
   const cancelAutoplay = useCallback(() => {
     autoplayVersion.current += 1;
@@ -387,7 +387,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     });
   }, []);
 
-  const advanceTo = useCallback(async (episode: Episode) => {
+  const advanceTo = useCallback(async (episode: Episode, intent: 'user' | 'automatic' = 'user') => {
     if (finalizing.current) return;
     setAudioLocked(true);
     const version = ++autoplayVersion.current;
@@ -415,7 +415,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       return;
     }
     autoStart.current = true;
-    onAdvance?.(episode.id);
+    onAdvance?.(episode.id, intent);
   }, [onAdvance, currentPosition]);
 
   useEffect(() => {
@@ -425,7 +425,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       return;
     }
     if (autoplay.seconds <= 0) {
-      void advanceTo(autoplay.episode);
+      void advanceTo(autoplay.episode, 'automatic');
       return;
     }
     const timer = window.setTimeout(() => setAutoplay((current) => current.kind === 'countdown' ? { ...current, seconds: current.seconds - 1 } : current), 1_000);

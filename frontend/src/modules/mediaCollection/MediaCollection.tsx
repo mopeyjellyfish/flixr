@@ -5,10 +5,11 @@ import type { CSSProperties, KeyboardEventHandler, RefObject } from 'react';
 import type { CatalogItem, ViewerItem } from '../../core/api';
 
 type Open = (item: ViewerItem, opener: HTMLButtonElement) => void;
+type Dismiss = (item: ViewerItem) => void;
 type Layout = 'rail' | 'grid';
 
-export function MediaCollection({ layout, label, items, onOpen }: { layout: Layout; label: string; items: ViewerItem[]; onOpen: Open }) {
-  return layout === 'grid' ? <Grid label={label} items={items} onOpen={onOpen} /> : <Rail label={label} items={items} onOpen={onOpen} />;
+export function MediaCollection({ layout, label, items, onOpen, onDismiss }: { layout: Layout; label: string; items: ViewerItem[]; onOpen: Open; onDismiss?: Dismiss }) {
+  return layout === 'grid' ? <Grid label={label} items={items} onOpen={onOpen} /> : <Rail label={label} items={items} onOpen={onOpen} onDismiss={onDismiss} />;
 }
 
 export function focusMediaItem(id: string) {
@@ -50,7 +51,7 @@ function Grid({ label, items, onOpen }: { label: string; items: ViewerItem[]; on
   return <section className="media-grid" aria-label={label} ref={parentRef} data-collection data-layout="grid" data-columns={columns}><div className="media-grid-inner" style={{ height: virtualizer.getTotalSize() }}>{rowItems.flatMap((row) => items.slice(row.index * columns, row.index * columns + columns).map((item, column) => <PosterCard key={item.id} item={item} width={itemWidth} onOpen={onOpen} onKeyDown={moveFocus} style={{ top: row.start, left: column * (itemWidth + gap), width: itemWidth }} />))}</div></section>;
 }
 
-function Rail({ label, items, onOpen }: { label: string; items: ViewerItem[]; onOpen: Open }) {
+function Rail({ label, items, onOpen, onDismiss }: { label: string; items: ViewerItem[]; onOpen: Open; onDismiss?: Dismiss }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const { width, unit } = useCollectionSize(parentRef, 1000);
   const gap = unit;
@@ -60,7 +61,10 @@ function Rail({ label, items, onOpen }: { label: string; items: ViewerItem[]; on
   useLayoutEffect(() => virtualizer.measure(), [stride, virtualizer]);
   const visible = virtualizer.getVirtualItems();
   const cards = visible.length ? visible.map((virtual) => ({ index: virtual.index, start: virtual.start })) : items.slice(0, Math.ceil(width / stride) + 3).map((_, index) => ({ index, start: index * stride }));
-  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><div className="rail-controls"><span>{items.length} title{items.length === 1 ? '' : 's'}</span><button aria-label={`Scroll ${label} left`} onClick={() => parentRef.current?.scrollBy({ left: -width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>‹</button><button aria-label={`Scroll ${label} right`} onClick={() => parentRef.current?.scrollBy({ left: width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>›</button></div></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 2 * unit }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => <PosterCard key={items[virtual.index].id} item={items[virtual.index]} width={itemWidth} style={{ left: virtual.start, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />)}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
+  return <section aria-label={label}><div className="section-heading"><h2>{label}</h2><div className="rail-controls"><span>{items.length} title{items.length === 1 ? '' : 's'}</span><button aria-label={`Scroll ${label} left`} onClick={() => parentRef.current?.scrollBy({ left: -width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>‹</button><button aria-label={`Scroll ${label} right`} onClick={() => parentRef.current?.scrollBy({ left: width * 0.85, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })}>›</button></div></div>{items.length ? <div className="rail" ref={parentRef} data-collection data-layout="rail" data-columns="1" style={{ height: itemWidth * 1.5 + 2 * unit }}><div className="rail-inner" style={{ width: virtualizer.getTotalSize() }}>{cards.map((virtual) => {
+    const item = items[virtual.index];
+    return onDismiss ? <div className="curatable-card" key={item.id} style={{ left: virtual.start, width: itemWidth }}><PosterCard item={item} width={itemWidth} style={{ left: 0, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} /><button className="card-dismiss" aria-label={`Hide ${item.title} from Continue Watching`} onClick={() => onDismiss(item)}>×</button></div> : <PosterCard key={item.id} item={item} width={itemWidth} style={{ left: virtual.start, width: itemWidth }} onKeyDown={moveFocus} onOpen={onOpen} />;
+  })}</div></div> : <p className="empty-row">No titles yet.</p>}</section>;
 }
 
 function moveFocus(event: React.KeyboardEvent<HTMLButtonElement>) {

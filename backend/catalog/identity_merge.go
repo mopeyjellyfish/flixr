@@ -53,6 +53,9 @@ func (c *Catalog) MergeIdentity(kind, survivorID, sourceID string) (IdentityMerg
 	if _, err := tx.Exec(`INSERT INTO catalog_identity_merges(id,kind,survivor_catalog_id,source_catalog_id,created_at,decisions_json) VALUES(?,?,?,?,?,?)`, mergeID, kind, survivorID, sourceID, time.Now().UnixMilli(), string(encodedDecisions)); err != nil {
 		return IdentityMerge{}, err
 	}
+	if err := snapshotContinueWatchingDismissals(tx, mergeID, "before", kind, survivorID, sourceID); err != nil {
+		return IdentityMerge{}, err
+	}
 	if kind == "series" {
 		if _, err := tx.Exec(`INSERT INTO catalog_identity_episode_snapshots SELECT ?,id,series_id,season_id FROM catalog_items WHERE series_id=?`, mergeID, sourceID); err != nil {
 			return IdentityMerge{}, err
@@ -75,6 +78,9 @@ func (c *Catalog) MergeIdentity(kind, survivorID, sourceID string) (IdentityMerg
 		return IdentityMerge{}, err
 	}
 	if err := applyIdentityMappings(tx); err != nil {
+		return IdentityMerge{}, err
+	}
+	if err := snapshotContinueWatchingDismissals(tx, mergeID, "after", kind, survivorID, sourceID); err != nil {
 		return IdentityMerge{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -167,6 +173,9 @@ func (c *Catalog) UnmergeIdentity(mergeID string) (IdentityMerge, error) {
 			return v, err
 		}
 	}
+	if err := reconcileContinueWatchingDismissals(tx, mergeID, v.Kind, survivor, source); err != nil {
+		return v, err
+	}
 	decisions, err := json.Marshal(v.Decisions)
 	if err != nil {
 		return v, err
@@ -203,8 +212,82 @@ func applyIdentityMappings(tx *sql.Tx) error {
 	if _, err := tx.Exec(`INSERT INTO catalog_identity_episode_snapshots(merge_id,catalog_id,series_id,season_id) SELECT m.id,i.id,i.series_id,i.season_id FROM catalog_items i JOIN catalog_identity_merges m ON m.source_catalog_id=i.series_id AND m.kind='series' AND m.state='active' WHERE 1 ON CONFLICT(merge_id,catalog_id) DO NOTHING`); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`INSERT INTO profile_continue_watching_dismissals(profile_id,catalog_kind,catalog_id,dismissed_at)
+		SELECT d.profile_id,d.catalog_kind,m.survivor_catalog_id,d.dismissed_at
+		FROM profile_continue_watching_dismissals d JOIN catalog_identity_merges m ON m.source_catalog_id=d.catalog_id AND m.kind=d.catalog_kind AND m.state='active'
+		ON CONFLICT(profile_id,catalog_kind,catalog_id) DO UPDATE SET dismissed_at=MAX(profile_continue_watching_dismissals.dismissed_at,excluded.dismissed_at);
+		DELETE FROM profile_continue_watching_dismissals WHERE EXISTS (
+			SELECT 1 FROM catalog_identity_merges m WHERE m.source_catalog_id=profile_continue_watching_dismissals.catalog_id AND m.kind=profile_continue_watching_dismissals.catalog_kind AND m.state='active'
+		)`); err != nil {
+		return err
+	}
 	_, err := tx.Exec(`UPDATE catalog_items SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series'),''); UPDATE catalog_items SET playable=CASE WHEN merged_into<>'' THEN 0 WHEN available=1 THEN 1 ELSE EXISTS(SELECT 1 FROM catalog_identity_merges m JOIN catalog_items source ON source.id=m.source_catalog_id WHERE m.survivor_catalog_id=catalog_items.id AND m.state='active' AND m.kind<>'series' AND source.available=1) END; UPDATE catalog_series SET merged_into=COALESCE((SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_series.id AND m.state='active' AND m.kind='series'),''); UPDATE catalog_items SET series_id=(SELECT survivor_catalog_id FROM catalog_identity_merges m WHERE m.source_catalog_id=catalog_items.series_id AND m.state='active' AND m.kind='series') WHERE series_id IN (SELECT source_catalog_id FROM catalog_identity_merges WHERE state='active' AND kind='series'); UPDATE catalog_artwork_retries SET parent_catalog_id=(SELECT series_id FROM catalog_items WHERE id=catalog_artwork_retries.catalog_id),parent_provider_id=(SELECT provider_id FROM catalog_series WHERE id=(SELECT series_id FROM catalog_items WHERE id=catalog_artwork_retries.catalog_id)) WHERE catalog_kind='episode'; UPDATE catalog_artwork_reconciliations SET parent_catalog_id=(SELECT series_id FROM catalog_items WHERE id=catalog_artwork_reconciliations.catalog_id),parent_provider_id=(SELECT provider_id FROM catalog_series WHERE id=(SELECT series_id FROM catalog_items WHERE id=catalog_artwork_reconciliations.catalog_id)) WHERE catalog_kind='episode'; UPDATE catalog_series SET playable=EXISTS(SELECT 1 FROM catalog_items i WHERE i.series_id=catalog_series.id AND i.playable=1) WHERE demo=0`)
 	return err
+}
+
+func snapshotContinueWatchingDismissals(tx *sql.Tx, mergeID, phase, kind, survivor, source string) error {
+	if kind != "film" && kind != "series" {
+		return nil
+	}
+	_, err := tx.Exec(`INSERT INTO catalog_identity_continue_watching_snapshots(merge_id,phase,profile_id,catalog_kind,catalog_id,dismissed_at)
+		SELECT ?,?,profile_id,catalog_kind,catalog_id,dismissed_at FROM profile_continue_watching_dismissals
+		WHERE catalog_kind=? AND catalog_id IN (?,?)`, mergeID, phase, kind, survivor, source)
+	return err
+}
+
+func reconcileContinueWatchingDismissals(tx *sql.Tx, mergeID, kind, survivor, source string) error {
+	if kind != "film" && kind != "series" {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT p.profile_id,
+		(SELECT dismissed_at FROM catalog_identity_continue_watching_snapshots s WHERE s.merge_id=? AND s.phase='before' AND s.profile_id=p.profile_id AND s.catalog_kind=? AND s.catalog_id=?),
+		(SELECT dismissed_at FROM catalog_identity_continue_watching_snapshots s WHERE s.merge_id=? AND s.phase='before' AND s.profile_id=p.profile_id AND s.catalog_kind=? AND s.catalog_id=?),
+		(SELECT dismissed_at FROM catalog_identity_continue_watching_snapshots s WHERE s.merge_id=? AND s.phase='after' AND s.profile_id=p.profile_id AND s.catalog_kind=? AND s.catalog_id=?),
+		(SELECT dismissed_at FROM profile_continue_watching_dismissals d WHERE d.profile_id=p.profile_id AND d.catalog_kind=? AND d.catalog_id=?)
+		FROM (SELECT profile_id FROM catalog_identity_continue_watching_snapshots WHERE merge_id=? UNION SELECT profile_id FROM profile_continue_watching_dismissals WHERE catalog_kind=? AND catalog_id IN (?,?)) p`,
+		mergeID, kind, survivor, mergeID, kind, source, mergeID, kind, survivor, kind, survivor, mergeID, kind, survivor, source)
+	if err != nil {
+		return err
+	}
+	type state struct {
+		profile                                      string
+		beforeSurvivor, beforeSource, after, current sql.NullInt64
+	}
+	var states []state
+	for rows.Next() {
+		var value state
+		if err := rows.Scan(&value.profile, &value.beforeSurvivor, &value.beforeSource, &value.after, &value.current); err != nil {
+			rows.Close()
+			return err
+		}
+		states = append(states, value)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, value := range states {
+		if _, err := tx.Exec(`DELETE FROM profile_continue_watching_dismissals WHERE profile_id=? AND catalog_kind=? AND catalog_id IN (?,?)`, value.profile, kind, survivor, source); err != nil {
+			return err
+		}
+		if value.current.Valid != value.after.Valid || (value.current.Valid && value.current.Int64 != value.after.Int64) {
+			if value.current.Valid {
+				if _, err := tx.Exec(`INSERT INTO profile_continue_watching_dismissals(profile_id,catalog_kind,catalog_id,dismissed_at) VALUES(?,?,?,?),(?,?,?,?)`, value.profile, kind, survivor, value.current.Int64, value.profile, kind, source, value.current.Int64); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		for id, dismissed := range map[string]sql.NullInt64{survivor: value.beforeSurvivor, source: value.beforeSource} {
+			if dismissed.Valid {
+				if _, err := tx.Exec(`INSERT INTO profile_continue_watching_dismissals(profile_id,catalog_kind,catalog_id,dismissed_at) VALUES(?,?,?,?)`, value.profile, kind, id, dismissed.Int64); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 func (c *Catalog) applyIdentityMemory(kind, survivor, source string, merged bool) {
 	defer c.refreshSeriesAvailability()

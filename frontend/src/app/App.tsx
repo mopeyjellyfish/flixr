@@ -40,18 +40,20 @@ export function App() {
   const [path, setPath] = useState(() => `${window.location.pathname}${window.location.search}`);
   const [restoreFocusID, setRestoreFocusID] = useState<string>();
   const [remoteStart, setRemoteStart] = useState<{ positionMS: number; sequence: number }>();
+  const [continueWatchingIntent, setContinueWatchingIntent] = useState<'user' | 'automatic'>('user');
   const [lastBrowsePath, setLastBrowsePath] = useState(() => routeFor() === 'browse' && !window.location.pathname.startsWith('/detail/') ? `${window.location.pathname}${window.location.search}` : '/home');
   const navigate = useCallback((nextPath: string, replace = false) => {
     window.history[replace ? 'replaceState' : 'pushState']({}, '', nextPath);
     setPath(nextPath);
     const nextRoute = routeFor(nextPath);
-    if (nextRoute !== 'player') setRemoteStart(undefined);
+    if (nextRoute !== 'player') { setRemoteStart(undefined); setContinueWatchingIntent('user'); }
     if (nextRoute === 'profiles') screenCoordinator.disconnect();
     if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
     setRoute(nextRoute);
   }, []);
   useEffect(() => screenCoordinator.onCommand((command) => {
     if (command.type === 'play') {
+      setContinueWatchingIntent('user');
       setRemoteStart((previous) => ({ positionMS: command.position_ms, sequence: (previous?.sequence ?? 0) + 1 }));
       navigate(`/play/${encodeURIComponent(command.catalog_id)}`);
     }
@@ -92,6 +94,7 @@ export function App() {
       const nextPath = `${window.location.pathname}${window.location.search}`;
       setPath(nextPath);
       const nextRoute = routeFor(nextPath);
+      setContinueWatchingIntent('user');
       if (nextRoute !== 'player') setRemoteStart(undefined);
       if (nextRoute === 'profiles') screenCoordinator.disconnect();
       if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
@@ -111,7 +114,7 @@ export function App() {
   if (route === 'history') return <Suspense fallback={<RouteFallback />}><History onBrowse={() => navigate('/home')} onExit={() => navigate('/profiles')} /></Suspense>;
   if (route === 'player') {
     const catalogID = decodeURIComponent(path.slice('/play/'.length));
-    return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} onAdvance={(nextID) => navigate(`/play/${encodeURIComponent(nextID)}`, true)} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
+    return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} continueWatchingIntent={continueWatchingIntent} onAdvance={(nextID, intent) => { setContinueWatchingIntent(intent); navigate(`/play/${encodeURIComponent(nextID)}`, true); }} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
   }
   if (route === 'browse') {
     const browsePath = path.startsWith('/detail/') ? lastBrowsePath : path;

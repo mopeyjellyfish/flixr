@@ -218,6 +218,20 @@ continue in receipt order within their generation; upgrading the client is
 required for ordering delayed messages within one playback. Lease expiry, stop,
 and shutdown never resave a cached position.
 
+### Continue Watching curation
+
+Each profile can hide a film or series from Continue Watching without changing
+playback progress, history, or My List. The card action removes the logical title
+from that profile's row and offers Undo. A hidden title can also be restored from
+its detail view. These choices survive server restarts and do not affect another
+profile.
+
+`DELETE /api/v1/catalog/continue-watching/{film|series}/{catalogID}` hides a
+logical title for the authenticated profile; `PUT` restores it. A newly admitted
+user playback plan also restores the title. Playback-plan recovery and automatic
+episode advancement preserve the dismissal, so a series cannot reappear merely
+because its next episode was selected.
+
 The player retries transient server failures, expired playback leases, and
 compatibility-stream network errors with bounded delays. A reconnect event can
 advance a scheduled retry, while the retry timer also works without that event.

@@ -325,6 +325,9 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	}
 
 	// Cancellation while preparing has no durable effect and retires the candidate.
+	if err := library.SetContinueWatchingDismissed(one.ID, "film", "film", true); err != nil {
+		t.Fatal(err)
+	}
 	_, beforeGeneration, err := house.ProgressState(oneToken, "film")
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +335,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	executor.onStart = cancel
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`)).WithContext(ctx)
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","continue_watching_intent":"user","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`)).WithContext(ctx)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -341,6 +344,10 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	}
 	if len(manager.Status().Generations) != 0 {
 		t.Fatal("canceled plan leaked a generation")
+	}
+	var dismissals int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM profile_continue_watching_dismissals WHERE profile_id=? AND catalog_kind='film' AND catalog_id='film'`, one.ID).Scan(&dismissals); err != nil || dismissals != 1 {
+		t.Fatalf("canceled plan restored Continue Watching dismissal: count=%d, err=%v", dismissals, err)
 	}
 
 }

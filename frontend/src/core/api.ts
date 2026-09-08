@@ -31,7 +31,7 @@ export type CatalogItem = {
   playable?: boolean;
   demo?: boolean;
 };
-export type ViewerItem = CatalogItem & { listed: boolean };
+export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dismissed?: boolean };
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
@@ -69,6 +69,7 @@ export type ApiErrorCode =
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
+  | 'catalog_continue_watching_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };

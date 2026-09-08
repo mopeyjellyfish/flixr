@@ -16,12 +16,13 @@ import (
 )
 
 type playbackPlanRequest struct {
-	CatalogID           string                      `json:"catalog_id"`
-	Capabilities        playback.ClientCapabilities `json:"capabilities"`
-	AudioStreamIndex    *int                        `json:"audio_stream_index"`
-	AudioExternal       bool                        `json:"audio_external,omitempty"`
-	SubtitleStreamIndex *int                        `json:"subtitle_stream_index"`
-	SubtitleExternal    bool                        `json:"subtitle_external,omitempty"`
+	CatalogID              string                      `json:"catalog_id"`
+	ContinueWatchingIntent string                      `json:"continue_watching_intent,omitempty"`
+	Capabilities           playback.ClientCapabilities `json:"capabilities"`
+	AudioStreamIndex       *int                        `json:"audio_stream_index"`
+	AudioExternal          bool                        `json:"audio_external,omitempty"`
+	SubtitleStreamIndex    *int                        `json:"subtitle_stream_index"`
+	SubtitleExternal       bool                        `json:"subtitle_external,omitempty"`
 }
 
 type playbackAudioRequest struct {
@@ -209,7 +210,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body playbackPlanRequest
-	if !decode(r, &body) || body.CatalogID == "" {
+	if !decode(r, &body) || body.CatalogID == "" || (body.ContinueWatchingIntent != "" && body.ContinueWatchingIntent != "user" && body.ContinueWatchingIntent != "recovery" && body.ContinueWatchingIntent != "automatic") {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -298,6 +299,15 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, "playback_failed")
 			return
 		}
+	}
+	if r.Context().Err() != nil {
+		s.playback.Stop(session.ID, profile.ID)
+		return
+	}
+	if err := s.catalog.AcceptContinueWatching(profile.ID, item.ID, body.ContinueWatchingIntent == "user"); err != nil {
+		s.playback.Stop(session.ID, profile.ID)
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
 	}
 	s.playback.StopSupersededPlans(session)
 	write(w, http.StatusCreated, playbackResponse(session, item.Audio, item.Subtitles))

@@ -218,6 +218,93 @@ it('keeps a valid catalog visible when a My List write fails', async () => {
   expect(screen.queryByRole('heading', { name: /catalog unavailable/i })).not.toBeInTheDocument();
 });
 
+it('hides a Continue Watching title with a sibling action and restores it with Undo', async () => {
+  const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: true, continue_watching_dismissed: false };
+  let dismissed = false;
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/continue-watching/film/film-1')) {
+      dismissed = init?.method === 'DELETE';
+      return new Response(JSON.stringify({ dismissed }));
+    }
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({
+      preference: { view: 'rows', sort: 'title' },
+      sections: [
+        { name: 'Continue Watching', items: dismissed ? [] : [{ ...title, continue_watching_dismissed: dismissed }] },
+        { name: 'New', items: [{ ...title, continue_watching_dismissed: dismissed }] },
+        { name: 'My List', items: [{ ...title, continue_watching_dismissed: dismissed }] },
+      ],
+    }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<Browse onExit={() => undefined} />);
+  const row = await screen.findByRole('region', { name: 'Continue Watching' });
+  const card = within(row).getByTestId('card-film-1');
+  expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+
+  fireEvent.click(within(row).getByRole('button', { name: 'Hide Signal from Continue Watching' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('Signal hidden from Continue Watching');
+  expect(within(row).queryByTestId('card-film-1')).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: 'My List' })).getByTestId('card-film-1')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+  await waitFor(() => expect(within(row).getByTestId('card-film-1')).toBeInTheDocument());
+  expect(fetcher).toHaveBeenCalledWith('/api/v1/catalog/continue-watching/film/film-1', expect.objectContaining({ method: 'DELETE' }));
+  expect(fetcher).toHaveBeenCalledWith('/api/v1/catalog/continue-watching/film/film-1', expect.objectContaining({ method: 'PUT' }));
+});
+
+it('offers explicit Continue Watching restore from a dismissed title detail', async () => {
+  const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false, continue_watching_dismissed: true };
+  let dismissed = true;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/continue-watching/film/film-1')) {
+      dismissed = init?.method === 'DELETE';
+      return new Response(JSON.stringify({ dismissed }));
+    }
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [
+      { name: 'Continue Watching', items: dismissed ? [] : [{ ...title, continue_watching_dismissed: false }] },
+      { name: 'New', items: [{ ...title, continue_watching_dismissed: dismissed }] },
+      { name: 'My List', items: [] },
+    ] }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse onExit={() => undefined} />);
+  fireEvent.click(within(await screen.findByRole('region', { name: 'New' })).getByTestId('card-film-1'));
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore to Continue Watching' }));
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'Continue Watching' })).getByTestId('card-film-1')).toBeInTheDocument());
+});
+
+it('carries Continue Watching dismissal state into search details', async () => {
+  const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false, continue_watching_dismissed: true };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }] }));
+    if (path.includes('/catalog/search')) return new Response(JSON.stringify({ items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }] }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse mode="search" query="Signal" onExit={() => undefined} />);
+  fireEvent.click(within(await screen.findByRole('region', { name: 'Search results' })).getByTestId('card-film-1'));
+  expect(await screen.findByRole('button', { name: 'Restore to Continue Watching' })).toBeInTheDocument();
+});
+
+it('keeps the title visible when hiding Continue Watching fails', async () => {
+  const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/continue-watching/')) return new Response(JSON.stringify({ error: { code: 'catalog_continue_watching_failed' } }), { status: 500 });
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [title] }, { name: 'New', items: [title] }, { name: 'My List', items: [] }] }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<Browse onExit={() => undefined} />);
+  const row = await screen.findByRole('region', { name: 'Continue Watching' });
+  fireEvent.click(within(row).getByRole('button', { name: 'Hide Signal from Continue Watching' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('could not update Continue Watching');
+  expect(within(row).getByTestId('card-film-1')).toBeInTheDocument();
+});
+
 it('keeps the newest direct detail when an older item request finishes last', async () => {
   let resolveOld: ((response: Response) => void) | undefined;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -236,7 +323,7 @@ it('keeps the newest direct detail when an older item request finishes last', as
   expect(screen.queryByRole('heading', { name: 'Old detail' })).not.toBeInTheDocument();
 });
 
-it('reconciles My List membership when a deep detail loads before the viewer model', async () => {
+it('reconciles My List and Continue Watching state when a deep detail loads before the viewer model', async () => {
   let resolveViewer: ((response: Response) => void) | undefined;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
@@ -247,8 +334,9 @@ it('reconciles My List membership when a deep detail loads before the viewer mod
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   render(<Browse detailID="film-1" onExit={() => undefined} />);
   expect(await screen.findByRole('button', { name: 'Add to My List' })).toBeInTheDocument();
-  await act(async () => { resolveViewer?.(new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'My List', items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: true }] }] }))); });
+  await act(async () => { resolveViewer?.(new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'My List', items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: true, continue_watching_dismissed: true }] }] }))); });
   expect(await screen.findByRole('button', { name: 'Remove from My List' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Restore to Continue Watching' })).toBeInTheDocument();
 });
 
 it('does not let a completed preference save replace a newer destination', async () => {
