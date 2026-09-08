@@ -304,3 +304,5 @@ The owner-only HTTP contract is `GET /api/v1/owner/identity/repairs`,
 and `POST /api/v1/owner/identity/merges/{id}/unmerge`. Overlapping active repairs
 or repeated undo return HTTP 409 `identity_conflict`. Responses contain public
 title details and reconciliation decisions, never filesystem paths or digests.
+
+Player controls and local chapter/preview limits are described in [Watching with FlixR](player.md).

@@ -77,9 +77,11 @@ export async function browserCapabilities(media: CatalogItem): Promise<PlaybackC
 	const sourceHDR = ['smpte2084', 'arib-std-b67'].includes(media.hdr ?? '') ? media.hdr : undefined;
 	const displaySupportsSource = !sourceHDR || typeof matchMedia !== 'undefined' && matchMedia('(dynamic-range: high)').matches;
 
-	const direct = displaySupportsSource && isMP4 && await supports(sourceConfiguration(media, 'file'));
-	const remux = displaySupportsSource && hlsType !== undefined && await supports(sourceConfiguration(media, hlsType));
-	const transcode = hlsType !== undefined && await supports(transcodeConfiguration(media, hlsType));
+	const [direct, remux, transcode] = await Promise.all([
+		displaySupportsSource && isMP4 ? supports(sourceConfiguration(media, 'file')) : false,
+		displaySupportsSource && hlsType !== undefined ? supports(sourceConfiguration(media, hlsType)) : false,
+		hlsType !== undefined ? supports(transcodeConfiguration(media, hlsType)) : false,
+	]);
 	const sourceSupported = direct || remux;
 	const audio = media.audio?.[0];
 

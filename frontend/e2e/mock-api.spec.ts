@@ -406,8 +406,8 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto('/play/film-1');
-    await expect(page.getByRole('heading', { name: /now playing/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /back to library/i })).toBeFocused();
+    await expect(page.getByRole('heading', { name: film.title, exact: true })).toBeVisible();
+    await expect(page.locator('main.player')).toBeFocused();
     await expect(page.locator('video')).toBeVisible();
     const results = await new AxeBuilder({ page }).analyze();
     expect(results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);

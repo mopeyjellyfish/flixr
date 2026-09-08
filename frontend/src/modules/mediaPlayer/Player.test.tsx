@@ -27,6 +27,7 @@ beforeEach(() => {
   hls.releaseImport = undefined;
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
   vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
 });
 afterEach(() => {
@@ -691,7 +692,7 @@ it('pause cancels a pending countdown and prevents a late advance', async () => 
   await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
   fireEvent.ended(video);
   await screen.findByRole('heading', { name: /next episode/i });
-  fireEvent.click(screen.getByRole('button', { name: /^pause$/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^cancel autoplay$/i }));
   expect(await screen.findByRole('heading', { name: /autoplay paused/i })).toBeVisible();
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(advance).not.toHaveBeenCalled();
@@ -714,7 +715,7 @@ it('pause prevents a late advance while the completed session is stopping', asyn
   await screen.findByRole('heading', { name: /next episode/i });
   fireEvent.click(screen.getByRole('button', { name: /play now/i }));
   await waitFor(() => expect(releaseStop).toBeTypeOf('function'));
-  fireEvent.click(screen.getByRole('button', { name: /^pause$/i }));
+  fireEvent.click(screen.getByRole('button', { name: /^cancel autoplay$/i }));
   await act(async () => { releaseStop?.(); });
   expect(await screen.findByRole('heading', { name: /autoplay paused/i })).toBeVisible();
   expect(advance).not.toHaveBeenCalled();
@@ -902,6 +903,7 @@ it('labels audio tracks and preserves source time when changing tracks', async (
   render(<Player catalogID="film-1" onExit={() => undefined} />);
   const video = document.querySelector('video') as HTMLVideoElement;
   await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.click(screen.getByText('Settings'));
   expect(screen.getByRole('option', { name: /English.*Default/i })).toBeVisible();
   expect(screen.getByRole('option', { name: /Director Commentary.*Unknown language/i })).toBeVisible();
   expect(screen.getByRole('option', { name: 'not_a_language' })).toBeVisible();
@@ -1062,4 +1064,20 @@ it('reattaches source-relative captions across repeated HLS seeks', async () => 
   fireEvent.seeked(video);
   await waitFor(() => expect(seekPositions).toEqual([7_000, 9_000]));
   expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2'));
+});
+
+
+it('starts ordinary user-requested playback once metadata is ready without a second Play click', async () => {
+  const start = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    if (String(input).includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-auto', media_url: '/auto.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+  });
+  const { container } = render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const element = container.querySelector('video')!;
+  await waitFor(() => expect(element.getAttribute('src')).toBe('/auto.mp4'));
+  fireEvent.loadedMetadata(element);
+  await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+  fireEvent.loadedMetadata(element);
+  expect(start).toHaveBeenCalledTimes(1);
 });

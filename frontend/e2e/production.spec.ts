@@ -69,6 +69,30 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /play blue horizon 2026/i }).click();
   await expectPlayback(page);
   const directVideo = page.locator('video');
+  await directVideo.evaluate((element) => { const video = element as HTMLVideoElement; video.loop = true; });
+  await page.locator('main.player').focus();
+  await page.keyboard.press('Space');
+  await expect.poll(() => directVideo.evaluate((element) => (element as HTMLVideoElement).paused)).toBeTruthy();
+  for (const viewport of [...viewports, { name: 'phone-landscape', width: 844, height: 390 }, { name: '4k', width: 3840, height: 2160 }, { name: '8k', width: 7680, height: 4320 }]) {
+    await page.setViewportSize(viewport);
+    const stage = await page.locator('main.player').boundingBox();
+    expect(stage?.width).toBe(viewport.width); expect(stage?.height).toBe(viewport.height);
+    await expect(page.getByRole('button', { name: 'Fullscreen', exact: true })).toBeInViewport();
+    await page.getByText('Settings', { exact: true }).click();
+    await expect(page.getByRole('combobox', { name: 'Playback speed' })).toBeInViewport();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('combobox', { name: 'Playback speed' })).not.toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`immersive-player-${viewport.name}.png`) });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await directVideo.evaluate((element) => { (element as HTMLVideoElement).playbackRate = 0.25; });
+  await page.locator('main.player').focus();
+  await page.keyboard.press('Space');
+  await expect(page.locator('main.player')).toHaveClass(/controls-hidden/, { timeout: 6000 });
+  await page.mouse.move(200, 200);
+  await expect(page.locator('main.player')).not.toHaveClass(/controls-hidden/);
+  await directVideo.evaluate((element) => { (element as HTMLVideoElement).loop = false; (element as HTMLVideoElement).playbackRate = 1; });
+
   const acknowledgedHeartbeat = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/heartbeat') && response.ok());
   await directVideo.dispatchEvent('pause');
   const acknowledgedRequest = (await acknowledgedHeartbeat).request();
@@ -134,6 +158,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /series signal/i }).click();
   await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
   await expectPlayback(page);
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await page.getByText('Settings', { exact: true }).click();
   const audio = page.getByRole('combobox', { name: /audio track/i });
   await expect(audio).toBeVisible();
   await expect(audio.locator('option')).toHaveText([/English/, /French/, /Director Commentary.*Japanese.*External/]);
@@ -179,6 +205,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const externalPlan = await external.json() as { plan: { audio_stream_index: number; audio_external: boolean } };
   expect(externalPlan.plan).toMatchObject({ audio_stream_index: 3, audio_external: true });
   await page.screenshot({ path: testInfo.outputPath('production-remux-playback-desktop.png'), fullPage: true });
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
   const firstEpisodeURL = page.url();
   await expect(page.getByRole('heading', { name: 'Next episode' })).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole('dialog')).toContainText(/S1 E2 · Signal/i);
@@ -229,7 +257,6 @@ async function expectPlayback(page: import('@playwright/test').Page) {
   const video = page.locator('video');
   await expect(video).toBeVisible();
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'Play', exact: true }).click();
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/diagnostics"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
+	"github.com/mopeyjellyfish/flixr/backend/preview"
 	"github.com/mopeyjellyfish/flixr/backend/screens"
 )
 
@@ -26,6 +27,7 @@ type Readiness struct {
 }
 type Build struct{ Version, Revision string }
 type Server struct {
+	previews          *preview.Service
 	house             *household.Manager
 	catalog           *catalog.Catalog
 	playback          *playback.Manager
@@ -77,7 +79,7 @@ func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playba
 	if locks == nil {
 		locks = map[string]bool{}
 	}
-	s := &Server{house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}}
+	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}}
 	s.checkReadiness()
 	s.routes()
 	return s
@@ -145,6 +147,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/stop", s.playbackStop)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/manifest.m3u8", s.playbackManifest)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/subtitle.vtt", s.playbackSubtitle)
+	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/chapters", s.playerInsights)
+	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/preview.jpg", s.playerInsights)
 	s.mux.HandleFunc("GET /api/v1/playback/sessions/{id}/{name}", s.playbackSegment)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/heartbeat", s.playbackHeartbeat)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/seek", s.playbackSeek)

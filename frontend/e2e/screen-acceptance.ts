@@ -33,7 +33,7 @@ export async function acceptScreens(sender: Page, browser: Browser, info: TestIn
     const video = receiver.locator('video');
     await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState)).toBeGreaterThan(0);
     // Browser policy may require a receiver gesture; this is not a Cast/AirPlay claim.
-    await receiver.getByRole('button', { name: 'Play', exact: true }).click();
+    if (await video.evaluate((v: HTMLVideoElement) => v.paused)) await receiver.getByRole('button', { name: 'Play', exact: true }).click();
     await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThan(0);
     await sender.getByRole('button', { name: 'Pause remote screen' }).click();
     await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.paused)).toBe(true);
