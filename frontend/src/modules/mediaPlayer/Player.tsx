@@ -1,11 +1,13 @@
 import type Hls from 'hls.js';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
+import { ApiError, type CatalogItem, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
 import { browserCapabilities } from './capabilities';
+import { PlayerControls, type Chapter } from './PlayerControls';
+import './player.css';
 
 const maxConsecutiveRecoveries = 3;
 const finalHeartbeatWaitMS = 2_000;
@@ -62,6 +64,15 @@ const autoplaySeconds = 10;
 
 export function Player({ catalogID, startPositionMS, active = true, onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; onAdvance?: (catalogID: string) => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
+  const stage = useRef<HTMLElement>(null);
+  const [item, setItem] = useState<CatalogItem>();
+  const [durationMS, setDurationMS] = useState(0);
+  const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [seriesTitle, setSeriesTitle] = useState<string>();
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [seeking, setSeeking] = useState(false);
+  const seekQueue = useRef<{ running: boolean; target?: number }>({ running: false });
   const [trackError, setTrackError] = useState<string>();
   const [switchingAudio, setSwitchingAudio] = useState(false);
   const [switchingSubtitle, setSwitchingSubtitle] = useState(false);
@@ -87,11 +98,78 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const completionAck = useRef<Promise<boolean> | null>(null);
   const autoplayVersion = useRef(0);
   const autoplayRequest = useRef<AbortController | null>(null);
-  const autoStart = useRef(startPositionMS !== undefined);
+  const autoStart = useRef(true);
+  const initialPlayPending = useRef(true);
 
   useEffect(() => {
-    if (active) backButton.current?.focus();
+    if (active) stage.current?.focus();
   }, [active]);
+
+  useEffect(() => {
+    const root = stage.current;
+    let timer = 0;
+    const reveal = () => {
+      setControlsVisible(true);
+      window.clearTimeout(timer);
+      if (state.status === 'playing' && !seeking) timer = window.setTimeout(() => {
+        const focused = document.activeElement;
+        if (!root?.querySelector('details[open]') && (!focused || focused === root || !root?.contains(focused))) setControlsVisible(false);
+      }, 3000);
+    };
+    reveal();
+    for (const event of ['pointermove', 'pointerdown', 'keydown', 'focusin', 'focusout', 'toggle']) root?.addEventListener(event, reveal, true);
+    return () => { window.clearTimeout(timer); for (const event of ['pointermove', 'pointerdown', 'keydown', 'focusin', 'focusout', 'toggle']) root?.removeEventListener(event, reveal, true); };
+  }, [state.status, seeking]);
+
+  useEffect(() => {
+    const tracks = video.current?.textTracks;
+    if (!tracks?.addEventListener) return;
+    const adjusted = new Map<VTTCue, number | 'auto'>();
+    const position = () => {
+      for (const track of Array.from(tracks)) {
+        for (const cue of Array.from(track.activeCues ?? [])) {
+          if (typeof VTTCue === 'undefined' || !(cue instanceof VTTCue)) continue;
+          if (controlsVisible && cue.line === 'auto') { adjusted.set(cue, cue.line); cue.line = -6; }
+        }
+      }
+    };
+    const listen = () => { for (const track of Array.from(tracks)) track.addEventListener('cuechange', position); position(); };
+    tracks.addEventListener('addtrack', listen);
+    listen();
+    return () => {
+      tracks.removeEventListener('addtrack', listen);
+      for (const track of Array.from(tracks)) track.removeEventListener('cuechange', position);
+      for (const [cue, line] of adjusted) cue.line = line;
+    };
+  }, [controlsVisible]);
+
+  const sessionID = playback.current?.session_id;
+  useEffect(() => {
+    if (!sessionID || state.status !== 'playing') return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void fetch(`/api/v1/playback/sessions/${encodeURIComponent(sessionID)}/chapters`, { signal: controller.signal, credentials: 'same-origin' })
+        .then(async (response) => {
+          if (!response.ok) return;
+          const data = await response.json() as { chapters?: Chapter[] };
+          if (!controller.signal.aborted && Array.isArray(data.chapters)) setChapters(data.chapters);
+        }).catch(() => undefined);
+    }, 300);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [sessionID, state.status]);
+
+  useEffect(() => {
+    if (!item?.series_id || state.status !== 'playing') return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api.series(item.series_id!).then((series) => {
+        if (!active) return;
+        setSeriesTitle(series.title);
+        setEpisodes(series.seasons.flatMap((season) => season.episodes).filter((episode) => episode.playable));
+      }).catch(() => undefined);
+    }, 500);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [item?.series_id, state.status]);
 
   const currentPosition = useCallback(() => {
     const relative = Math.round((video.current?.currentTime ?? 0) * 1000);
@@ -108,8 +186,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     hls.current = null;
     playback.current = plan;
     dispatch({ type: 'load', source: plan.media_url, resumeMs: plan.resume_ms });
+    const rate = element.playbackRate;
     element.removeAttribute('src');
     element.load();
+    element.playbackRate = rate;
     if (plan.plan.kind === 'direct' || element.canPlayType('application/vnd.apple.mpegurl')) {
       element.src = plan.media_url;
       return;
@@ -156,7 +236,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     consecutiveRecoveries.current += 1;
     recovering.current = true;
     const oldPlan = playback.current;
-    const continuePlaying = video.current ? !video.current.paused : false;
+    const continuePlaying = initialPlayPending.current || (video.current ? !video.current.paused : false);
     playback.current = null;
     sourceVersion.current += 1;
     hls.current?.destroy();
@@ -227,7 +307,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     setAutoplay({ kind: 'idle' });
     recoveryController.run(
       async () => {
-        const capabilities: PlaybackCapabilities = await browserCapabilities(await api.item(catalogID));
+        const detail = await api.item(catalogID);
+        if (!active) throw new Error('player unmounted');
+        setItem(detail);
+        const capabilities: PlaybackCapabilities = await browserCapabilities(detail);
         if (!active) throw new Error('player unmounted');
         return api.playbackPlan(catalogID, capabilities);
       },
@@ -302,6 +385,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   }, []);
 
   const advanceTo = useCallback(async (episode: Episode) => {
+    if (finalizing.current) return;
     setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
@@ -311,6 +395,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     if (plan) {
       finalizing.current = true;
       try {
+        if (!endedPlayback.current) {
+          video.current?.pause();
+          await settleWithin(api.playbackHeartbeat(plan.session_id, currentPosition(), ++observation.current), finalHeartbeatWaitMS);
+        }
         await api.playbackStop(plan.session_id);
       } catch (error: unknown) {
         finalizing.current = false;
@@ -325,7 +413,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     }
     autoStart.current = true;
     onAdvance?.(episode.id);
-  }, [onAdvance]);
+  }, [onAdvance, currentPosition]);
 
   useEffect(() => {
     if (autoplay.kind !== 'countdown') return;
@@ -363,7 +451,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       }
       if (updated.media_url !== plan.media_url || updated.session_id !== plan.session_id) {
         autoStart.current = !element.paused;
-        void attach(updated);
+        await attach(updated);
       } else {
         initializingPosition.current = true;
         element.currentTime = Math.max(0, target - updated.stream_offset_ms) / 1000;
@@ -375,24 +463,47 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       }
     }
   }, [attach, recover]);
+  const requestSeek = useCallback((target: number) => {
+    seekQueue.current.target = target;
+    if (seekQueue.current.running) return;
+    seekQueue.current.running = true;
+    setSeeking(true);
+    void (async () => {
+      try {
+        while (seekQueue.current.target !== undefined && !finalizing.current) {
+          const next = seekQueue.current.target;
+          seekQueue.current.target = undefined;
+          await seekTo(next);
+        }
+      } finally {
+        seekQueue.current.running = false;
+        seekQueue.current.target = undefined;
+        setSeeking(false);
+      }
+    })();
+  }, [seekTo]);
   useEffect(() => screenCoordinator.onCommand((command) => {
     if (command.type === 'pause') {
       video.current?.pause();
       cancelAutoplay();
     }
-    if (command.type === 'seek') void seekTo(command.position_ms);
-  }), [cancelAutoplay, seekTo]);
+    if (command.type === 'seek') requestSeek(command.position_ms);
+  }), [cancelAutoplay, requestSeek]);
 
   const play = async () => {
     try {
+      setTrackError(undefined);
       await video.current?.play();
       dispatch({ type: 'play' });
     } catch {
-      dispatch({ type: 'error', message: 'Playback was blocked. Try play again.' });
+      setTrackError('Playback could not start. Press Play to try again.');
+      dispatch({ type: 'pause' });
     }
   };
 
   const pause = () => {
+    initialPlayPending.current = false;
+    autoStart.current = false;
     video.current?.pause();
     cancelAutoplay();
   };
@@ -541,25 +652,23 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     }
   };
 
+  const episodeIndex = episodes.findIndex((episode) => episode.id === catalogID);
   const statusLabel = state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
 
-  return <main className="player">
+  return <main ref={stage} tabIndex={-1} className={`player player-immersive ${controlsVisible ? '' : 'controls-hidden'}`}>
     <header className="player-header">
       <button ref={backButton} className="player-back" onClick={() => { void finish(); }}>← Back to library</button>
-      <div className="player-heading">
-        <p className="eyebrow">YOUR LOCAL SCREEN</p>
-        <h1 id="player-title">Now playing</h1>
-      </div>
-      <span className="player-local"><span aria-hidden="true" />LOCAL STREAM</span>
+      <div className="player-heading"><h1 id="player-title">{seriesTitle ? `${seriesTitle} · ${item?.title}` : item?.title ?? 'Now playing'}</h1>{item?.kind === 'episode' && <p>Season {item.season} · Episode {item.episode}</p>}</div>
     </header>
     {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p><button onClick={() => { void finish(); }}>Return to your library</button></section> :
       <section className="player-stage" aria-labelledby="player-title">
         <div className="player-frame">
-          {(state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{state.status === 'buffering' ? 'Buffering…' : 'Preparing your film…'}</span></div>}
+          {(state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{state.status === 'buffering' ? 'Buffering…' : 'Starting playback…'}</span></div>}
           <video
             ref={video}
-            controls
+            preload="auto"
             playsInline
+            onDurationChange={() => { const seconds = video.current?.duration; if (seconds && Number.isFinite(seconds)) setDurationMS(seconds * 1000 + (playback.current?.stream_offset_ms ?? 0)); }}
             onLoadedMetadata={() => {
               const plan = playback.current;
               if (!video.current || !plan) return;
@@ -569,7 +678,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               if (autoStart.current) {
                 autoStart.current = false;
                 // Browser autoplay policy may require the receiver's local Play button.
-                void video.current.play().catch(() => dispatch({ type: 'pause' }));
+                void video.current.play().catch((error: unknown) => { if (error instanceof DOMException && error.name === 'NotAllowedError') { initialPlayPending.current = false; setTrackError('Press Play to start watching.'); } dispatch({ type: 'pause' }); });
               }
             }}
             onCanPlay={() => dispatch({ type: video.current?.paused ? 'pause' : 'play' })}
@@ -580,10 +689,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               else dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' });
             }}
             onEnded={() => { dispatch({ type: 'pause' }); void complete(); }}
-            onPlaying={() => dispatch({ type: 'play' })}
+            onPlaying={() => { initialPlayPending.current = false; dispatch({ type: 'play' }); }}
             onPause={() => {
               dispatch({ type: 'pause' });
-              if (!endedPlayback.current) cancelAutoplay();
+              if (!endedPlayback.current && !finalizing.current) cancelAutoplay();
               void heartbeat();
             }}
             onWaiting={() => dispatch({ type: 'buffering' })}
@@ -605,15 +714,17 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               default
             />}
           </video>
-          {autoplay.kind !== 'idle' && autoplay.kind !== 'advancing' && <section className="player-autoplay" role="dialog" aria-modal="true" aria-labelledby="autoplay-title">
+          {autoplay.kind !== 'idle' && <section className="player-autoplay" role="dialog" aria-modal="true" aria-labelledby="autoplay-title">
+            {autoplay.kind === 'advancing' && <><h2 id="autoplay-title">Starting next episode</h2><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
             {autoplay.kind === 'resolving' && <><h2 id="autoplay-title">Episode complete</h2><p role="status">Finding the next episode in this version…</p><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
             {autoplay.kind === 'countdown' && <><h2 id="autoplay-title">Next episode</h2><p className="player-autoplay-episode">S{autoplay.episode.season} E{autoplay.episode.episode} · {autoplay.episode.title}</p><p role="status">Playing in {autoplay.seconds} seconds.</p><div className="player-autoplay-actions"><button className="primary" onClick={() => { void advanceTo(autoplay.episode); }}>Play now</button><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></div></>}
             {autoplay.kind === 'paused' && <><h2 id="autoplay-title">Autoplay paused</h2><p>The next episode will not start automatically.</p><div className="player-autoplay-actions">{autoplay.episode && <button className="primary" onClick={() => { void advanceTo(autoplay.episode!); }}>Play next episode</button>}<button onClick={() => { void finish(); }}>Return to your library</button></div></>}
             {autoplay.kind === 'end' && <><h2 id="autoplay-title">{autoplay.contextUnavailable ? 'No next episode in this version' : 'End of series'}</h2><p>{autoplay.contextUnavailable ? 'Flixr will not switch to another library or cut automatically.' : 'You have watched every later available episode in this series.'}</p><button className="primary" onClick={() => { void finish(); }}>Return to your library</button></>}
           </section>}
         </div>
+          <p role="status" className="player-status player-sr-only"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
         <div className="player-toolbar">
-          <p role="status" className="player-status"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
+          <PlayerControls playing={state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={state.positionMs} disabled={!playback.current || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={() => { if (video.current?.paused) void play(); else pause(); }} video={video} stage={stage} chapters={chapters} sessionID={sessionID}>
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}
@@ -635,13 +746,15 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               {playback.current?.subtitle_tracks?.map((track) => <option key={`${track.external ? 'external' : 'embedded'}:${track.index}`} value={`${track.external ? 'external' : 'embedded'}:${track.index}`}>{subtitleLabel(track)}</option>)}
             </select>
           </label>}
-          <div className="player-actions">
-            <button className="primary" onClick={() => void play()}>Play</button>
-            <button onClick={pause}>Pause</button>
-          </div>
+          {onAdvance && episodes.length > 1 && <label>Episodes<select aria-label="Episode" value={catalogID} disabled={audioLocked} onChange={(event) => { const episode = episodes.find((entry) => entry.id === event.target.value); if (episode) void advanceTo(episode); }}>
+            {episodes.map((episode) => <option key={episode.id} value={episode.id}>S{episode.season} E{episode.episode} · {episode.title}</option>)}
+          </select></label>}
+          <details className="player-description"><summary>Playback information</summary><p>{playback.current?.plan.kind === 'direct' ? 'Original quality' : 'Compatibility playback'} · {item?.width} × {item?.height}</p></details>
+          {item?.synopsis && <details className="player-description"><summary>About this title</summary><p>{item.synopsis}</p></details>}
+          </PlayerControls>
         </div>
         {trackError && <p className="player-track-error" role="alert">{trackError}</p>}
-        <p className="player-hint">Progress stays with this profile across your local devices.</p>
+
       </section>}
   </main>;
 }
