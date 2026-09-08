@@ -1095,3 +1095,19 @@ it('uses the bundled HLS engine even when the browser also advertises native HLS
  try { await waitFor(()=>expect(hls.attached).toBe(1)); }
  finally { vi.unstubAllGlobals(); }
 });
+
+it('accumulates direct seek steps before the browser emits timeupdate', async () => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    if (String(input).includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'direct-step', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video=document.querySelector('video') as HTMLVideoElement;
+  await waitFor(()=>expect(video).toHaveAttribute('src','/film.mp4'));
+  fireEvent.loadedMetadata(video); fireEvent.playing(video);
+  const forward=screen.getByRole('button',{name:'Forward 10 seconds'});
+  await act(async()=>{fireEvent.click(forward);});
+  expect(video.currentTime).toBe(10);
+  await act(async()=>{fireEvent.click(forward);});
+  expect(video.currentTime).toBe(20);
+});

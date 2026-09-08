@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 
 export type Chapter = { title: string; start_ms: number; end_ms: number };
 export function playerTime(ms: number): string {
@@ -12,12 +12,12 @@ function Icon({ name }: { name: 'play' | 'pause' | 'back' | 'forward' | 'volume'
 }
 
 type Props = {
-  playing: boolean; durationMS: number; positionMS: number; disabled?: boolean;
+  playing: boolean; durationMS: number; positionMS: number; disabled?: boolean; seeking?: boolean;
   onSeek: (ms: number) => void; onToggle: () => void; onPrevious?: () => void; onNext?: () => void;
   video: RefObject<HTMLVideoElement | null>; stage: RefObject<HTMLElement | null>;
   chapters?: Chapter[]; sessionID?: string; children?: ReactNode;
 };
-export function PlayerControls({ playing, durationMS, positionMS, disabled, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, children }: Props) {
+export function PlayerControls({ playing, durationMS, positionMS, disabled, seeking = false, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, children }: Props) {
   const [scrub, setScrub] = useState<number>();
   const [hover, setHover] = useState<number>();
   const [preview, setPreview] = useState<{ key: string; url: string }>();
@@ -32,6 +32,14 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, onSe
   const pendingSeek = useRef<number | undefined>(undefined);
   const max = Number.isFinite(durationMS) ? Math.max(0, durationMS) : 0;
   const bound = (ms: number) => Math.max(0, Math.min(Math.max(0, max - 1), ms));
+  const seekAnchor = useRef(positionMS);
+  useEffect(() => { if (!seeking) seekAnchor.current = positionMS; }, [positionMS, seeking]);
+  const seek = useCallback((target: number) => {
+    const bounded = Math.max(0, Math.min(Math.max(0, max - 1), target));
+    seekAnchor.current = bounded;
+    onSeek(bounded);
+  }, [max, onSeek]);
+  const stepSeek = useCallback((delta: number) => seek(seekAnchor.current + delta), [seek]);
   const previewMS = scrub ?? hover;
   const previewAt = previewMS === undefined ? undefined : Math.floor(bound(previewMS) / 10000) * 10000;
   const previewKey = sessionID && previewAt !== undefined ? `${sessionID}:${previewAt}` : '';
@@ -78,8 +86,8 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, onSe
       if (disabled) return;
       switch (event.key.toLowerCase()) {
         case ' ': case 'k': event.preventDefault(); if (!event.repeat) onToggle(); break;
-        case 'arrowleft': event.preventDefault(); if (!event.repeat) onSeek(Math.max(0, positionMS - 10000)); break;
-        case 'arrowright': event.preventDefault(); if (!event.repeat) onSeek(Math.min(Math.max(0, max - 1), positionMS + 10000)); break;
+        case 'arrowleft': event.preventDefault(); if (!event.repeat) stepSeek(-10000); break;
+        case 'arrowright': event.preventDefault(); if (!event.repeat) stepSeek(10000); break;
         case 'm': event.preventDefault(); if (!event.repeat && video.current) video.current.muted = !video.current.muted; break;
         case 'f': event.preventDefault(); if (!event.repeat) root?.querySelector<HTMLButtonElement>('[data-fullscreen]')?.click(); break;
         case 'arrowup': case 'arrowdown': event.preventDefault(); if (video.current) video.current.volume = Math.max(0, Math.min(1, video.current.volume + (event.key === 'ArrowUp' ? .05 : -.05))); break;
@@ -87,8 +95,8 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, onSe
     };
     root?.addEventListener('keydown', key);
     return () => root?.removeEventListener('keydown', key);
-  }, [stage, video, onToggle, onSeek, positionMS, max, disabled]);
-  const commit = () => { dragging.current = false; if (pendingSeek.current !== undefined) onSeek(bound(pendingSeek.current)); pendingSeek.current = undefined; setScrub(undefined); };
+  }, [stage, video, onToggle, stepSeek, disabled]);
+  const commit = () => { dragging.current = false; if (pendingSeek.current !== undefined) seek(pendingSeek.current); pendingSeek.current = undefined; setScrub(undefined); };
   const chapter = chapters.find((item) => (previewMS ?? positionMS) >= item.start_ms && (previewMS ?? positionMS) < item.end_ms);
   return <div className="player-controls">
     <div className="player-timeline" onPointerLeave={() => { if (!dragging.current) setHover(undefined); }}>
@@ -100,20 +108,20 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, onSe
       <input aria-label="Seek" aria-valuetext={`${playerTime(scrub ?? positionMS)} of ${playerTime(max)}`} type="range" min="0" max={max} step="1000" disabled={disabled || max <= 0} value={scrub ?? Math.min(positionMS, max)}
         onPointerDown={(event) => { dragging.current = true; event.currentTarget.setPointerCapture?.(event.pointerId); }}
         onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); if (rect.width) setHover(bound((event.clientX - rect.left) / rect.width * max)); }}
-        onChange={(event) => { const target = Number(event.target.value); setScrub(target); setHover(target); pendingSeek.current = target; if (!dragging.current) { onSeek(bound(target)); pendingSeek.current = undefined; setScrub(undefined); } }}
+        onChange={(event) => { const target = Number(event.target.value); setScrub(target); setHover(target); pendingSeek.current = target; if (!dragging.current) { seek(target); pendingSeek.current = undefined; setScrub(undefined); } }}
         onPointerUp={commit} onPointerCancel={() => { dragging.current = false; pendingSeek.current = undefined; setScrub(undefined); setHover(undefined); }} onBlur={() => { if (dragging.current) commit(); setHover(undefined); }} />
     </div>
     <div className="player-control-row">
       <button aria-label={playing ? 'Pause' : 'Play'} title={playing ? 'Pause (Space)' : 'Play (Space)'} disabled={disabled} onClick={onToggle}><Icon name={playing ? 'pause' : 'play'} /></button>
-      <button aria-label="Back 10 seconds" title="Back 10 seconds (←)" disabled={disabled || !max} onClick={() => onSeek(bound(positionMS - 10000))}><Icon name="back" /></button>
-      <button aria-label="Forward 10 seconds" title="Forward 10 seconds (→)" disabled={disabled || !max} onClick={() => onSeek(bound(positionMS + 10000))}><Icon name="forward" /></button>
+      <button aria-label="Back 10 seconds" title="Back 10 seconds (←)" disabled={disabled || !max} onClick={() => stepSeek(-10000)}><Icon name="back" /></button>
+      <button aria-label="Forward 10 seconds" title="Forward 10 seconds (→)" disabled={disabled || !max} onClick={() => stepSeek(10000)}><Icon name="forward" /></button>
       <button className="player-clock" aria-label={remaining ? "Show elapsed time" : "Show remaining time"} onClick={() => setRemaining(!remaining)}>{remaining ? `−${playerTime(max - (scrub ?? positionMS))}` : playerTime(scrub ?? positionMS)} <span>/ {playerTime(max)}</span></button>
       <div className="player-volume"><button aria-label={muted ? 'Unmute' : 'Mute'} title="Mute (M)" onClick={toggleMute}><Icon name={muted ? 'muted' : 'volume'} /></button><input aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { const value = Number(event.target.value); if (video.current) { video.current.volume = value; video.current.muted = false; } setVolume(value); setMuted(false); }} /></div>
       <div className="player-control-spacer" />
       {onPrevious && <button aria-label="Previous episode" title="Previous episode" disabled={disabled} onClick={onPrevious}><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 5h2v14H5zm14 0v14L8 12z" /></svg></button>}
       {onNext && <button aria-label="Next episode" title="Next episode" disabled={disabled} onClick={onNext}><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17 5h2v14h-2zM5 5v14l11-7z" /></svg></button>}
 
-      {chapters.length > 0 && <details className="player-menu"><summary>Chapters</summary><div className="player-menu-panel">{chapters.map((c) => <button key={c.start_ms} disabled={disabled} onClick={(event) => { onSeek(c.start_ms); const details = event.currentTarget.closest('details'); if (details) { details.open = false; details.querySelector('summary')?.focus(); } }}><span>{c.title}</span><small>{playerTime(c.start_ms)}</small></button>)}</div></details>}
+      {chapters.length > 0 && <details className="player-menu"><summary>Chapters</summary><div className="player-menu-panel">{chapters.map((c) => <button key={c.start_ms} disabled={disabled} onClick={(event) => { seek(c.start_ms); const details = event.currentTarget.closest('details'); if (details) { details.open = false; details.querySelector('summary')?.focus(); } }}><span>{c.title}</span><small>{playerTime(c.start_ms)}</small></button>)}</div></details>}
       <details className="player-menu"><summary aria-label="Playback settings">Settings</summary><div className="player-menu-panel">
         {children}
         <label>Speed<select aria-label="Playback speed" value={speed} onChange={(event) => { const value = Number(event.target.value); if (video.current) video.current.playbackRate = value; setSpeed(value); }}>{[.5,.75,1,1.25,1.5,1.75,2].map((value) => <option key={value} value={value}>{value === 1 ? 'Normal' : `${value}×`}</option>)}</select></label>

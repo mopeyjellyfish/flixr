@@ -7,6 +7,10 @@ browser makes separate Media Capabilities requests for:
 2. the original H.264/AAC streams carried by fMP4 HLS; and
 3. Flixr's bounded compatibility output.
 
+The three requests run concurrently. Each has a two-second deadline; a stalled or
+rejected request cannot authorize its playback path or delay the others indefinitely.
+Completed positive evidence for another path remains usable.
+
 The source requests include the catalogued AVC profile and level, display
 dimensions after right-angle rotation, video bitrate, a conservative frame-rate
 ceiling, and the primary audio track's AAC profile, channel count, sample rate,
@@ -48,13 +52,16 @@ MIME type and the MP4 MIME type for initialization and media fragments.
 
 ## Qualification boundary
 
-These automated checks establish planner, browser-request, transport, and
-decoder behavior on the development host. They do not establish playback on a
-strict native client, a tolerant desktop browser, or physical iOS, Android,
-TV, Cast, AirPlay, and GPU targets. No qualified run currently records those
-clients' exact hardware, GPU, OS, and browser versions.
+The production browser acceptance runs the built server against real direct,
+fMP4-remux and compatibility-transcode fixtures in Chromium. It also verifies
+recovery after failed segment requests and subtitle selection across repeated
+seeks. These runs establish the tested desktop browser path, not physical iOS,
+Android, TV, Cast, AirPlay or GPU qualification.
 
-Issue #60 must remain open until the physical strict-client and tolerant-client
-matrix records actual play, fallback, and unsupported results for every
-required fixture. Browser mocks and generated FFmpeg output cannot close that
-qualification gap.
+The 8 September 2026 strict-client attempt found Safari 26.6
+(21624.4.5.11.5) on the local Mac. WebDriver refused to create a session because
+Safari's “Allow remote automation” setting is disabled. No Safari playback was
+performed and no setting was changed. A strict native-client run still needs
+actual play/fallback/unsupported results for the required fixtures, with the
+host, OS and browser recorded. Issue #60 remains open until that evidence is
+complete; browser mocks and generated FFmpeg output do not replace it.

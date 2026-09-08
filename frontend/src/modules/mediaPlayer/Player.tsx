@@ -444,7 +444,11 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const plan = playback.current;
     const element = video.current;
     if (!plan || !element) return;
-    if (plan.plan.kind === 'direct') { element.currentTime = target / 1000; return; }
+    if (plan.plan.kind === 'direct') {
+      element.currentTime = target / 1000;
+      dispatch({ type: 'progress', positionMs: currentPosition() });
+      return;
+    }
     const version = sourceVersion.current;
     try {
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
@@ -458,6 +462,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       } else {
         initializingPosition.current = true;
         element.currentTime = Math.max(0, target - updated.stream_offset_ms) / 1000;
+        dispatch({ type: 'progress', positionMs: currentPosition() });
       }
     } catch (error: unknown) {
       if (version === sourceVersion.current) {
@@ -465,7 +470,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
       }
     }
-  }, [attach, recover]);
+  }, [attach, recover, currentPosition]);
   const requestSeek = useCallback((target: number) => {
     seekQueue.current.target = target;
     if (seekQueue.current.running) return;
@@ -727,7 +732,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
         </div>
           <p role="status" className="player-status player-sr-only"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
         <div className="player-toolbar">
-          <PlayerControls playing={state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={state.positionMs} disabled={!playback.current || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={() => { if (video.current?.paused) void play(); else pause(); }} video={video} stage={stage} chapters={chapters} sessionID={sessionID}>
+          <PlayerControls seeking={seeking} playing={state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={state.positionMs} disabled={!playback.current || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={() => { if (video.current?.paused) void play(); else pause(); }} video={video} stage={stage} chapters={chapters} sessionID={sessionID}>
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}
