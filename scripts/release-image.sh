@@ -12,6 +12,7 @@ image="ghcr.io/mopeyjellyfish/flixr"
 if [[ "$mode" == prepare ]]; then
 	metadata_secret=false
 	metadata_smoke=0
+	no_cache_filter=runtime
 	if [[ "${FLIXR_REQUIRE_APPLICATION_METADATA:-}" == 1 ]]; then
 		[[ -n "${FLIXR_TMDB_APPLICATION_TOKEN:-}" ]] || { echo 'Automatic metadata distribution requires the FlixR TMDB application credential' >&2; exit 1; }
 		[[ "$FLIXR_TMDB_APPLICATION_TOKEN" =~ ^[A-Za-z0-9._~-]+$ ]] || { echo 'FlixR TMDB application credential has an invalid format' >&2; exit 1; }
@@ -22,12 +23,15 @@ if [[ "$mode" == prepare ]]; then
 		fi
 		metadata_secret=true
 		metadata_smoke=1
+		# BuildKit deliberately excludes secret contents from cache checksums. Rebuild
+		# the consuming stage so activation or rotation cannot reuse an old binary.
+		no_cache_filter=backend-build,runtime
 	elif [[ -n "${FLIXR_TMDB_APPLICATION_TOKEN:-}" ]]; then
 		echo 'FlixR TMDB application credential is set without the distribution gate' >&2
 		exit 1
 	fi
 	# Build and verify before semantic-release creates the Git tag / GitHub release.
-	build=(docker buildx build --platform linux/amd64,linux/arm64 --push --no-cache-filter runtime
+	build=(docker buildx build --platform linux/amd64,linux/arm64 --push --no-cache-filter "$no_cache_filter"
 		--tag "$image:v$version" --tag "$image:sha-$GITHUB_SHA")
 	if [[ "$metadata_secret" == true ]]; then
 		build+=(--secret id=tmdb_application_token,env=FLIXR_TMDB_APPLICATION_TOKEN)
