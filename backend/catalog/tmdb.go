@@ -440,15 +440,18 @@ func (t *TMDB) FetchArtwork(ctx context.Context, imagePath string) (Artwork, err
 		return Artwork{}, providerHTTPError(resp.StatusCode)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
-	if !strings.HasPrefix(contentType, "image/") {
-		return Artwork{}, errors.New("provider image content type is not an image")
-	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxArtworkBody+1))
 	if err != nil {
 		return Artwork{}, err
 	}
 	if len(data) > maxArtworkBody {
 		return Artwork{}, errors.New("provider image too large")
+	}
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(data), ";")[0]))
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return Artwork{}, errors.New("provider image content type is not an image")
 	}
 	return Artwork{Bytes: bytes.Clone(data), ContentType: contentType}, nil
 }
