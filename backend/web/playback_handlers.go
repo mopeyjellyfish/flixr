@@ -485,6 +485,8 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
+	unlock := s.lockPlaybackProgress(session.ProfileID, session.CatalogID)
+	defer unlock()
 	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
@@ -517,15 +519,34 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 	}
 	item, itemErr := s.catalog.PlaybackItem(session.CatalogID)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
-	accepted, err := s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
+	unlock := s.lockPlaybackProgress(session.ProfileID, session.CatalogID)
+	defer unlock()
+	accepted, err := s.house.CanRecordPlaybackProgress(session.ProfileID, session.CatalogID, session.ProgressGeneration, body.Observation)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
 	updated := session
 	if accepted {
-		updated, err = s.playback.SeekForViewer(session.ID, session.ViewerID, session.ProfileID, body.PositionMS)
-		if err != nil {
+		var progressErr error
+		updated, err = s.playback.SeekForViewerContextWithCommit(r.Context(), session.ID, session.ViewerID, session.ProfileID, body.PositionMS, func() error {
+			accepted, progressErr = s.house.RecordPlaybackProgress(session.ProfileID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, completed, completionEvent(session.CatalogID, item, completed))
+			if progressErr != nil {
+				return progressErr
+			}
+			if !accepted {
+				return household.ErrProgressConflict
+			}
+			return nil
+		})
+		if progressErr != nil {
+			fail(w, http.StatusInternalServerError, "progress_failed")
+			return
+		}
+		if errors.Is(err, household.ErrProgressConflict) {
+			accepted = false
+			updated = session
+		} else if err != nil {
 			playbackFailure(w, err)
 			return
 		}

@@ -521,31 +521,151 @@ func TestManagerForcesKillAfterGracePeriod(t *testing.T) {
 	}
 }
 
-func TestManagerEnforcesConcurrencyAndSeekWindow(t *testing.T) {
+func TestOutOfWindowSeekReplacesSoleViewerAtGenerationLimit(t *testing.T) {
 	manager, executor := testManager(t, func(settings *Settings) {
 		settings.MaxGenerations = 1
 		settings.GlobalBytes = settings.GenerationBytes
 	})
 	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
-	session, err := manager.Create("profile-a", "film-1", plan, 0)
+	session, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := manager.Create("profile-b", "film-2", plan, 0); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("second create error = %v, want capacity", err)
 	}
-	inside, err := manager.Seek(session.ID, "profile-a", 15_000)
+	inside, err := manager.SeekForViewer(session.ID, "viewer-a", "profile-a", 15_000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if inside.GenerationID != session.GenerationID || len(executor.processes) != 1 {
 		t.Fatal("in-window seek did not reuse its generation")
 	}
-	if _, err := manager.Seek(inside.ID, "profile-a", 90_000); !errors.Is(err, ErrCapacity) {
-		t.Fatalf("out-of-window seek error = %v, want capacity", err)
+	replacement, err := manager.SeekForViewer(inside.ID, "viewer-a", "profile-a", 90_000)
+	if err != nil {
+		t.Fatalf("out-of-window seek at capacity: %v", err)
 	}
-	if _, ok := manager.Lookup(inside.ID, "profile-a", false); !ok {
-		t.Fatal("failed replacement destroyed the existing session")
+	if replacement.GenerationID == session.GenerationID || replacement.PositionMS != 90_000 || replacement.ProgressGeneration != 7 {
+		t.Fatalf("replacement = %#v", replacement)
+	}
+	if _, ok := manager.LookupForViewer(inside.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("successful seek retained the old session")
+	}
+	if len(manager.Status().Generations) != 1 || len(executor.processes) != 2 || !executor.processes[0].signaled.Load() {
+		t.Fatal("successful seek did not exchange generations at the configured limit")
+	}
+}
+
+func TestOutOfWindowSeekDoesNotClaimCreditForSharedGeneration(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
+	first, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := manager.CreateForViewer("viewer-b", "profile-b", "film-1", plan, 30_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.SeekForViewer(first.ID, "viewer-a", "profile-a", 90_000); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("shared seek error = %v, want capacity", err)
+	}
+	if _, ok := manager.LookupForViewer(first.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("failed seek removed requesting viewer")
+	}
+	if _, ok := manager.LookupForViewer(shared.ID, "viewer-b", "profile-b", false); !ok {
+		t.Fatal("failed seek removed shared viewer")
+	}
+	if len(manager.Status().Generations) != 1 || len(executor.processes) != 1 || executor.processes[0].signaled.Load() {
+		t.Fatal("failed shared seek disturbed the existing generation")
+	}
+}
+
+func TestOutOfWindowSeekKeepsSessionWhenReplacementFails(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	executor.startErr = errors.New("synthetic startup failure")
+	executor.mu.Unlock()
+	if _, err = manager.SeekForViewer(initial.ID, "viewer-a", "profile-a", 90_000); err == nil {
+		t.Fatal("seek replacement succeeded")
+	}
+	current, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false)
+	if !ok || current.PositionMS != 0 || current.ProgressGeneration != 9 {
+		t.Fatalf("failed seek changed old session: %#v, %v", current, ok)
+	}
+	if len(manager.Status().Generations) != 1 || len(executor.processes) != 1 || executor.processes[0].signaled.Load() {
+		t.Fatal("failed seek disturbed the existing generation")
+	}
+}
+
+func TestCanceledOutOfWindowSeekKeepsSession(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor.onStart = func() { close(started); <-release }
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, seekErr := manager.SeekForViewerContext(ctx, initial.ID, "viewer-a", "profile-a", 90_000)
+		result <- seekErr
+	}()
+	<-started
+	cancel()
+	close(release)
+	if err = <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled seek error = %v", err)
+	}
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("canceled seek removed old session")
+	}
+	if len(manager.Status().Generations) != 1 || len(executor.processes) != 2 || executor.processes[0].signaled.Load() || !executor.processes[1].signaled.Load() {
+		t.Fatal("canceled seek did not retire only its replacement")
+	}
+}
+
+func TestRevokedOutOfWindowSeekDoesNotCommitPreparedTarget(t *testing.T) {
+	manager, executor := testManager(t, func(settings *Settings) {
+		settings.MaxGenerations = 1
+		settings.GlobalBytes = settings.GenerationBytes
+	})
+	plan := Plan{Kind: Transcode, VideoCodec: "h264", AudioCodec: "aac"}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.onStart = func() { manager.StopViewer("viewer-a") }
+	committed := false
+	_, err = manager.SeekForViewerContextWithCommit(context.Background(), initial.ID, "viewer-a", "profile-a", 90_000, func() error {
+		committed = true
+		return nil
+	})
+	if !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("revoked seek error=%v, want session invalid", err)
+	}
+	if committed {
+		t.Fatal("revoked seek committed an unplayed target")
+	}
+	if len(manager.Status().Generations) != 0 || len(executor.processes) != 2 || !executor.processes[0].signaled.Load() || !executor.processes[1].signaled.Load() {
+		t.Fatal("revoked seek retained old or candidate generation")
 	}
 }
 

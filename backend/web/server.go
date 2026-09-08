@@ -26,6 +26,10 @@ type Readiness struct {
 	FFmpeg  bool `json:"ffmpeg"`
 }
 type Build struct{ Version, Revision string }
+type progressLock struct {
+	mutex sync.Mutex
+	users int
+}
 type Server struct {
 	previews          *preview.Service
 	house             *household.Manager
@@ -35,11 +39,35 @@ type Server struct {
 	mux               *http.ServeMux
 	lookPath          func(string) (string, error)
 	readyMu           sync.RWMutex
+	progressLocksMu   sync.Mutex
+	progressLocks     map[string]*progressLock
 	readiness         Readiness
 	diagnostics       *diagnostics.Log
 	version, revision string
 	settingsLocks     map[string]bool
 	settingsValues    map[string]string
+}
+
+func (s *Server) lockPlaybackProgress(profileID, catalogID string) func() {
+	key := profileID + "\x00" + catalogID
+	s.progressLocksMu.Lock()
+	lock := s.progressLocks[key]
+	if lock == nil {
+		lock = &progressLock{}
+		s.progressLocks[key] = lock
+	}
+	lock.users++
+	s.progressLocksMu.Unlock()
+	lock.mutex.Lock()
+	return func() {
+		lock.mutex.Unlock()
+		s.progressLocksMu.Lock()
+		lock.users--
+		if lock.users == 0 {
+			delete(s.progressLocks, key)
+		}
+		s.progressLocksMu.Unlock()
+	}
 }
 
 func NewServer(h *household.Manager, c *catalog.Catalog) *Server {
@@ -79,7 +107,7 @@ func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playba
 	if locks == nil {
 		locks = map[string]bool{}
 	}
-	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}}
+	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}, progressLocks: map[string]*progressLock{}}
 	s.checkReadiness()
 	s.routes()
 	return s

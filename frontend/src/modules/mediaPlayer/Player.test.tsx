@@ -220,6 +220,35 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
   expect(await screen.findByRole('alert')).toHaveTextContent(/compatibility stream stopped unexpectedly/i);
 });
 
+it('keeps the current stream usable when an HLS seek replacement is refused', async () => {
+  let seeks = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream/master.m3u8', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) {
+      seeks += 1;
+      if (seeks === 1) return new Response(JSON.stringify({ error: { code: 'playback_capacity' } }), { status: 503 });
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream/master.m3u8', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 5_000, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video')!;
+
+  video.currentTime = 3;
+  fireEvent.seeked(video);
+  expect(await screen.findByRole('alert')).toHaveTextContent(/playback limit/i);
+  expect(document.querySelector('video')).toBe(video);
+  expect(screen.queryByText('Playback stopped')).not.toBeInTheDocument();
+
+  video.currentTime = 5;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(seeks).toBe(2));
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  expect(document.querySelector('video')).toBe(video);
+});
+
 it('recovers an expired playback lease from the server-acknowledged position', async () => {
   const calls: string[] = [];
   let plans = 0;

@@ -141,7 +141,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if err := afero.WriteFile(afero.NewOsFs(), filepath.Join(root, "film.mkv"), media, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High',12,320,180,157945,24000,8,'[{"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":157945}]','[]',0)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,duration_ms,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High',12,320,180,157945,24000,8,'[{"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":157945}]','[]',100000,0)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
@@ -283,17 +283,97 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 3000 {
 		t.Fatalf("delayed seek changed lease: %+v", current)
 	}
+	// A replacement that cannot start must not persist its unplayed target or
+	// create completion history. The same observation remains eligible to retry.
+	executor.startErr = errors.New("synthetic seek startup failure")
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":90000,"observation":4}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed replacement seek = %d: %s", response.Code, response.Body)
+	}
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 3000 {
+		t.Fatalf("failed seek persisted target: position=%d %v", position, err)
+	}
+	var completed, completionEvents int
+	if err := db.QueryRow(`SELECT completed FROM progress WHERE profile_id=? AND catalog_id='film'`, one.ID).Scan(&completed); err != nil || completed != 0 {
+		t.Fatalf("failed seek completed progress: %d %v", completed, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM viewing_events WHERE profile_id=? AND catalog_id='film' AND event_type='completed'`, one.ID).Scan(&completionEvents); err != nil || completionEvents != 0 {
+		t.Fatalf("failed seek completion ledger=%d %v", completionEvents, err)
+	}
+	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 3000 {
+		t.Fatalf("failed seek changed old lease: %+v", current)
+	}
+	executor.startErr = nil
+	if _, err := db.Exec(`CREATE TRIGGER fail_seek_progress BEFORE UPDATE ON progress WHEN NEW.position_ms=90000 BEGIN SELECT RAISE(ABORT, 'synthetic progress failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":90000,"observation":4}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError || !bytes.Contains(response.Body.Bytes(), []byte("progress_failed")) {
+		t.Fatalf("progress failure seek = %d: %s", response.Code, response.Body)
+	}
+	if position, err := house.Position(oneToken, "film"); err != nil || position != 3000 {
+		t.Fatalf("progress failure persisted target: position=%d %v", position, err)
+	}
+	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 3000 {
+		t.Fatalf("progress failure changed old lease: %+v", current)
+	}
+	if executor.process == nil || !executor.process.signaled {
+		t.Fatal("progress failure left prepared replacement running")
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_seek_progress`); err != nil {
+		t.Fatal(err)
+	}
+	// A seek outside the retained window replaces this viewer's sole generation.
+	// It must not be rejected by the global one-generation capacity limit.
+	previousSessionID := plan.SessionID
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+previousSessionID+"/seek", bytes.NewBufferString(`{"position_ms":90000,"observation":4}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("replacement seek = %d: %s", response.Code, response.Body.String())
+	}
+	if err := json.NewDecoder(response.Body).Decode(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.SessionID == previousSessionID {
+		t.Fatalf("replacement kept session %q", plan.SessionID)
+	}
+	if _, ok := manager.Lookup(previousSessionID, one.ID, false); ok {
+		t.Fatalf("replacement left old session %q active", previousSessionID)
+	}
+	if current, ok := manager.Lookup(plan.SessionID, one.ID, false); !ok || current.PositionMS != 90000 || len(manager.Status().Generations) != 1 {
+		t.Fatalf("replacement lease = %+v, generations=%d", current, len(manager.Status().Generations))
+	}
+	var position int64
+	if err := db.QueryRow(`SELECT position_ms,completed FROM progress WHERE profile_id=? AND catalog_id='film'`, one.ID).Scan(&position, &completed); err != nil || position != 90000 || completed != 1 {
+		t.Fatalf("successful retry progress=%d/%d %v", position, completed, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM viewing_events WHERE profile_id=? AND catalog_id='film' AND event_type='completed'`, one.ID).Scan(&completionEvents); err != nil || completionEvents != 1 {
+		t.Fatalf("successful retry completion ledger=%d %v", completionEvents, err)
+	}
+	server.progressLocksMu.Lock()
+	remainingProgressLocks := len(server.progressLocks)
+	server.progressLocksMu.Unlock()
+	if remainingProgressLocks != 0 {
+		t.Fatalf("idle progress locks retained=%d", remainingProgressLocks)
+	}
 	if err := house.SetWatched(one.ID, []string{"film"}, true); err != nil {
 		t.Fatal(err)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":1000,"observation":4}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+plan.SessionID+"/seek", bytes.NewBufferString(`{"position_ms":1000,"observation":5}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 {
 		t.Fatalf("stale manual seek: %d", response.Code)
 	}
-	var completed int
 	if err := db.QueryRow(`SELECT completed FROM progress WHERE profile_id=? AND catalog_id='film'`, one.ID).Scan(&completed); err != nil || completed != 1 {
 		t.Fatalf("seek undid manual watched: %d %v", completed, err)
 	}

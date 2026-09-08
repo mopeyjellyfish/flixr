@@ -450,6 +450,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
       return;
     }
     const version = sourceVersion.current;
+    setTrackError(undefined);
     try {
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
       if (version !== sourceVersion.current || finalizing.current || !video.current) {
@@ -467,7 +468,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     } catch (error: unknown) {
       if (version === sourceVersion.current) {
         if (isRetryablePlaybackFailure(error)) void recover(error);
-        else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+        else setTrackError(error instanceof ApiError ? error.message : 'Flixr could not seek in this stream. Try again.');
       }
     }
   }, [attach, recover, currentPosition]);
@@ -579,6 +580,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     if (plan.plan.kind === 'direct') { await heartbeat(); return; }
     const version = sourceVersion.current;
     const target = currentPosition();
+    setTrackError(undefined);
     try {
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
       if (version !== sourceVersion.current || finalizing.current) {
@@ -589,7 +591,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     } catch (error: unknown) {
       if (version === sourceVersion.current && !finalizing.current) {
         if (isRetryablePlaybackFailure(error)) void recover(error);
-        else dispatch({ type: 'error', message: error instanceof ApiError ? error.message : 'Flixr could not seek in this stream.' });
+        else setTrackError(error instanceof ApiError ? error.message : 'Flixr could not seek in this stream. Try again.');
       }
     }
   };
