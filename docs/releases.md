@@ -52,6 +52,13 @@ the value to Docker BuildKit as the
 logs and image layers must not contain the value, but anyone with the published binary
 can extract it. Treat it as a distributable application credential, not as a secret.
 
+Activation record (2026-09-08): the maintainer supplied a credential they identify as
+belonging to the FlixR application registration and explicitly authorized its inclusion
+in official containers. The repository does not contain an independently verified TMDB
+permission record for extractable public-binary distribution; this records the
+maintainer's authorization and application ownership representation, not provider
+approval.
+
 Before creating that repository secret, the maintainer must complete this one-time work:
 
 1. Sign in to a maintainer-controlled TMDB account and open **Settings → API** on a

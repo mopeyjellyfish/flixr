@@ -79,7 +79,9 @@ esac
   try {
     const credentialOptional = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: base, encoding: 'utf8' });
     assert.equal(credentialOptional.status, 0, credentialOptional.stderr);
-    assert.doesNotMatch(readFileSync(log, 'utf8'), /tmdb_application_token/);
+    const optionalInvocation = readFileSync(log, 'utf8');
+    assert.doesNotMatch(optionalInvocation, /tmdb_application_token/);
+    assert.match(optionalInvocation, /--no-cache-filter runtime/);
 
     const gatedMissing = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_REQUIRE_APPLICATION_METADATA: '1' }, encoding: 'utf8' });
     assert.notEqual(gatedMissing.status, 0);
@@ -94,6 +96,7 @@ esac
     assert.equal(prepared.status, 0, prepared.stderr);
     const invocation = readFileSync(log, 'utf8');
     assert.match(invocation, /--secret id=tmdb_application_token,env=FLIXR_TMDB_APPLICATION_TOKEN/);
+    assert.match(invocation, /--no-cache-filter backend-build,runtime/);
     assert.doesNotMatch(invocation, new RegExp(token));
   } finally {
     rmSync(fixture, { recursive: true, force: true });
