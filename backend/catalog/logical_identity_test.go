@@ -73,7 +73,16 @@ func TestMissingPhysicalFileRetainsUnavailableLogicalIdentityAndProgress(t *test
 	if err := c.Scan(context.Background(), 1); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
-	before := c.MetadataTargets()[0]
+	var before catalog.Item
+	for _, item := range c.MetadataTargets() {
+		if item.Title == "Film" {
+			before = item
+			break
+		}
+	}
+	if before.ID == "" {
+		t.Fatal("Film metadata target not found")
+	}
 	h, err := household.Open(db)
 	if err != nil {
 		t.Fatal(err)
