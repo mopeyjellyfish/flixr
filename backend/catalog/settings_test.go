@@ -123,11 +123,51 @@ func TestRotatedApplicationCredentialRefreshesAlreadyMatchedMetadata(t *testing.
 	c.mu.RUnlock()
 	provider.err = ErrProviderRateLimited
 	c.SetApplicationTMDBToken("application-three")
+	var recordedBefore string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_credential_revision'").Scan(&recordedBefore); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Scan(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
 	if status := c.MetadataStatus(); status.State != "rate_limited" {
 		t.Fatalf("rate-limited status = %+v", status)
+	}
+	var recordedAfter string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_credential_revision'").Scan(&recordedAfter); err != nil || recordedAfter != recordedBefore {
+		t.Fatalf("failed refresh recorded credential revision: before=%q after=%q err=%v", recordedBefore, recordedAfter, err)
+	}
+}
+
+func TestPartialLocalScanRecordsBoundedCredentialRefresh(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{}, os.ErrInvalid
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/Broken.mp4", []byte("media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.SetApplicationTMDBToken("application-one")
+	if err := c.SetRoots(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if status := c.ScanStatus(); status.Status != "partial" || status.Failed != 1 {
+		t.Fatalf("scan status = %+v", status)
+	}
+	var revision string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_credential_revision'").Scan(&revision); err != nil || revision == "" {
+		t.Fatalf("partial bounded refresh revision = %q, %v", revision, err)
 	}
 }
 

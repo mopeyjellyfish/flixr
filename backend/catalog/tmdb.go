@@ -248,6 +248,9 @@ func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, regi
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusNotFound {
+			return Enrichment{}, nil
+		}
 		return Enrichment{}, providerHTTPError(resp.StatusCode)
 	}
 	var x struct {
@@ -305,6 +308,9 @@ func (t *TMDB) LookupEpisode(ctx context.Context, token, seriesID string, season
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusNotFound {
+			return Enrichment{}, nil
+		}
 		return Enrichment{}, providerHTTPError(resp.StatusCode)
 	}
 	var value struct {
