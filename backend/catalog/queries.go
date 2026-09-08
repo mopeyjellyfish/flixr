@@ -121,6 +121,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 			return Series{}, false
 		}
 		x.Audio = append(x.Audio, externalAudioTracks(c.items[x.ID].Audio)...)
+		x.Subtitles = append(x.Subtitles, externalSubtitleTracks(c.items[x.ID].Subtitles)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		bySeason[x.Season] = append(bySeason[x.Season], x)

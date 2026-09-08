@@ -961,3 +961,105 @@ it('ignores a retired session heartbeat after audio replacement', async () => {
   expect(screen.queryByRole('heading', { name: 'Playback stopped' })).toBeNull();
   expect(screen.getByRole('combobox', { name: 'Audio track' })).toHaveValue('embedded:2');
 });
+
+it('switches native subtitle tracks without replacing the media session', async () => {
+  const requests: Array<{ path: string; body?: string }> = [];
+  const initial = {
+    plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4',
+    resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+    subtitle_url: '/api/v1/playback/sessions/session-1/subtitle.vtt?index=2&external=false',
+    selected_subtitle: { index: 2, codec: 'subrip', language: 'eng', default: true },
+    subtitle_tracks: [
+      { index: 2, codec: 'subrip', language: 'eng', default: true },
+      { index: 3, codec: 'webvtt', language: 'fra', forced: true, sdh: true, external: true },
+    ],
+  };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    requests.push({ path, body: init?.body as string | undefined });
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(initial));
+    if (path.endsWith('/subtitle')) return new Response(JSON.stringify({ ...initial, subtitle_url: undefined, selected_subtitle: undefined }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/film.mp4'));
+  expect(video.querySelector('track')).toHaveAttribute('src', initial.subtitle_url);
+  expect(screen.getByRole('combobox', { name: 'Subtitles' })).toHaveValue('embedded:2');
+
+  fireEvent.change(screen.getByRole('combobox', { name: 'Subtitles' }), { target: { value: 'off' } });
+
+  await waitFor(() => expect(requests.some(({ path }) => path.endsWith('/subtitle'))).toBe(true));
+  expect(JSON.parse(requests.find(({ path }) => path.endsWith('/subtitle'))!.body!)).toEqual({ mode: 'off' });
+  expect(video).toHaveAttribute('src', '/film.mp4');
+  expect(video.querySelector('track')).toBeNull();
+  expect(requests.filter(({ path }) => path.endsWith('/playback/plans'))).toHaveLength(1);
+});
+
+it('ignores a delayed subtitle failure from a retired session', async () => {
+  let finishSubtitle: ((value: Response) => void) | undefined;
+  const subtitle = { index: 2, codec: 'subrip', language: 'eng', default: true };
+  const plan = (session: string) => ({
+    plan: { kind: 'transcode' }, session_id: session, media_url: `/${session}/manifest.m3u8`,
+    resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+    subtitle_url: `/api/v1/playback/sessions/${session}/subtitle.vtt?index=2&external=false`,
+    selected_subtitle: subtitle, subtitle_tracks: [subtitle],
+  });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(plan('session-1')));
+    if (path.endsWith('/subtitle')) return await new Promise<Response>((resolve) => { finishSubtitle = resolve; });
+    if (path.endsWith('/seek')) return new Response(JSON.stringify(plan('session-2')));
+    return new Response(JSON.stringify({ stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Subtitles' }), { target: { value: 'off' } });
+  await waitFor(() => expect(finishSubtitle).toBeTypeOf('function'));
+  video.currentTime = 1;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2')));
+  await act(async () => { finishSubtitle!(new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 })); });
+
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('combobox', { name: 'Subtitles' })).toBeEnabled();
+  expect(screen.getByRole('combobox', { name: 'Subtitles' })).toHaveValue('embedded:2');
+});
+
+it('reattaches source-relative captions across repeated HLS seeks', async () => {
+  const seekPositions: number[] = [];
+  const subtitle = { index: 2, codec: 'subrip', language: 'eng' };
+  const plan = (session: string, offset: number, resume: number) => ({
+    plan: { kind: 'transcode' }, session_id: session, media_url: `/${session}/manifest.m3u8`,
+    resume_ms: resume, stream_offset_ms: offset, expires_at: 9999999999,
+    subtitle_url: `/api/v1/playback/sessions/${session}/subtitle.vtt?index=2&external=false`,
+    selected_subtitle: subtitle, subtitle_tracks: [subtitle],
+  });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(plan('session-1', 2_000, 2_000)));
+    if (path.endsWith('/seek')) {
+      const position = JSON.parse(init?.body as string).position_ms as number;
+      seekPositions.push(position);
+      return new Response(JSON.stringify(position === 7_000 ? plan('session-2', 7_000, 7_000) : plan('session-2', 7_000, position)));
+    }
+    return new Response(JSON.stringify({ stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-1')));
+  video.currentTime = 5;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2')));
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(0);
+
+  video.currentTime = 2;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(seekPositions).toEqual([7_000, 9_000]));
+  expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2'));
+});

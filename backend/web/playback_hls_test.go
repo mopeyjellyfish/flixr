@@ -67,6 +67,39 @@ func TestPreferredAudioAvoidsCommentaryAndFallsBackToSourceDefault(t *testing.T)
 	}
 }
 
+func TestSubtitleSelectionPreservesExplicitOffAndForcedLanguagePolicy(t *testing.T) {
+	tracks := []catalog.SubtitleTrack{
+		{Index: 2, Codec: "subrip", Language: "eng", Title: "English", Default: true},
+		{Index: 3, Codec: "subrip", Language: "fra", Title: "French signs", Forced: true},
+		{Index: 4, Codec: "subrip", Language: "eng", Title: "English SDH", SDH: true},
+	}
+
+	if selected, ok := selectedSubtitle(tracks, nil, false, household.SubtitlePreference{Mode: household.SubtitleOff}); ok {
+		t.Fatalf("explicit off selected %#v", selected)
+	}
+	selected, ok := selectedSubtitle(tracks, nil, false, household.SubtitlePreference{Mode: household.SubtitleAutomatic, Language: "fra"})
+	if !ok || selected.Index != 3 || !selected.Forced {
+		t.Fatalf("forced French = %#v, %v", selected, ok)
+	}
+	selected, ok = selectedSubtitle(tracks, nil, false, household.SubtitlePreference{Mode: household.SubtitleAutomatic, Language: "eng", PreferSDH: true})
+	if !ok || selected.Index != 4 || !selected.SDH {
+		t.Fatalf("English SDH = %#v, %v", selected, ok)
+	}
+	requested := 2
+	selected, ok = selectedSubtitle(tracks, &requested, false, household.SubtitlePreference{Mode: household.SubtitleOff})
+	if !ok || selected.Index != 2 {
+		t.Fatalf("explicit track over off = %#v, %v", selected, ok)
+	}
+}
+
+func TestSubtitleSelectionFallsBackToSourceDefault(t *testing.T) {
+	tracks := []catalog.SubtitleTrack{{Index: 2, Codec: "subrip", Language: "eng"}, {Index: 3, Codec: "subrip", Language: "deu", Default: true}}
+	selected, ok := selectedSubtitle(tracks, nil, false, household.SubtitlePreference{Mode: household.SubtitleAutomatic, Language: "fra"})
+	if !ok || selected.Index != 3 {
+		t.Fatalf("source default = %#v, %v", selected, ok)
+	}
+}
+
 func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.Process, error) {
 	if e.onStart != nil {
 		e.onStart()

@@ -230,6 +230,10 @@ player exit or unmount, the final progress acknowledgement gets at most two
 seconds before the player requests session stop; a hung request cannot retain
 the client or delay navigation.
 
+Text subtitle discovery, filename rules, profile selection behavior, extraction
+limits, and the downloaded-content qualification gap are documented in
+[Text subtitles](subtitles.md).
+
 The legacy `GET /api/v1/progress/{id}` also returns `generation`. A legacy `PUT`
 must echo that value; each accepted write advances it. An omitted generation
 means zero and works only for initial or migrated progress that has not yet

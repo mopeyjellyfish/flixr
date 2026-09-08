@@ -643,6 +643,70 @@ func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
 	}
 }
 
+func TestSubtitleSelectionDoesNotReplaceMediaSession(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	plan := Plan{Kind: Direct, SubtitleSources: []SubtitleSource{{Index: 2, SourceIndex: 2, SourceKey: "subtitle-key", Codec: "subrip"}}}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 12_345, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", 2, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != initial.ID || updated.GenerationID != initial.GenerationID || updated.PositionMS != initial.PositionMS || !updated.Plan.SubtitleSelected || updated.Plan.SubtitleSelectionIndex != 2 {
+		t.Fatalf("subtitle update replaced media: before=%#v after=%#v", initial, updated)
+	}
+	if _, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", 99, false, true); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("unknown subtitle error = %v", err)
+	}
+}
+
+func TestSubtitleWorkIsCanceledWhenSessionStops(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Direct}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := manager.SubtitleContext(context.Background(), initial.ID, "viewer-a", "profile-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if !manager.StopForViewer(initial.ID, "viewer-a", "profile-a") {
+		t.Fatal("session stop failed")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("subtitle work survived session revoke")
+	}
+	if _, _, err := manager.SubtitleContext(context.Background(), initial.ID, "viewer-a", "profile-a"); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("stopped session subtitle context = %v", err)
+	}
+}
+
+func TestSubtitleWorkIsCanceledWhenManagerShutsDown(t *testing.T) {
+	manager := NewDirectManager()
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Direct}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := manager.SubtitleContext(context.Background(), initial.ID, "viewer-a", "profile-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := manager.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("subtitle work survived manager shutdown")
+	}
+}
+
 func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
 	manager, executor := testManager(t, nil)
 	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}

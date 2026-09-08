@@ -39,6 +39,17 @@ function audioLabel(track: NonNullable<PlaybackPlan['audio_tracks']>[number]): s
   return parts.join(' · ');
 }
 
+function subtitleLabel(track: NonNullable<PlaybackPlan['subtitle_tracks']>[number]): string {
+  const language = languageLabel(track.language);
+  const parts = [track.title || language];
+  if (track.title && track.title.toLocaleLowerCase() !== language.toLocaleLowerCase()) parts.push(language);
+  if (track.default) parts.push('Default');
+  if (track.forced) parts.push('Forced');
+  if (track.sdh) parts.push('SDH');
+  if (track.external) parts.push('External');
+  return parts.join(' · ');
+}
+
 type AutoplayState =
   | { kind: 'idle' }
   | { kind: 'resolving' }
@@ -53,6 +64,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const [trackError, setTrackError] = useState<string>();
   const [switchingAudio, setSwitchingAudio] = useState(false);
+  const [switchingSubtitle, setSwitchingSubtitle] = useState(false);
   const [audioLocked, setAudioLocked] = useState(false);
   const [autoplay, setAutoplay] = useState<AutoplayState>({ kind: 'idle' });
   const video = useRef<HTMLVideoElement>(null);
@@ -60,6 +72,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
+  const subtitleSwitchVersion = useRef(0);
   const audioSwitchTask = useRef<Promise<void> | null>(null);
   const replacingSession = useRef<string | undefined>(undefined);
   const playback = useRef<PlaybackPlan | null>(null);
@@ -89,6 +102,8 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const element = video.current;
     if (!element) return;
     const version = ++sourceVersion.current;
+    subtitleSwitchVersion.current += 1;
+    setSwitchingSubtitle(false);
     hls.current?.destroy();
     hls.current = null;
     playback.current = plan;
@@ -501,6 +516,31 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     }
   };
 
+  const changeSubtitle = async (value: string) => {
+    const plan = playback.current;
+    if (!plan || switchingSubtitle) return;
+    const version = sourceVersion.current;
+    const switchVersion = ++subtitleSwitchVersion.current;
+    setSwitchingSubtitle(true);
+    setTrackError(undefined);
+    try {
+      const selection = value === 'off'
+        ? { mode: 'off' as const }
+        : (() => {
+            const [source, rawIndex] = value.split(':');
+            return { mode: 'track' as const, subtitle_stream_index: Number(rawIndex), subtitle_external: source === 'external' };
+          })();
+      const updated = await api.playbackSubtitle(plan.session_id, selection);
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) playback.current = updated;
+    } catch (error: unknown) {
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) {
+        setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change subtitles.');
+      }
+    } finally {
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) setSwitchingSubtitle(false);
+    }
+  };
+
   const statusLabel = state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
 
   return <main className="player">
@@ -555,7 +595,16 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               void seeked();
             }}
             onTimeUpdate={() => dispatch({ type: 'progress', positionMs: currentPosition() })}
-          />
+          >
+            {playback.current?.subtitle_url && playback.current.selected_subtitle && <track
+              key={playback.current.subtitle_url}
+              kind="subtitles"
+              src={playback.current.subtitle_url}
+              srcLang={playback.current.selected_subtitle.language || 'und'}
+              label={subtitleLabel(playback.current.selected_subtitle)}
+              default
+            />}
+          </video>
           {autoplay.kind !== 'idle' && autoplay.kind !== 'advancing' && <section className="player-autoplay" role="dialog" aria-modal="true" aria-labelledby="autoplay-title">
             {autoplay.kind === 'resolving' && <><h2 id="autoplay-title">Episode complete</h2><p role="status">Finding the next episode in this version…</p><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
             {autoplay.kind === 'countdown' && <><h2 id="autoplay-title">Next episode</h2><p className="player-autoplay-episode">S{autoplay.episode.season} E{autoplay.episode.episode} · {autoplay.episode.title}</p><p role="status">Playing in {autoplay.seconds} seconds.</p><div className="player-autoplay-actions"><button className="primary" onClick={() => { void advanceTo(autoplay.episode); }}>Play now</button><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></div></>}
@@ -573,6 +622,17 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
               onChange={(event) => { void changeAudio(event.target.value); }}
             >
               {playback.current?.audio_tracks?.map((track) => <option key={`${track.external ? 'external' : 'embedded'}:${track.index}`} value={`${track.external ? 'external' : 'embedded'}:${track.index}`}>{audioLabel(track)}</option>)}
+            </select>
+          </label>}
+          {(playback.current?.subtitle_tracks?.length ?? 0) > 0 && <label className="player-audio">Subtitles
+            <select
+              aria-busy={switchingSubtitle}
+              disabled={switchingSubtitle || audioLocked}
+              value={playback.current?.selected_subtitle ? `${playback.current.selected_subtitle.external ? 'external' : 'embedded'}:${playback.current.selected_subtitle.index}` : 'off'}
+              onChange={(event) => { void changeSubtitle(event.target.value); }}
+            >
+              <option value="off">Off</option>
+              {playback.current?.subtitle_tracks?.map((track) => <option key={`${track.external ? 'external' : 'embedded'}:${track.index}`} value={`${track.external ? 'external' : 'embedded'}:${track.index}`}>{subtitleLabel(track)}</option>)}
             </select>
           </label>}
           <div className="player-actions">

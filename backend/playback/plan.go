@@ -76,28 +76,41 @@ const (
 
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
-	SourceKey              string `json:"-"`
-	Kind                   Kind   `json:"kind"`
-	Container              string `json:"container,omitempty"`
-	VideoCodec             string `json:"video_codec,omitempty"`
-	VideoProfile           string `json:"video_profile,omitempty"`
-	VideoLevel             int    `json:"video_level,omitempty"`
-	Width                  int    `json:"width,omitempty"`
-	Height                 int    `json:"height,omitempty"`
-	VideoBitrate           int64  `json:"video_bitrate,omitempty"`
-	FrameRateMilli         int    `json:"frame_rate_milli,omitempty"`
-	BitDepth               int    `json:"bit_depth,omitempty"`
-	HDR                    string `json:"hdr,omitempty"`
-	AudioCodec             string `json:"audio_codec,omitempty"`
-	AudioProfile           string `json:"audio_profile,omitempty"`
-	AudioChannels          int    `json:"audio_channels,omitempty"`
-	AudioSampleRate        int    `json:"audio_sample_rate,omitempty"`
-	AudioBitrate           int64  `json:"audio_bitrate,omitempty"`
-	AudioStreamIndex       int    `json:"audio_stream_index"`
-	AudioSourceStreamIndex int    `json:"-"`
-	AudioExternal          bool   `json:"audio_external,omitempty"`
-	AudioSelected          bool   `json:"-"`
-	Description            string `json:"description,omitempty"`
+	SourceKey              string           `json:"-"`
+	Kind                   Kind             `json:"kind"`
+	Container              string           `json:"container,omitempty"`
+	VideoCodec             string           `json:"video_codec,omitempty"`
+	VideoProfile           string           `json:"video_profile,omitempty"`
+	VideoLevel             int              `json:"video_level,omitempty"`
+	Width                  int              `json:"width,omitempty"`
+	Height                 int              `json:"height,omitempty"`
+	VideoBitrate           int64            `json:"video_bitrate,omitempty"`
+	FrameRateMilli         int              `json:"frame_rate_milli,omitempty"`
+	BitDepth               int              `json:"bit_depth,omitempty"`
+	HDR                    string           `json:"hdr,omitempty"`
+	AudioCodec             string           `json:"audio_codec,omitempty"`
+	AudioProfile           string           `json:"audio_profile,omitempty"`
+	AudioChannels          int              `json:"audio_channels,omitempty"`
+	AudioSampleRate        int              `json:"audio_sample_rate,omitempty"`
+	AudioBitrate           int64            `json:"audio_bitrate,omitempty"`
+	AudioStreamIndex       int              `json:"audio_stream_index"`
+	AudioSourceStreamIndex int              `json:"-"`
+	AudioExternal          bool             `json:"audio_external,omitempty"`
+	AudioSelected          bool             `json:"-"`
+	Description            string           `json:"description,omitempty"`
+	SubtitleSources        []SubtitleSource `json:"-"`
+	SubtitleSelectionIndex int              `json:"-"`
+	SubtitleExternal       bool             `json:"-"`
+	SubtitleSelected       bool             `json:"-"`
+}
+
+// SubtitleSource is a path-free snapshot admitted with a playback session.
+type SubtitleSource struct {
+	Index       int
+	SourceIndex int
+	SourceKey   string
+	Codec       string
+	External    bool
 }
 
 const (

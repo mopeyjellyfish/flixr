@@ -2,22 +2,26 @@ package web
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/mopeyjellyfish/flixr/backend/captions"
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 )
 
 type playbackPlanRequest struct {
-	CatalogID        string                      `json:"catalog_id"`
-	Capabilities     playback.ClientCapabilities `json:"capabilities"`
-	AudioStreamIndex *int                        `json:"audio_stream_index"`
-	AudioExternal    bool                        `json:"audio_external,omitempty"`
+	CatalogID           string                      `json:"catalog_id"`
+	Capabilities        playback.ClientCapabilities `json:"capabilities"`
+	AudioStreamIndex    *int                        `json:"audio_stream_index"`
+	AudioExternal       bool                        `json:"audio_external,omitempty"`
+	SubtitleStreamIndex *int                        `json:"subtitle_stream_index"`
+	SubtitleExternal    bool                        `json:"subtitle_external,omitempty"`
 }
 
 type playbackAudioRequest struct {
@@ -26,6 +30,12 @@ type playbackAudioRequest struct {
 	AudioExternal    bool                        `json:"audio_external,omitempty"`
 	PositionMS       int64                       `json:"position_ms"`
 	Observation      int64                       `json:"observation"`
+}
+
+type playbackSubtitleRequest struct {
+	Mode                string `json:"mode"`
+	SubtitleStreamIndex *int   `json:"subtitle_stream_index"`
+	SubtitleExternal    bool   `json:"subtitle_external,omitempty"`
 }
 
 type playbackPositionRequest struct {
@@ -103,6 +113,64 @@ func selectedAudio(tracks []catalog.AudioTrack, requested *int, external bool, p
 	return tracks[0], true
 }
 
+func selectedSubtitle(tracks []catalog.SubtitleTrack, requested *int, external bool, preference household.SubtitlePreference) (catalog.SubtitleTrack, bool) {
+	if requested != nil {
+		for _, track := range tracks {
+			if track.Index == *requested && track.External == external && track.Index >= 0 && supportedSubtitleCodec(track.Codec) {
+				return track, true
+			}
+		}
+		return catalog.SubtitleTrack{}, false
+	}
+	if external || preference.Mode == household.SubtitleOff || len(tracks) == 0 {
+		return catalog.SubtitleTrack{}, false
+	}
+	bestIndex, bestScore := -1, -1
+	for index, track := range tracks {
+		if !supportedSubtitleCodec(track.Codec) {
+			continue
+		}
+		score := 0
+		if preference.Language != "" && strings.EqualFold(track.Language, preference.Language) {
+			score += 10
+		}
+		if track.Forced {
+			score += 4
+		}
+		if preference.PreferSDH && track.SDH {
+			score += 3
+		}
+		if track.Default {
+			score += 2
+		}
+		if score > bestScore {
+			bestIndex, bestScore = index, score
+		}
+	}
+	if bestIndex < 0 {
+		return catalog.SubtitleTrack{}, false
+	}
+	return tracks[bestIndex], true
+}
+
+func supportedSubtitleCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "subrip", "srt", "webvtt", "ass", "ssa", "mov_text", "text":
+		return true
+	}
+	return false
+}
+
+func playableSubtitleTracks(tracks []catalog.SubtitleTrack) []catalog.SubtitleTrack {
+	out := make([]catalog.SubtitleTrack, 0, len(tracks))
+	for _, track := range tracks {
+		if track.Index >= 0 && supportedSubtitleCodec(track.Codec) {
+			out = append(out, track)
+		}
+	}
+	return out
+}
+
 func knownAudioLanguage(language string) bool {
 	language = strings.TrimSpace(language)
 	return language != "" && !strings.EqualFold(language, "und") && !strings.EqualFold(language, "unknown")
@@ -123,6 +191,17 @@ func sourceDefaultAudio(tracks []catalog.AudioTrack, selected catalog.AudioTrack
 		}
 	}
 	return false
+}
+
+func subtitleSources(tracks []catalog.SubtitleTrack) []playback.SubtitleSource {
+	sources := make([]playback.SubtitleSource, 0, len(tracks))
+	for _, track := range tracks {
+		if track.Index < 0 || !supportedSubtitleCodec(track.Codec) {
+			continue
+		}
+		sources = append(sources, playback.SubtitleSource{Index: track.Index, SourceIndex: track.SourceStreamIndex(), SourceKey: track.SourceKey(), Codec: track.Codec, External: track.External})
+	}
+	return sources
 }
 
 func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +246,21 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan.SourceKey = item.SourceKey()
+	preference, err := s.house.SubtitlePreference(profile.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
+	}
+	subtitle, hasSubtitle := selectedSubtitle(item.Subtitles, body.SubtitleStreamIndex, body.SubtitleExternal, preference)
+	if body.SubtitleStreamIndex != nil && !hasSubtitle {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	plan.SubtitleSources = subtitleSources(item.Subtitles)
+	plan.SubtitleSelected = hasSubtitle
+	if hasSubtitle {
+		plan.SubtitleSelectionIndex, plan.SubtitleExternal = subtitle.Index, subtitle.External
+	}
 	viewerID, ok := s.house.SessionIdentity(s.session(r))
 	if !ok {
 		fail(w, http.StatusForbidden, "profile_required")
@@ -206,7 +300,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.playback.StopSupersededPlans(session)
-	write(w, http.StatusCreated, playbackResponse(session, item.Audio))
+	write(w, http.StatusCreated, playbackResponse(session, item.Audio, item.Subtitles))
 }
 
 func completionEvent(catalogID string, item catalog.Item, completed bool) *household.ViewingEvent {
@@ -216,13 +310,14 @@ func completionEvent(catalogID string, item catalog.Item, completed bool) *house
 	return &household.ViewingEvent{CatalogID: catalogID, Title: item.Title, Kind: item.Kind, Type: household.EventCompleted, Provenance: household.ProvenanceLocal}
 }
 
-func playbackResponse(session playback.Session, tracks []catalog.AudioTrack) map[string]any {
+func playbackResponse(session playback.Session, tracks []catalog.AudioTrack, subtitles []catalog.SubtitleTrack) map[string]any {
+	subtitles = playableSubtitleTracks(subtitles)
 	base := "/api/v1/playback/sessions/" + session.ID
 	mediaURL := base + "/media"
 	if session.Plan.Kind == playback.Remux || session.Plan.Kind == playback.Transcode {
 		mediaURL = base + "/manifest.m3u8"
 	}
-	return map[string]any{
+	response := map[string]any{
 		"plan":                session.Plan,
 		"session_id":          session.ID,
 		"media_url":           mediaURL,
@@ -234,7 +329,19 @@ func playbackResponse(session playback.Session, tracks []catalog.AudioTrack) map
 		"stream_offset_ms":    session.StreamOffsetMS,
 		"expires_at":          session.ExpiresAt.Unix(),
 		"audio_tracks":        tracks,
+		"subtitle_tracks":     subtitles,
 	}
+	if session.Plan.SubtitleSelected {
+		for index := range subtitles {
+			track := &subtitles[index]
+			if track.Index == session.Plan.SubtitleSelectionIndex && track.External == session.Plan.SubtitleExternal {
+				response["selected_subtitle"] = track
+				response["subtitle_url"] = base + "/subtitle.vtt?index=" + strconv.Itoa(track.Index) + "&external=" + strconv.FormatBool(track.External)
+				break
+			}
+		}
+	}
+	return response
 }
 
 func playbackFailure(w http.ResponseWriter, err error) {
@@ -424,7 +531,7 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	write(w, http.StatusOK, playbackResponse(updated, item.Audio))
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
 }
 
 func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +566,10 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plan.SourceKey = item.SourceKey()
+	plan.SubtitleSources = session.Plan.SubtitleSources
+	plan.SubtitleSelectionIndex = session.Plan.SubtitleSelectionIndex
+	plan.SubtitleExternal = session.Plan.SubtitleExternal
+	plan.SubtitleSelected = session.Plan.SubtitleSelected
 	profile, _ := s.house.Profile(s.session(r))
 	accepted, err := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
 	if err != nil {
@@ -484,7 +595,129 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	write(w, http.StatusOK, playbackResponse(updated, item.Audio))
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
+}
+
+func (s *Server) playbackSubtitleSelection(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	session, ok := s.playbackSession(w, r, false)
+	if !ok {
+		return
+	}
+	var body playbackSubtitleRequest
+	if !decode(r, &body) {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	item, err := s.catalog.PlaybackItem(session.CatalogID)
+	if err != nil {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	preference, err := s.house.SubtitlePreference(session.ProfileID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
+	}
+	var track catalog.SubtitleTrack
+	selected := false
+	switch body.Mode {
+	case "off":
+		preference.Mode = household.SubtitleOff
+	case "automatic":
+		preference.Mode = household.SubtitleAutomatic
+		track, selected = selectedSubtitle(item.Subtitles, nil, false, preference)
+	case "track":
+		if body.SubtitleStreamIndex == nil {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		track, selected = selectedSubtitle(item.Subtitles, body.SubtitleStreamIndex, body.SubtitleExternal, preference)
+		if !selected {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		preference.Mode, preference.Language, preference.PreferSDH = household.SubtitleAutomatic, strings.ToLower(strings.TrimSpace(track.Language)), track.SDH
+	default:
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := s.house.SaveSubtitlePreference(session.ProfileID, preference); err != nil {
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
+	}
+	updated, err := s.playback.SelectSubtitle(session.ID, session.ViewerID, session.ProfileID, track.Index, track.External, selected)
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
+}
+
+func (s *Server) playbackSubtitle(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.playbackSession(w, r, true)
+	if !ok {
+		return
+	}
+	index, err := strconv.Atoi(r.URL.Query().Get("index"))
+	external, boolErr := strconv.ParseBool(r.URL.Query().Get("external"))
+	if err != nil || boolErr != nil {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	var source *playback.SubtitleSource
+	for candidateIndex := range session.Plan.SubtitleSources {
+		candidate := &session.Plan.SubtitleSources[candidateIndex]
+		if candidate.Index == index && candidate.External == external {
+			source = candidate
+			break
+		}
+	}
+	if source == nil {
+		fail(w, http.StatusNotFound, "playback_asset_not_found")
+		return
+	}
+	captionContext, release, err := s.playback.SubtitleContext(r.Context(), session.ID, session.ViewerID, session.ProfileID)
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	defer release()
+	file, err := s.catalog.OpenSubtitleSource(session.CatalogID, session.Plan.SourceKey, source.SourceKey, source.Index, source.External)
+	if err != nil {
+		fail(w, http.StatusNotFound, "playback_asset_not_found")
+		return
+	}
+	defer file.Close()
+	var input []byte
+	codec := source.Codec
+	if source.External {
+		input, err = io.ReadAll(io.LimitReader(file, captions.MaxInputBytes+1))
+	} else {
+		input, err = captions.Extract(captionContext, file, source.SourceIndex)
+		codec = "webvtt"
+	}
+	if err != nil {
+		if captionContext.Err() != nil {
+			return
+		}
+		fail(w, http.StatusInternalServerError, "playback_failed")
+		return
+	}
+	if captionContext.Err() != nil {
+		return
+	}
+	output, err := captions.Convert(input, codec, session.StreamOffsetMS)
+	if err != nil {
+		fail(w, http.StatusUnprocessableEntity, "playback_unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(output)
 }
 
 func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {

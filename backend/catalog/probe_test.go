@@ -73,6 +73,20 @@ func TestFFprobeRecordsFrameRateAndBitDepth(t *testing.T) {
 	}
 }
 
+func TestFFprobeRecordsForcedAndHearingImpairedSubtitleFlags(t *testing.T) {
+	payload := `{"format":{},"streams":[{"index":2,"codec_type":"subtitle","codec_name":"subrip","disposition":{"forced":1,"hearing_impaired":1}}]}`
+	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}
+	file, err := os.CreateTemp(t.TempDir(), "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	got, err := prober.Probe(context.Background(), file)
+	if err != nil || len(got.Subtitles) != 1 || !got.Subtitles[0].Forced || !got.Subtitles[0].SDH {
+		t.Fatalf("subtitle properties = %#v, err = %v", got.Subtitles, err)
+	}
+}
+
 func TestFFprobeUsesTheConservativeVariableFrameRateCeiling(t *testing.T) {
 	payload := `{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":320,"height":180,"r_frame_rate":"60/1","avg_frame_rate":"180/7"}]}`
 	prober := ffprobe{runner: probeRunner(func(context.Context, string, []string, []*os.File) ([]byte, error) { return []byte(payload), nil })}

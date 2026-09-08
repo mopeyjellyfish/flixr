@@ -96,11 +96,14 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await expect(page.locator('[data-catalog-id]:focus')).toHaveAccessibleName(/blue horizon 2026/i);
   let faultSession = '';
   let injectedSegmentFailures = 0;
+  let releaseInitialSegmentFailures!: () => void;
+  const initialSegmentFailureGate = new Promise<void>((resolve) => { releaseInitialSegmentFailures = resolve; });
   const failInitialSegments = async (route: import('@playwright/test').Route) => {
     const match = new URL(route.request().url()).pathname.match(/\/playback\/sessions\/([^/]+)\/segment-[^/]+\.m4s$/);
     if (!match) return route.continue();
     faultSession ||= match[1];
     if (match[1] === faultSession) {
+      await initialSegmentFailureGate;
       injectedSegmentFailures += 1;
       return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'playback_failed' } }) });
     }
@@ -112,12 +115,13 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /play compatibility check 2026/i }).click();
   const initialCompatibilityBody = await (await initialCompatibilityPlan).json() as { session_id: string; heartbeat_url: string };
   const acknowledgedCompatibilityPosition = 750;
+  const recoveredCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
   const compatibilityHeartbeat = await page.evaluate(async ({ heartbeatURL, positionMS }) => {
     const response = await fetch(heartbeatURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ position_ms: positionMS, observation: 1 }) });
     return response.status;
   }, { heartbeatURL: initialCompatibilityBody.heartbeat_url, positionMS: acknowledgedCompatibilityPosition });
   expect(compatibilityHeartbeat).toBe(200);
-  const recoveredCompatibilityPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
+  releaseInitialSegmentFailures();
   const recoveredCompatibilityBody = await (await recoveredCompatibilityPlan).json() as { session_id: string; resume_ms: number };
   expect(recoveredCompatibilityBody.session_id).not.toBe(initialCompatibilityBody.session_id);
   expect(recoveredCompatibilityBody.resume_ms).toBe(acknowledgedCompatibilityPosition);
@@ -133,6 +137,26 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const audio = page.getByRole('combobox', { name: /audio track/i });
   await expect(audio).toBeVisible();
   await expect(audio.locator('option')).toHaveText([/English/, /French/, /Director Commentary.*Japanese.*External/]);
+  const subtitles = page.getByRole('combobox', { name: 'Subtitles' });
+  await expect(subtitles).toBeVisible();
+  await expect(subtitles.locator('option')).toHaveText([/Off/, /English.*Default.*Forced/, /French/]);
+  const initialSubtitleURL = await page.locator('video track').getAttribute('src');
+  expect(initialSubtitleURL).toBeTruthy();
+  const initialCue = await page.evaluate(async (url) => (await fetch(url!)).text(), initialSubtitleURL);
+  expect(initialCue).toContain('Signal caption');
+  const initialSession = new URL(initialSubtitleURL!, origin).pathname.split('/')[5];
+  const offResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/subtitle'));
+  await subtitles.selectOption('off');
+  const offPlan = await (await offResponse).json() as { session_id: string; subtitle_url?: string };
+  expect(offPlan.session_id).toBe(initialSession);
+  expect(offPlan.subtitle_url).toBeUndefined();
+  await expect(page.locator('video track')).toHaveCount(0);
+  const frenchSubtitleResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/subtitle'));
+  await subtitles.selectOption('embedded:4');
+  expect((await frenchSubtitleResponse).ok()).toBeTruthy();
+  const frenchSubtitleURL = await page.locator('video track').getAttribute('src');
+  const frenchCue = await page.evaluate(async (url) => (await fetch(url!)).text(), frenchSubtitleURL);
+  expect(frenchCue).toContain('Sous-titre Signal');
   const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
   await page.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
