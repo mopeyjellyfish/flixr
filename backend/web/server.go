@@ -113,6 +113,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/catalog/watched/{kind}/{id}", s.watched)
 	s.mux.HandleFunc("PUT /api/v1/catalog/list/{kind}/{id}", s.list)
 	s.mux.HandleFunc("DELETE /api/v1/catalog/list/{kind}/{id}", s.list)
+	s.mux.HandleFunc("PUT /api/v1/catalog/continue-watching/{kind}/{id}", s.continueWatching)
+	s.mux.HandleFunc("DELETE /api/v1/catalog/continue-watching/{kind}/{id}", s.continueWatching)
 	s.mux.HandleFunc("GET /api/v1/catalog/preferences/{media}", s.preferences)
 	s.mux.HandleFunc("PUT /api/v1/catalog/preferences/{media}", s.preferences)
 	s.mux.HandleFunc("GET /api/v1/catalog/artwork/{id}/{kind}", s.artwork)

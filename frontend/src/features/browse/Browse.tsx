@@ -13,7 +13,7 @@ import { ScreenReadiness } from '../../modules/screenCoordinator/ScreenControls'
 
 type Mode = 'home' | 'movies' | 'tv' | 'search';
 type Media = 'all' | 'film' | 'series';
-type Detail = (ViewerItem | SeriesDetail) & { listed: boolean };
+type Detail = (ViewerItem | SeriesDetail) & { listed: boolean; continue_watching_dismissed?: boolean };
 type BrowseProps = { onReady?: () => void; onExit: () => void; mode?: Mode; query?: string; detailID?: string; onNavigate?: (path: string, replace?: boolean) => void; restoreFocusID?: string; onFocusRestored?: () => void };
 type OpenDetail = (item: ViewerItem, opener: HTMLButtonElement) => void;
 
@@ -34,6 +34,7 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
   const openingID = useRef<string | undefined>(undefined);
   const [preferenceError, setPreferenceError] = useState<string>();
   const [listError, setListError] = useState<string>();
+  const [dismissedItem, setDismissedItem] = useState<ViewerItem>();
   const media: Media = mode === 'movies' ? 'film' : mode === 'tv' ? 'series' : 'all';
   const loadDetail = useCallback((item: ViewerItem, version = ++detailVersion.current) => {
     setDetail(item); setDetailError(''); setDetailLoading(item.kind === 'series');
@@ -51,9 +52,8 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
   }, [mode]);
   useEffect(() => {
     if (!model) return;
-    const listed = listedItemIDs(model);
-    setSearchItems((items) => items.map((item) => item.listed === listed.has(item.id) ? item : { ...item, listed: listed.has(item.id) }));
-    setDetail((current) => current && (current.kind === 'film' || current.kind === 'series') && current.listed !== listed.has(current.id) ? { ...current, listed: listed.has(current.id) } : current);
+    setSearchItems((items) => items.map((item) => ({ ...item, ...viewerProfileState(model, item.id) })));
+    setDetail((current) => current && (current.kind === 'film' || current.kind === 'series') ? { ...current, ...viewerProfileState(model, current.id) } : current);
   }, [model]);
   useEffect(() => {
     if (mode === 'search' && !query.trim()) { setSearchItems([]); setState('empty'); return; }
@@ -64,8 +64,7 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
       load.then((response) => {
         if (version !== requestVersion.current) return;
         if (mode === 'search') {
-          const listed = listedItemIDs(modelRef.current);
-          const items = (response as CatalogPage).items.map((item) => ({ ...item, listed: listed.has(item.id) }));
+          const items = (response as CatalogPage).items.map((item) => ({ ...item, ...viewerProfileState(modelRef.current, item.id) }));
           setSearchItems(items);
           setState(items.length ? 'ready' : 'empty');
         } else {
@@ -90,8 +89,7 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
     setDetailLoading(true); setDetailError('');
     api.item(detailID).then((item) => {
       if (version !== detailVersion.current) return;
-      const listed = listedItemIDs(modelRef.current).has(item.id);
-      loadDetail({ ...item, listed }, version);
+      loadDetail({ ...item, ...viewerProfileState(modelRef.current, item.id) }, version);
     }).catch(() => { if (version === detailVersion.current) { setDetail(undefined); setDetailLoading(false); setDetailError('This title could not be loaded.'); } });
     return () => { if (detailVersion.current === version) detailVersion.current += 1; };
   }, [detailID, loadDetail]);
@@ -128,6 +126,24 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
   const changeWatched = async (kind: 'film' | 'episode' | 'season' | 'series', id: string, watched: boolean, season?: number) => {
     try { setListError(undefined); await api.setWatched(kind, id, watched, season); setRetry((value) => value + 1); } catch { setListError('Flixr could not update watched state. Try again.'); }
   };
+  const changeContinueWatching = async (item: ViewerItem, dismissed: boolean) => {
+    if (item.kind !== 'film' && item.kind !== 'series') return;
+    try {
+      setListError(undefined);
+      await api.setContinueWatchingDismissed(item.kind, item.id, dismissed);
+      if (dismissed) {
+        setModel((current) => current && updateDismissed(current, item.id));
+        setDetail((current) => current?.id === item.id ? { ...current, continue_watching_dismissed: true } : current);
+        setDismissedItem(item);
+        return;
+      }
+      const viewer = await api.viewer(media);
+      setModel(viewer);
+      setState(viewerState(viewer));
+      setDetail((current) => current?.id === item.id ? { ...current, continue_watching_dismissed: false } : current);
+      setDismissedItem(undefined);
+    } catch { setListError('Flixr could not update Continue Watching. Try again.'); }
+  };
   useEffect(() => { if (state !== 'loading') onReady?.(); }, [state, onReady]);
   const items = mode === 'search' ? searchItems : viewerItems(model);
   const focal = items.find((item) => item.backdrop) ?? items[0];
@@ -135,14 +151,19 @@ export function Browse({ onReady, onExit, mode = 'home', query: routeQuery = '',
     <div className="browse-feature">{mode === 'search' ? <Hero focal={focal} mode={mode} query={query} onOpen={open} onQueryChange={setQuery} onPlay={(id) => onNavigate?.(`/play/${encodeURIComponent(id)}`)} /> : <FeaturedHero key={media} items={model?.sections?.find((section) => section.name === 'New')?.items ?? items} suspended={Boolean(detail) || state === 'loading'} onOpen={open} onPlay={(id) => onNavigate?.(`/play/${encodeURIComponent(id)}`)} />}</div>
     {mode !== 'search' && model && <ViewerControls preference={model.preference} error={preferenceError} onChange={savePreference} />}
     <CatalogState state={state} mode={mode} query={query} onRetry={() => setRetry((value) => value + 1)} />
-    {state === 'ready' && (mode === 'search' ? <MediaCollection layout="rail" label="Search results" items={searchItems} onOpen={open} /> : model?.preference.view === 'grid' ? <MediaCollection layout="grid" label="Titles" items={viewerItems(model)} onOpen={open} /> : <HomeRails sections={model?.sections ?? []} onOpen={open} />)}
+    {!detail && listError && <p className="detail-notice" role="alert">{listError}</p>}
+    {state === 'ready' && (mode === 'search' ? <MediaCollection layout="rail" label="Search results" items={searchItems} onOpen={open} /> : model?.preference.view === 'grid' ? <MediaCollection layout="grid" label="Titles" items={viewerItems(model)} onOpen={open} /> : <HomeRails sections={model?.sections ?? []} onOpen={open} onDismiss={(item) => { void changeContinueWatching(item, true); }} />)}
+    {dismissedItem && <aside className="continue-watching-undo" role="status"><span>{dismissedItem.title} hidden from Continue Watching.</span><button onClick={() => { void changeContinueWatching(dismissedItem, false); }}>Undo</button></aside>}
     {!detail && detailLoading && <p className="detail-notice" role="status">Opening title…</p>}{!detail && detailError && <div className="detail-notice" role="alert">{detailError}<button onClick={close}>Back to library</button></div>}
-    {detail && <DetailDialog key={`detail-${detail.id}`} loading={detailLoading} detailError={detailError} onRetry={() => loadDetail(detail)} detail={detail} error={listError} dialog={dialog} onClose={close} onPlay={(id) => onNavigate?.(`/play/${encodeURIComponent(id)}`)} onToggleList={changeListed} onWatched={changeWatched} onRestoreFocus={() => window.setTimeout(() => opener.current?.focus(), 0)} />}
+    {detail && <DetailDialog key={`detail-${detail.id}`} loading={detailLoading} detailError={detailError} onRetry={() => loadDetail(detail)} detail={detail} error={listError} dialog={dialog} onClose={close} onPlay={(id) => onNavigate?.(`/play/${encodeURIComponent(id)}`)} onToggleList={changeListed} onRestoreContinueWatching={() => changeContinueWatching(detail, false)} onWatched={changeWatched} onRestoreFocus={() => window.setTimeout(() => opener.current?.focus(), 0)} />}
   </main>;
 }
 
 function viewerItems(model?: ViewerModel) { return model?.items ?? model?.sections?.flatMap((section) => section.items) ?? []; }
-function listedItemIDs(model?: ViewerModel) { return new Set(viewerItems(model).filter((item) => item.listed).map((item) => item.id)); }
+function viewerProfileState(model: ViewerModel | undefined, id: string) {
+  const item = viewerItems(model).find((candidate) => candidate.id === id);
+  return { listed: item?.listed ?? false, continue_watching_dismissed: item?.continue_watching_dismissed ?? false };
+}
 function viewerState(viewer: ViewerModel): 'ready' | 'empty' { return viewer.preference.view === 'rows' ? (viewer.sections?.some((section) => section.items.length) ? 'ready' : 'empty') : (viewer.items?.length ? 'ready' : 'empty'); }
 function updateListed(model: ViewerModel, id: string, listed: boolean): ViewerModel {
   const source = viewerItems(model).find((item) => item.id === id);
@@ -157,6 +178,10 @@ function updateListed(model: ViewerModel, id: string, listed: boolean): ViewerMo
       return { ...section, items: items.some((item) => item.id === id) || !source ? items : [...items, { ...source, listed: true }] };
     }),
   };
+}
+function updateDismissed(model: ViewerModel, id: string): ViewerModel {
+  const update = (item: ViewerItem) => item.id === id ? { ...item, continue_watching_dismissed: true } : item;
+  return { ...model, items: model.items?.map(update), sections: model.sections?.map((section) => ({ ...section, items: section.name === 'Continue Watching' ? section.items.filter((item) => item.id !== id) : section.items.map(update) })) };
 }
 function NavButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) { return <button aria-current={active ? 'page' : undefined} className={`nav-tab ${active ? 'selected' : ''}`} onClick={onClick}>{label}{active && <motion.span className="nav-indicator" layoutId="browse-navigation" transition={{ type: 'spring', stiffness: 450, damping: 38 }} />}</button>; }
 function Hero({ focal, mode, query, onOpen, onQueryChange, onPlay }: { focal?: ViewerItem; mode: Mode; query: string; onOpen: OpenDetail; onQueryChange: (value: string) => void; onPlay: (id: string) => void }) {
@@ -185,15 +210,15 @@ function SeriesEpisodes({ detail, onPlay, onWatched }: { detail: SeriesDetail; o
   return <section className="episodes" aria-label="Episodes"><div className="episode-heading"><h3>Episodes</h3><span>{selected?.episodes.length ?? 0} episodes</span>{selected && <><button onClick={() => onWatched(selected.number, true)}>Mark season watched</button><button onClick={() => onWatched(selected.number, false)}>Start season over</button></>}</div><div className="season-tabs" {...tabs.tabListProps} aria-label="Seasons">{seasons.map((season, index) => <button key={season.id} {...tabs.getTabProps({ value: season.id, label: `Season ${season.number}` }, index)}>Season {season.number}</button>)}</div>{selected && <div {...tabs.getPanelProps(selected.id)}>{[...selected.episodes].sort((a, b) => a.episode - b.episode).map((episode) => <div className="episode-row" key={episode.id}><span className="episode-number">{String(episode.episode).padStart(2, '0')}</span><div><strong>{episode.title}</strong><p>{episode.playable === false ? 'Preview · No media file' : `Season ${episode.season} · Episode ${episode.episode}`}</p></div>{episode.playable !== false && <button aria-label={`Play S${episode.season} E${episode.episode} ${episode.title}`} onClick={() => onPlay(episode.id)}>▶</button>}</div>)}</div>}</section>;
 }
 function kindLabel(item: CatalogItem) { return item.kind === 'series' ? 'SERIES' : item.kind === 'episode' ? `EPISODE · S${item.season ?? '?'} E${item.episode ?? '?'}` : 'FILM'; }
-function DetailDialog({ detail, error, loading, detailError, onRetry, dialog, onClose, onPlay, onToggleList, onWatched, onRestoreFocus }: { detail: Detail; error?: string; loading: boolean; detailError: string; onRetry: () => void; dialog: React.RefObject<HTMLDialogElement | null>; onClose: () => void; onPlay: (id: string) => void; onToggleList: () => Promise<void>; onWatched: (kind: 'film' | 'episode' | 'season' | 'series', id: string, watched: boolean, season?: number) => void; onRestoreFocus: () => void }) {
+function DetailDialog({ detail, error, loading, detailError, onRetry, dialog, onClose, onPlay, onToggleList, onRestoreContinueWatching, onWatched, onRestoreFocus }: { detail: Detail; error?: string; loading: boolean; detailError: string; onRetry: () => void; dialog: React.RefObject<HTMLDialogElement | null>; onClose: () => void; onPlay: (id: string) => void; onToggleList: () => Promise<void>; onRestoreContinueWatching: () => Promise<void>; onWatched: (kind: 'film' | 'episode' | 'season' | 'series', id: string, watched: boolean, season?: number) => void; onRestoreFocus: () => void }) {
   const playable = detail.playable !== false;
   return <dialog className="media-dialog" ref={dialog} aria-labelledby="detail-title" onClose={onRestoreFocus} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}><article className="detail"><div className={`detail-hero ${!detail.backdrop ? 'detail-poster-hero' : ''}`}>
     {(detail.backdrop || detail.poster) && <Artwork src={detail.backdrop || detail.poster!} priority />}
-    <button className="detail-close" aria-label="Close details" autoFocus onClick={onClose}>×</button><div className="detail-heading"><p className="eyebrow">{kindLabel(detail)}</p><h2 id="detail-title">{detail.title}</h2><div className="detail-actions">{(detail.kind === 'film' || detail.kind === 'episode') && playable && <button className="primary" onClick={() => onPlay(detail.id)}>▶ Play {detail.title}</button>}<button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, true)}>Mark watched</button><button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, false)}>Mark unwatched</button>{(detail.kind === 'film' || detail.kind === 'series') && <LoadingButton resetAfter={450} className="list-action" onAction={onToggleList} pendingLabel="Saving…" successLabel={detail.listed ? 'Added to My List' : 'Removed from My List'}>{detail.listed ? 'Remove from My List' : 'Add to My List'}</LoadingButton>}</div></div></div>
+    <button className="detail-close" aria-label="Close details" autoFocus onClick={onClose}>×</button><div className="detail-heading"><p className="eyebrow">{kindLabel(detail)}</p><h2 id="detail-title">{detail.title}</h2><div className="detail-actions">{(detail.kind === 'film' || detail.kind === 'episode') && playable && <button className="primary" onClick={() => onPlay(detail.id)}>▶ Play {detail.title}</button>}<button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, true)}>Mark watched</button><button onClick={() => onWatched(detail.kind === 'series' ? 'series' : detail.kind === 'episode' ? 'episode' : 'film', detail.id, false)}>Mark unwatched</button>{detail.continue_watching_dismissed && (detail.kind === 'film' || detail.kind === 'series') && <button onClick={() => { void onRestoreContinueWatching(); }}>Restore to Continue Watching</button>}{(detail.kind === 'film' || detail.kind === 'series') && <LoadingButton resetAfter={450} className="list-action" onAction={onToggleList} pendingLabel="Saving…" successLabel={detail.listed ? 'Added to My List' : 'Removed from My List'}>{detail.listed ? 'Remove from My List' : 'Add to My List'}</LoadingButton>}</div></div></div>
     <div className="detail-body"><div className="detail-facts">{detail.year && <span>{detail.year}</span>}{detail.genres?.map((genre) => <span key={genre}>{genre}</span>)}{detail.demo && <span className="preview-badge">Metadata preview</span>}</div>{detail.synopsis && <ShowMore lines={4} className="detail-synopsis">{detail.synopsis}</ShowMore>}{(detail.kind === 'film' || detail.kind === 'episode') && <RatingControl key={detail.id} catalogID={detail.id} />}{detail.demo && <p className="detail-note">Demo title · no media file</p>}{error && <p role="alert">{error}</p>}{(detail.kind === 'film' || detail.kind === 'episode') && <MediaMetadata item={detail} />}{playable && (detail.kind === 'film' || detail.kind === 'episode') && <ScreenReadiness catalogID={detail.id} />}{loading && <p role="status">Loading episodes…</p>}{detailError && <div role="alert">{detailError}<button onClick={onRetry}>Try again</button></div>}{detail.kind === 'series' && 'seasons' in detail && <SeriesEpisodes detail={detail} onPlay={onPlay} onWatched={(season, watched) => onWatched('season', detail.id, watched, season)} />}</div></article></dialog>;
 }
 function MediaMetadata({ item }: { item: CatalogItem }) { const metadata = [item.container, item.video_codec, item.audio_codec].filter(Boolean).join(' · '); return metadata ? <p>Media: {metadata}</p> : null; }
-function HomeRails({ sections, onOpen }: { sections: ViewerSection[]; onOpen: OpenDetail }) { return <>{sections.map((section) => <MediaCollection key={section.name} layout="rail" label={section.name} items={section.items} onOpen={onOpen} />)}</>; }
+function HomeRails({ sections, onOpen, onDismiss }: { sections: ViewerSection[]; onOpen: OpenDetail; onDismiss: (item: ViewerItem) => void }) { return <>{sections.map((section) => <MediaCollection key={section.name} layout="rail" label={section.name} items={section.items} onOpen={onOpen} onDismiss={section.name === 'Continue Watching' ? onDismiss : undefined} />)}</>; }
 
 function RatingControl({ catalogID }: { catalogID: string }) {
   const [value, setValue] = useState(0);

@@ -61,6 +61,7 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   const posted = JSON.parse(requests.find(({ path }) => path.endsWith('/playback/plans'))!.body!);
   expect(posted).toEqual({
     catalog_id: 'film-1',
+    continue_watching_intent: 'user',
     capabilities: expect.objectContaining({
       supports_direct: true,
       supports_remux: true,
@@ -222,12 +223,14 @@ it('sends the compatibility seek position and surfaces a fatal HLS error', async
 
 it('recovers an expired playback lease from the server-acknowledged position', async () => {
   const calls: string[] = [];
+  const planIntents: string[] = [];
   let plans = 0;
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const path = String(input);
     calls.push(path);
     if (path.endsWith('/playback/plans')) {
       plans += 1;
+      planIntents.push(JSON.parse(String(init?.body)).continue_watching_intent);
       return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: `session-${plans}`, media_url: `/media-${plans}.mp4`, heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/seek-${plans}`, stop_url: `/stop-${plans}`, resume_ms: plans === 1 ? 0 : 12_000, stream_offset_ms: 0, expires_at: 9999999999 }));
     }
     if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
@@ -244,6 +247,7 @@ it('recovers an expired playback lease from the server-acknowledged position', a
 
   expect(video.currentTime).toBe(12);
   expect(plans).toBe(2);
+  expect(planIntents).toEqual(['user', 'recovery']);
   expect(calls.some((path) => path.endsWith('/session-1/stop'))).toBe(true);
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
@@ -574,7 +578,7 @@ it('counts down to the server-selected next episode after durable completion', a
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
   }
   expect(advance).toHaveBeenCalledOnce();
-  expect(advance).toHaveBeenCalledWith('episode-2');
+  expect(advance).toHaveBeenCalledWith('episode-2', 'automatic');
 });
 
 it('does not resolve the next episode when durable completion is rejected', async () => {

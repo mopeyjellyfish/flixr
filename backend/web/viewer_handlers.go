@@ -45,6 +45,28 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	write(w, http.StatusOK, map[string]bool{"listed": r.Method == http.MethodPut})
 }
 
+func (s *Server) continueWatching(w http.ResponseWriter, r *http.Request) {
+	if !s.profile(w, r) {
+		return
+	}
+	kind, id := r.PathValue("kind"), r.PathValue("id")
+	if kind != "film" && kind != "series" {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	profile, _ := s.house.Profile(s.session(r))
+	dismissed := r.Method == http.MethodDelete
+	if err := s.catalog.SetContinueWatchingDismissed(profile.ID, kind, id, dismissed); err != nil {
+		if errors.Is(err, catalog.ErrCatalogNotFound) {
+			fail(w, http.StatusNotFound, "catalog_not_found")
+		} else {
+			fail(w, http.StatusInternalServerError, "catalog_continue_watching_failed")
+		}
+		return
+	}
+	write(w, http.StatusOK, map[string]bool{"dismissed": dismissed})
+}
+
 func (s *Server) watched(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return
