@@ -43,7 +43,9 @@ type inputAuthority struct {
 	sourceKey        string
 	audioStreamIndex int
 	external         bool
-	expiresAt        time.Time
+	// pendingViewerID is cleared when the generation is admitted and shareable.
+	pendingViewerID string
+	expiresAt       time.Time
 }
 
 type generation struct {
@@ -376,9 +378,30 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 		_ = m.files.RemoveAll(dir)
 		return Session{}, err
 	}
+	revokeInputs := func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, token := range inputTokens {
+			delete(m.inputs, token)
+		}
+	}
+	m.mu.Lock()
+	_, viewerRevoked = m.revokedViewers[viewerID]
+	if m.closed || (viewerID != "" && viewerRevoked) {
+		m.mu.Unlock()
+		releaseReservation(true)
+		_ = m.files.RemoveAll(dir)
+		return Session{}, ErrSessionInvalid
+	}
+	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: -1, pendingViewerID: viewerID, expiresAt: now.Add(settings.LeaseTTL)}
+	if plan.AudioExternal {
+		m.inputs[inputTokens[1]] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: plan.AudioStreamIndex, external: true, pendingViewerID: viewerID, expiresAt: now.Add(settings.LeaseTTL)}
+	}
+	m.mu.Unlock()
 	log := &boundedLog{}
 	process, err := m.executor.Start(name, args, log)
 	if err != nil {
+		revokeInputs()
 		releaseReservation(true)
 		_ = m.files.RemoveAll(dir)
 		return Session{}, fmt.Errorf("start FFmpeg: %w", err)
@@ -401,14 +424,17 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	if m.closed || (viewerID != "" && viewerRevoked) {
 		delete(m.pendingJobs, jobKey)
 		m.mu.Unlock()
+		revokeInputs()
 		m.retireGeneration(context.Background(), gen)
 		return Session{}, ErrSessionInvalid
 	}
 	m.generations[generationID] = gen
 	m.sessions[session.ID] = session
-	m.inputs[inputToken] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: -1, expiresAt: now.Add(settings.LeaseTTL)}
-	if plan.AudioExternal {
-		m.inputs[inputTokens[1]] = inputAuthority{catalogID: catalogID, sourceKey: plan.SourceKey, audioStreamIndex: plan.AudioStreamIndex, external: true, expiresAt: now.Add(settings.LeaseTTL)}
+	for _, token := range inputTokens {
+		if authority, ok := m.inputs[token]; ok {
+			authority.pendingViewerID = ""
+			m.inputs[token] = authority
+		}
 	}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
@@ -779,6 +805,11 @@ func (m *Manager) StopViewer(viewerID string) {
 	if m.pendingViewers[viewerID] > 0 {
 		m.revokedViewers[viewerID] = struct{}{}
 	}
+	for token, authority := range m.inputs {
+		if authority.pendingViewerID == viewerID {
+			delete(m.inputs, token)
+		}
+	}
 	owned := make([]ownedSession, 0)
 	for _, session := range m.sessions {
 		if session.ViewerID == viewerID {
@@ -1106,6 +1137,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}
 	}
 	m.sessions = map[string]Session{}
+	m.inputs = map[string]inputAuthority{}
 	m.mu.Unlock()
 	// See Sweep: session teardown has no observation timestamp and cannot safely
 	// supersede a durable explicit action.
