@@ -121,6 +121,18 @@ func TestTMDBRejectsNonImageArtwork(t *testing.T) {
 	}
 }
 
+func TestTMDBSniffsArtworkWhenProviderOmitsContentType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header()["Content-Type"] = nil
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n"))
+	}))
+	defer server.Close()
+	artwork, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).FetchArtwork(context.Background(), "/still.png")
+	if err != nil || artwork.ContentType != "image/png" || len(artwork.Bytes) != 8 {
+		t.Fatalf("sniffed artwork = %+v, %v", artwork, err)
+	}
+}
+
 func TestTMDBMatchesTitleAndYearWithoutGuessing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("query") != "Dune" {
