@@ -26,8 +26,9 @@ import (
 )
 
 var (
-	ErrOutsideRoot = errors.New("path outside configured roots")
-	ErrScanActive  = errors.New("scan already active")
+	ErrOutsideRoot           = errors.New("path outside configured roots")
+	ErrScanActive            = errors.New("scan already active")
+	ErrRemovalReviewRequired = errors.New("library removals require owner review")
 )
 
 const scanHistoryLimit = 32
@@ -616,7 +617,10 @@ func (c *Catalog) Scan(ctx context.Context, workers int) error {
 func (c *Catalog) runScan(ctx context.Context, workers int) {
 	err := c.scan(ctx, workers)
 	c.mu.Lock()
-	if err != nil {
+	if errors.Is(err, ErrRemovalReviewRequired) {
+		c.status.Status = "review_required"
+		c.status.Message = err.Error()
+	} else if err != nil {
 		c.status.Status = "failed"
 		c.status.Message = err.Error()
 	} else if c.status.Failed > 0 {
@@ -629,7 +633,11 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	credentialRevision := c.scanCredentialRevision
 	metadataFailure := c.metadataFailure
 	c.mu.Unlock()
-	if status.Status != "failed" && metadataFailure == "" && credentialRevision != "" {
+	var locationErr *locationScanError
+	if errors.As(err, &locationErr) {
+		c.recordUnavailableLocation(locationErr.scanID, locationErr.root, locationErr.cause)
+	}
+	if (status.Status == "complete" || status.Status == "partial") && metadataFailure == "" && credentialRevision != "" {
 		c.recordMetadataRefresh(credentialRevision)
 	}
 
@@ -651,12 +659,16 @@ func (c *Catalog) scanError() error {
 	if c.status.Status == "failed" {
 		return errors.New(c.status.Message)
 	}
+	if c.status.Status == "review_required" {
+		return ErrRemovalReviewRequired
+	}
 	return nil
 }
 
 func (c *Catalog) scan(ctx context.Context, workers int) error {
 	c.mu.RLock()
 	roots := []struct{ path, kind string }{{c.film, "film"}, {c.tv, "episode"}}
+	scanID := c.status.ID
 	previousByPath := make(map[scanKey]Item, len(c.items))
 	for _, item := range c.items {
 		previousByPath[scanKey{item.rootKind, item.path}] = item
@@ -668,13 +680,18 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	}
 
 	var files []scanFile
+	completedRoots := make([]rootScan, 0, len(roots))
 	for _, r := range roots {
 		if r.path == "" {
 			continue
 		}
+		active, err := c.activeSources(r.kind, previousByPath)
+		if err != nil {
+			return err
+		}
 		var rootFiles []scanFile
 		var sidecars, subtitleSidecars []sidecarFile
-		err := afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
+		err = afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				// A disconnected or unreadable mount is not an empty library.
 				return fmt.Errorf("read media directory: %w", walkErr)
@@ -700,8 +717,32 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			return nil
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &locationScanError{scanID: scanID, root: rootScan{kind: r.kind, path: r.path}, cause: err}
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
+		discovered := make(map[string]bool, len(rootFiles))
+		for _, file := range rootFiles {
+			discovered[file.rel] = true
+		}
+		missing := make([]activeSource, 0)
+		for _, source := range active {
+			if !discovered[source.relativePath] {
+				missing = append(missing, source)
+			}
+		}
+		rootState := rootScan{kind: r.kind, path: r.path, items: len(rootFiles), missing: len(missing)}
+		if suspiciousRemoval(len(active), len(missing), len(rootFiles)) {
+			if err := c.recordRemovalReview(scanID, rootState, missing); err != nil {
+				return err
+			}
+			return ErrRemovalReviewRequired
+		}
+		completedRoots = append(completedRoots, rootState)
 		for index := range rootFiles {
 			rootFiles[index].sidecars = matchingAudioSidecars(rootFiles[index].rel, sidecars)
 			rootFiles[index].subtitleSidecars = matchingSubtitleSidecars(rootFiles[index].rel, subtitleSidecars)
@@ -778,7 +819,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return c.persist(ctx, next, sources, failures, observations, conflicts, seriesState)
+	return c.persist(ctx, next, sources, failures, observations, conflicts, seriesState, scanID, completedRoots)
 }
 
 func digestFile(ctx context.Context, file *os.File) (string, error) {
@@ -1163,7 +1204,7 @@ func providerFailure(identifier, outcome string) scanObservation {
 	return scanObservation{identifier: identifier, outcome: outcome, message: message}
 }
 
-func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series) error {
+func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series, scanID string, completedRoots []rootScan) error {
 	c.mu.RLock()
 	previous := make(map[string]Item, len(c.items))
 	for k, v := range c.items {
@@ -1365,6 +1406,9 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			}
 		}
 		if err := applyIdentityMappings(tx); err != nil {
+			return err
+		}
+		if err := recordCompleteLocationsTx(tx, scanID, completedRoots); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {

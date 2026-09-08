@@ -89,6 +89,25 @@ describe('owner operations', () => {
     expect(await screen.findByText('No scan has started.')).toBeInTheDocument();
   });
 
+  it('requires explicit confirmation before cleaning up suspicious removals', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '' }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      if (path.includes('/scan/removals/confirm') && init?.method === 'POST') return new Response(JSON.stringify({ confirmed: true, locations: [{ root_kind: 'film', state: 'available', scan_complete: true, items: 0, missing: 0 }] }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: { status: 'review_required', scanned: 0, unmatched: 0, failed: 0, message: 'library removals require owner review' }, locations: [{ root_kind: 'film', state: 'review_required', scan_complete: false, items: 0, missing: 2, pending_scan_id: 'scan-1' }] }));
+      return new Response(JSON.stringify({ configured: false, settings: [], screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    expect(await screen.findByText(/2 missing files/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /confirm removal/i }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 missing files'));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/removals/confirm', expect.objectContaining({ method: 'POST', body: JSON.stringify({ scan_id: 'scan-1', root_kind: 'film' }) }));
+    expect(await screen.findByText(/cleanup confirmed/i)).toBeVisible();
+  });
+
   it('offers an owner-only local diagnostics download and explains its contents', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true }, profiles: [], films: '', tv: '', configured: false, scan: {} })));
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);

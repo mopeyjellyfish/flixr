@@ -91,3 +91,27 @@ func TestExistingDatabaseReceivesCatalogMetadataFieldsMigration(t *testing.T) {
 		t.Fatalf("migrated metadata table: %v", err)
 	}
 }
+
+func TestLibraryLocationSafetySchemaIsInstalled(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO library_locations(root_kind,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,updated_at,message) VALUES('film','/media/films','review_required',0,0,1,'scan-1',1,'review removals')`); err != nil {
+		t.Fatalf("insert library location: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,root_kind) VALUES('catalog-1','film','Film','film.mp4','film'); INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint) VALUES('physical-1','catalog-1','film','film.mp4','fingerprint')`); err != nil {
+		t.Fatalf("insert catalog source: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO library_removal_candidates(root_kind,scan_id,physical_file_id,catalog_id) VALUES('film','scan-1','physical-1','catalog-1')`); err != nil {
+		t.Fatalf("insert removal candidate: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM catalog_physical_files WHERE id='physical-1'`); err != nil {
+		t.Fatal(err)
+	}
+	var candidates int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM library_removal_candidates`).Scan(&candidates); err != nil || candidates != 0 {
+		t.Fatalf("orphaned removal candidates = %d, %v", candidates, err)
+	}
+}

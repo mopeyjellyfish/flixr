@@ -21,6 +21,7 @@ func TestMissingFilmRetainsProfileListAcrossReappearance(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "Film.mp4")
 	require.NoError(t, os.WriteFile(path, []byte("film"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Keep.mp4"), []byte("keep"), 0o600))
 	library, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
 		return catalog.MediaProperties{}, nil
 	}))

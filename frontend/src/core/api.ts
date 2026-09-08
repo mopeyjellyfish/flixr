@@ -56,6 +56,7 @@ export type PlaybackStatus = { settings: PlaybackSettings; generations: Playback
 export type EffectiveSetting = { key: string; category: string; scope: string; default: string; environment: string; file_secret: string; persistence: string; restart: string; valid: string; secret: boolean; advanced: boolean; value: string; source: 'default' | 'saved' | 'environment'; mutable: boolean };
 export type SettingsInventory = { settings: EffectiveSetting[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; failed: number; unmatched: number; message?: string; finished_at?: number };
+export type LibraryLocation = { root_kind: 'film' | 'episode'; state: 'unknown' | 'available' | 'unavailable' | 'review_required'; scan_complete: boolean; items: number; missing: number; pending_scan_id?: string; last_scan_id?: string; updated_at: number; message?: string };
 export type ApiErrorCode =
   | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'pin_rate_limited'
   | 'credential_busy' | 'login_rate_limited'
@@ -64,7 +65,7 @@ export type ApiErrorCode =
   | 'playback_capability_unknown'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
-  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
+  | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'scan_status_failed' | 'removal_review_changed' | 'library_cleanup_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
@@ -106,7 +107,9 @@ export function messageFor(code: string): string {
     bad_origin: 'This request was blocked because it came from another site.', logout_failed: 'Flixr could not sign out.',
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
-    scan_failed: 'Flixr could not start a scan.', settings_failed: 'Flixr could not save those settings.',
+    scan_failed: 'Flixr could not start a scan.', scan_status_failed: 'Flixr could not load scan status.',
+    removal_review_changed: 'This removal review changed. Refresh scan status before confirming cleanup.',
+    library_cleanup_failed: 'Flixr could not confirm library cleanup.', settings_failed: 'Flixr could not save those settings.',
     metadata_invalid_credential: 'That TMDB API Read Access Token is not valid.',
     metadata_unavailable: 'Metadata is unavailable. Your local title is unchanged; retry when the provider is available.',
     metadata_busy: 'Wait for the current scan to finish, then retry metadata repair.',
