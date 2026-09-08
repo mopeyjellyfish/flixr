@@ -183,13 +183,27 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const frenchSubtitleURL = await page.locator('video track').getAttribute('src');
   const frenchCue = await page.evaluate(async (url) => (await fetch(url!)).text(), frenchSubtitleURL);
   expect(frenchCue).toContain('Sous-titre Signal');
-  const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
-  await page.locator('video').evaluate((video) => {
-    const media = video as HTMLVideoElement;
-    media.currentTime = 0.1;
-    media.dispatchEvent(new Event('seeked', { bubbles: true }));
-  });
-  expect((await seekResponse).ok()).toBeTruthy();
+  for (const seconds of [0.1, 0.3, 0.1]) {
+    const seekResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/seek'));
+    await page.locator('video').evaluate((video, target) => {
+      const media = video as HTMLVideoElement;
+      media.currentTime = target;
+      media.dispatchEvent(new Event('seeked', { bubbles: true }));
+    }, seconds);
+    const response = await seekResponse;
+    expect(response.ok()).toBeTruthy();
+    const plan = await response.json() as { selected_subtitle?: { index: number }; subtitle_url?: string };
+    expect(plan.selected_subtitle?.index).toBe(4);
+    expect(plan.subtitle_url).toBeTruthy();
+    await expect(subtitles).toHaveValue('embedded:4');
+    await expect(page.locator('video track')).toHaveAttribute('src', plan.subtitle_url!);
+    const cue = await page.evaluate(async (url) => {
+      const response = await fetch(url!);
+      return { status: response.status, text: await response.text() };
+    }, plan.subtitle_url);
+    expect(cue.status).toBe(200);
+    expect(cue.text).toContain('Sous-titre Signal');
+  }
   const frenchResponse = page.waitForResponse((response) => response.url().includes('/playback/sessions/') && response.url().endsWith('/audio'));
   await audio.selectOption('embedded:2');
   const french = await frenchResponse;

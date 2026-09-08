@@ -25,8 +25,9 @@ shows a Play button.
 
 Shortcuts apply to the player. Focused form fields and buttons retain their
 normal keyboard behaviour. Dragging the timeline previews a target and seeks
-when released. Repeated seeks retain the latest requested position while a
-previous seek finishes.
+when released. Repeated ten-second presses accumulate from the latest requested position, even
+while an earlier seek finishes. The player coalesces pending requests and keeps
+the latest target.
 
 ## Chapters and preview pictures
 

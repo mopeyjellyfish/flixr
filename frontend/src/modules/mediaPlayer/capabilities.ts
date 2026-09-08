@@ -59,10 +59,16 @@ function transcodeConfiguration(media: CatalogItem, type: DecodingType): MediaDe
 
 async function supports(configuration: MediaDecodingConfiguration | undefined): Promise<boolean> {
 	if (!configuration || !navigator.mediaCapabilities) return false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		return (await navigator.mediaCapabilities.decodingInfo(configuration)).supported;
+		return await Promise.race([
+			navigator.mediaCapabilities.decodingInfo(configuration).then((result) => result.supported === true),
+			new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2000); }),
+		]);
 	} catch {
 		return false;
+	} finally {
+		clearTimeout(timer);
 	}
 }
 

@@ -30,3 +30,8 @@ generation start; direct-play cues retain the source timeline.
 Downloaded playback is not implemented yet. Subtitle selection for downloaded
 content remains an open qualification item and must be verified with the future
 download runtime before issue #31 can close.
+
+The production acceptance suite switches embedded subtitles off and back on,
+then verifies the selected language and fetched caption text after repeated HLS
+seeks before changing audio tracks. This is real-media browser evidence, not
+downloaded-playback or physical mobile/TV qualification.

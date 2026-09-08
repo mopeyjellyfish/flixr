@@ -110,3 +110,18 @@ it('assesses MSE when both native HLS and MSE are advertised', async () => {
  await browserCapabilities(media);
  expect(decodingInfo.mock.calls.slice(1).map(([configuration])=>configuration.type)).toEqual(['media-source','media-source']);
 });
+
+it('bounds a stalled capability probe without discarding completed supported paths', async () => {
+	vi.useFakeTimers();
+	try {
+		vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+		vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+		const decodingInfo = vi.fn().mockImplementation((configuration: MediaDecodingConfiguration) => configuration.type === 'file' ? new Promise(() => {}) : Promise.resolve({ supported: true }));
+		Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
+		let result: Awaited<ReturnType<typeof browserCapabilities>> | undefined;
+		void browserCapabilities(media).then((value) => { result = value; });
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(result).toMatchObject({ supports_direct: false, supports_remux: true, supports_transcode: true });
+		expect(vi.getTimerCount()).toBe(0);
+	} finally { vi.useRealTimers(); }
+});

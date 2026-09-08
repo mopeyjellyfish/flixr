@@ -41,3 +41,31 @@ it('reports rejected fullscreen without interrupting playback', async () => {
   expect(await screen.findByRole('status')).toHaveTextContent('keep watching');
   expect(toggle).not.toHaveBeenCalled();
 });
+it('accumulates rapid seek steps before the media reports a new position', () => {
+  const seek = vi.fn();
+  render(<PlayerControls playing durationMS={120000} positionMS={10000} onSeek={seek} onToggle={() => {}} video={{current:null}} stage={{current:null}} />);
+  fireEvent.click(screen.getByRole('button', {name:'Forward 10 seconds'}));
+  fireEvent.click(screen.getByRole('button', {name:'Forward 10 seconds'}));
+  fireEvent.click(screen.getByRole('button', {name:'Back 10 seconds'}));
+  expect(seek.mock.calls.map(([value]) => value)).toEqual([20000,30000,20000]);
+});
+it('accumulates discrete keyboard seeks and ignores held-key repeats', () => {
+  const seek = vi.fn(); const root=document.createElement('main'); document.body.append(root);
+  render(<PlayerControls playing durationMS={120000} positionMS={10000} onSeek={seek} onToggle={() => {}} video={{current:null}} stage={{current:root}} />, {container:root});
+  fireEvent.keyDown(root,{key:'ArrowRight'});
+  fireEvent.keyDown(root,{key:'ArrowRight',repeat:true});
+  fireEvent.keyDown(root,{key:'ArrowRight'});
+  expect(seek.mock.calls.map(([value]) => value)).toEqual([20000,30000]);
+});
+it('retains the latest seek intent while an earlier seek reports its position', () => {
+  const seek = vi.fn(); const video={current:null}; const stage={current:null}; const toggle=()=>{};
+  const {rerender}=render(<PlayerControls playing seeking durationMS={120000} positionMS={10000} onSeek={seek} onToggle={toggle} video={video} stage={stage} />);
+  fireEvent.click(screen.getByRole('button',{name:'Forward 10 seconds'}));
+  fireEvent.click(screen.getByRole('button',{name:'Forward 10 seconds'}));
+  rerender(<PlayerControls playing seeking durationMS={120000} positionMS={20000} onSeek={seek} onToggle={toggle} video={video} stage={stage} />);
+  fireEvent.click(screen.getByRole('button',{name:'Forward 10 seconds'}));
+  expect(seek).toHaveBeenLastCalledWith(40000);
+  rerender(<PlayerControls playing durationMS={120000} positionMS={41000} onSeek={seek} onToggle={toggle} video={video} stage={stage} />);
+  fireEvent.click(screen.getByRole('button',{name:'Back 10 seconds'}));
+  expect(seek).toHaveBeenLastCalledWith(31000);
+});
