@@ -87,6 +87,15 @@ type SubtitleTrack struct {
 	Title    string `json:"title,omitempty"`
 	Default  bool   `json:"default,omitempty"`
 	Forced   bool   `json:"forced,omitempty"`
+	SDH      bool   `json:"sdh,omitempty"`
+	External bool   `json:"external,omitempty"`
+
+	sourceIndex int
+	path        string
+	digest      string
+	changeToken string
+	size        int64
+	mtime       int64
 }
 
 func (t *SubtitleTrack) UnmarshalJSON(data []byte) error {
@@ -97,11 +106,12 @@ func (t *SubtitleTrack) UnmarshalJSON(data []byte) error {
 		Title    string `json:"title"`
 		Default  bool   `json:"default"`
 		Forced   bool   `json:"forced"`
+		SDH      bool   `json:"sdh"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	*t = SubtitleTrack{Index: normalizedIndex(raw.Index), Codec: raw.Codec, Language: raw.Language, Title: raw.Title, Default: raw.Default, Forced: raw.Forced}
+	*t = SubtitleTrack{Index: normalizedIndex(raw.Index), Codec: raw.Codec, Language: raw.Language, Title: raw.Title, Default: raw.Default, Forced: raw.Forced, SDH: raw.SDH}
 	return nil
 }
 
@@ -295,6 +305,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 		return nil, err
 	}
 	if err := c.loadExternalAudio(); err != nil {
+		return nil, err
+	}
+	if err := c.loadExternalSubtitles(); err != nil {
 		return nil, err
 	}
 	if err := c.loadMatchState("catalog_items", func(id, provider, language, region string, confidence float64, owner, unmatched int) {
@@ -491,10 +504,11 @@ func media(path string) bool {
 }
 
 type scanFile struct {
-	changeToken     string
-	root, kind, rel string
-	size, mtime     int64
-	sidecars        []sidecarFile
+	changeToken      string
+	root, kind, rel  string
+	size, mtime      int64
+	sidecars         []sidecarFile
+	subtitleSidecars []sidecarFile
 }
 type sidecarFile struct{ rel string }
 type scanKey struct{ kind, rel string }
@@ -619,7 +633,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			continue
 		}
 		var rootFiles []scanFile
-		var sidecars []sidecarFile
+		var sidecars, subtitleSidecars []sidecarFile
 		err := afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				// A disconnected or unreadable mount is not an empty library.
@@ -640,6 +654,8 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 				rootFiles = append(rootFiles, scanFile{root: r.path, kind: r.kind, rel: rel, size: info.Size(), mtime: info.ModTime().UnixNano(), changeToken: fileChangeToken(info)})
 			} else if externalAudio(path) {
 				sidecars = append(sidecars, sidecarFile{rel: rel})
+			} else if externalSubtitle(path) {
+				subtitleSidecars = append(subtitleSidecars, sidecarFile{rel: rel})
 			}
 			return nil
 		})
@@ -648,6 +664,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		}
 		for index := range rootFiles {
 			rootFiles[index].sidecars = matchingAudioSidecars(rootFiles[index].rel, sidecars)
+			rootFiles[index].subtitleSidecars = matchingSubtitleSidecars(rootFiles[index].rel, subtitleSidecars)
 		}
 		files = append(files, rootFiles...)
 	}
@@ -658,7 +675,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	for _, f := range files {
 		g.Go(func() error {
 			// A stable path, size and mtime never opens, hashes, or probes the file again.
-			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" && len(f.sidecars) == 0 && !hasExternalAudio(old.Audio) {
+			if old, ok := previousByPath[scanKey{f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" && len(f.sidecars) == 0 && len(f.subtitleSidecars) == 0 && !hasExternalAudio(old.Audio) && !hasExternalSubtitles(old.Subtitles) {
 				select {
 				case results <- scanResult{item: old, file: f}:
 					return nil
@@ -786,6 +803,9 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 		properties.PrimaryVideoStreamIndex = -1
 	}
 	if err := c.appendAudioSidecars(ctx, root, f, &properties); err != nil {
+		return Item{}, err
+	}
+	if err := c.appendSubtitleSidecars(ctx, root, f, &properties); err != nil {
 		return Item{}, err
 	}
 	switch strings.ToLower(filepath.Ext(f.rel)) {
@@ -1162,7 +1182,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			if err != nil {
 				return err
 			}
-			subtitles, err := json.Marshal(x.Subtitles)
+			subtitles, err := json.Marshal(embeddedSubtitles(x.Subtitles))
 			if err != nil {
 				return err
 			}
@@ -1187,6 +1207,17 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 					continue
 				}
 				if _, err = tx.Exec(`INSERT INTO catalog_audio_sidecars(catalog_id,selection_index,source_stream_index,relative_path,codec,channels,language,title,is_default,is_forced) VALUES(?,?,?,?,?,?,?,?,?,?)`, x.ID, track.Index, track.sourceIndex, track.path, track.Codec, track.Channels, track.Language, track.Title, boolInt(track.Default), boolInt(track.Forced)); err != nil {
+					return err
+				}
+			}
+			if _, err = tx.Exec("DELETE FROM catalog_subtitle_sidecars WHERE catalog_id=?", x.ID); err != nil {
+				return err
+			}
+			for _, track := range x.Subtitles {
+				if !track.External {
+					continue
+				}
+				if _, err = tx.Exec(`INSERT INTO catalog_subtitle_sidecars(catalog_id,selection_index,source_stream_index,relative_path,codec,language,title,is_default,is_forced,is_sdh,size_bytes,mtime_unix,full_digest,change_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, x.ID, track.Index, track.sourceIndex, track.path, track.Codec, track.Language, track.Title, boolInt(track.Default), boolInt(track.Forced), boolInt(track.SDH), track.size, track.mtime, track.digest, track.changeToken); err != nil {
 					return err
 				}
 			}
@@ -1403,6 +1434,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 			return nil, errors.New("decode catalog media properties")
 		}
 		x.Audio = append(x.Audio, externalAudioTracks(c.items[x.ID].Audio)...)
+		x.Subtitles = append(x.Subtitles, externalSubtitleTracks(c.items[x.ID].Subtitles)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
 		out = append(out, x)

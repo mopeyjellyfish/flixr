@@ -21,16 +21,30 @@ import (
 )
 
 var (
-	ErrClaimed         = errors.New("owner already claimed")
-	ErrToken           = errors.New("invalid setup token")
-	ErrPIN             = errors.New("invalid pin")
-	ErrProfileNotFound = errors.New("profile not found")
-	ErrRateLimited     = errors.New("pin attempts rate limited")
-	ErrHashSaturated   = errors.New("credential hashing saturated")
-	ErrCredentials     = errors.New("invalid credentials")
-	ErrRecovery        = errors.New("owner recovery unavailable")
-	ErrSessionNotFound = errors.New("session not found")
+	ErrClaimed                   = errors.New("owner already claimed")
+	ErrToken                     = errors.New("invalid setup token")
+	ErrPIN                       = errors.New("invalid pin")
+	ErrProfileNotFound           = errors.New("profile not found")
+	ErrRateLimited               = errors.New("pin attempts rate limited")
+	ErrHashSaturated             = errors.New("credential hashing saturated")
+	ErrCredentials               = errors.New("invalid credentials")
+	ErrRecovery                  = errors.New("owner recovery unavailable")
+	ErrSessionNotFound           = errors.New("session not found")
+	ErrInvalidSubtitlePreference = errors.New("invalid subtitle preference")
 )
+
+type SubtitleMode string
+
+const (
+	SubtitleAutomatic SubtitleMode = "automatic"
+	SubtitleOff       SubtitleMode = "off"
+)
+
+type SubtitlePreference struct {
+	Mode      SubtitleMode `json:"mode"`
+	Language  string       `json:"language,omitempty"`
+	PreferSDH bool         `json:"prefer_sdh,omitempty"`
+}
 
 type Profile struct {
 	ID        string `json:"id"`
@@ -61,6 +75,7 @@ type profile struct {
 	attempts      int
 	lockedUntil   time.Time
 	audioLanguage string
+	subtitle      SubtitlePreference
 }
 
 func random() (string, error) {
@@ -94,7 +109,7 @@ func Open(db *sqlite.DB) (*Manager, error) {
 	if err == nil {
 		m.ownerHash, m.salt, m.token = hash, salt, ""
 	}
-	rows, err := db.Query("SELECT profiles.id,name,pin_hash,salt,attempts,locked_until,COALESCE(profile_audio_preferences.language,'') FROM profiles LEFT JOIN profile_audio_preferences ON profile_audio_preferences.profile_id=profiles.id")
+	rows, err := db.Query("SELECT profiles.id,name,pin_hash,salt,attempts,locked_until,COALESCE(profile_audio_preferences.language,''),COALESCE(profile_subtitle_preferences.mode,'automatic'),COALESCE(profile_subtitle_preferences.language,''),COALESCE(profile_subtitle_preferences.prefer_sdh,0) FROM profiles LEFT JOIN profile_audio_preferences ON profile_audio_preferences.profile_id=profiles.id LEFT JOIN profile_subtitle_preferences ON profile_subtitle_preferences.profile_id=profiles.id")
 	if err != nil {
 		return nil, fmt.Errorf("load profiles: %w", err)
 	}
@@ -102,9 +117,11 @@ func Open(db *sqlite.DB) (*Manager, error) {
 	for rows.Next() {
 		var p profile
 		var locked int64
-		if err := rows.Scan(&p.ID, &p.Name, &p.hash, &p.salt, &p.attempts, &locked, &p.audioLanguage); err != nil {
+		var preferSDH int
+		if err := rows.Scan(&p.ID, &p.Name, &p.hash, &p.salt, &p.attempts, &locked, &p.audioLanguage, &p.subtitle.Mode, &p.subtitle.Language, &preferSDH); err != nil {
 			return nil, err
 		}
+		p.subtitle.PreferSDH = preferSDH != 0
 		p.Protected = len(p.hash) > 0
 		p.lockedUntil = time.Unix(locked, 0)
 		m.profiles[p.ID] = p
@@ -616,6 +633,42 @@ func (m *Manager) SaveAudioLanguage(profileID, language string) error {
 		}
 	}
 	p.audioLanguage = language
+	m.profiles[profileID] = p
+	return nil
+}
+
+// SubtitlePreference returns the durable selection policy for one profile.
+func (m *Manager) SubtitlePreference(profileID string) (SubtitlePreference, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.profiles[profileID]
+	if !ok {
+		return SubtitlePreference{}, ErrProfileNotFound
+	}
+	if p.subtitle.Mode == "" {
+		p.subtitle.Mode = SubtitleAutomatic
+	}
+	return p.subtitle, nil
+}
+
+// SaveSubtitlePreference persists an explicit off or automatic language policy.
+func (m *Manager) SaveSubtitlePreference(profileID string, preference SubtitlePreference) error {
+	preference.Language = strings.ToLower(strings.TrimSpace(preference.Language))
+	if preference.Mode != SubtitleOff && preference.Mode != SubtitleAutomatic {
+		return ErrInvalidSubtitlePreference
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.profiles[profileID]
+	if !ok {
+		return ErrProfileNotFound
+	}
+	if m.db != nil {
+		if _, err := m.db.Exec("INSERT INTO profile_subtitle_preferences(profile_id,mode,language,prefer_sdh) VALUES(?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET mode=excluded.mode,language=excluded.language,prefer_sdh=excluded.prefer_sdh", profileID, preference.Mode, preference.Language, boolInt(preference.PreferSDH)); err != nil {
+			return fmt.Errorf("save subtitle preference: %w", err)
+		}
+	}
+	p.subtitle = preference
 	m.profiles[profileID] = p
 	return nil
 }
