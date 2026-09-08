@@ -223,33 +223,40 @@ type ArtworkMaintenanceStatus struct {
 }
 
 type Catalog struct {
-	demo              bool
-	demoSource        string
-	mu                sync.RWMutex
-	db                *sqlite.DB
-	fs                afero.Fs
-	film, tv          string
-	items             map[string]Item
-	series            map[string]Series
-	prober            Prober
-	provider          MetadataProvider
-	token             string
-	scanning          bool
-	cancel            context.CancelFunc
-	done              chan struct{}
-	status            ScanStatus
-	artworkMu         sync.Mutex
-	artworkGroup      singleflight.Group
-	maintenanceCancel context.CancelFunc
-	maintenanceDone   chan struct{}
-	maintenanceStatus ArtworkMaintenanceStatus
-	maintenanceDir    afero.File
-	artworkObjectsDir afero.File
-	derivativeBytes   int64
-	derivativeCount   int
-	derivativeReady   bool
-	refreshPreviews   map[string]refreshPreview
-	metadataVersions  map[string]uint64
+	demo                             bool
+	demoSource                       string
+	mu                               sync.RWMutex
+	db                               *sqlite.DB
+	fs                               afero.Fs
+	film, tv                         string
+	items                            map[string]Item
+	series                           map[string]Series
+	prober                           Prober
+	provider                         MetadataProvider
+	token                            string
+	applicationToken                 string
+	metadataEnabled                  bool
+	scanning                         bool
+	cancel                           context.CancelFunc
+	done                             chan struct{}
+	status                           ScanStatus
+	scanCredentialRevision           string
+	forceMetadataRefresh             bool
+	metadataFailure                  string
+	metadataRefreshAttemptedRevision string
+	metadataRefreshAttemptedAt       time.Time
+	artworkMu                        sync.Mutex
+	artworkGroup                     singleflight.Group
+	maintenanceCancel                context.CancelFunc
+	maintenanceDone                  chan struct{}
+	maintenanceStatus                ArtworkMaintenanceStatus
+	maintenanceDir                   afero.File
+	artworkObjectsDir                afero.File
+	derivativeBytes                  int64
+	derivativeCount                  int
+	derivativeReady                  bool
+	refreshPreviews                  map[string]refreshPreview
+	metadataVersions                 map[string]uint64
 }
 
 func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
@@ -259,7 +266,7 @@ func (c *Catalog) ArtworkMaintenanceStatus() ArtworkMaintenanceStatus {
 }
 
 func New() *Catalog {
-	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: newFFprobe(), fs: afero.NewOsFs()}
+	return &Catalog{items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: newFFprobe(), fs: afero.NewOsFs(), metadataEnabled: true}
 }
 
 // Open uses the production ffprobe prober and OS-backed Afero filesystem.
@@ -275,7 +282,7 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if prober == nil || fs == nil {
 		return nil, errors.New("catalog prober and filesystem are required")
 	}
-	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: prober, provider: NewTMDB(nil), fs: fs}
+	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: prober, provider: NewTMDB(nil), fs: fs, metadataEnabled: true}
 	if db == nil {
 		return c, nil
 	}
@@ -351,6 +358,10 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	_ = db.QueryRow("SELECT value FROM settings WHERE key='film_root'").Scan(&c.film)
 	_ = db.QueryRow("SELECT value FROM settings WHERE key='tv_root'").Scan(&c.tv)
 	_ = db.QueryRow("SELECT value FROM settings WHERE key='tmdb_token'").Scan(&c.token)
+	var metadataEnabled string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_enabled'").Scan(&metadataEnabled); err == nil {
+		c.metadataEnabled = metadataEnabled != "false"
+	}
 	c.status = c.lastStatus()
 	if err := c.loadSourceProof(); err != nil {
 		return nil, err
@@ -543,6 +554,7 @@ func (c *Catalog) StartScan(ctx context.Context, workers int) error {
 	if err != nil {
 		return fmt.Errorf("generate scan ID: %w", err)
 	}
+	refreshDue := c.MetadataRefreshDue()
 	c.mu.Lock()
 	if c.scanning {
 		c.mu.Unlock()
@@ -551,6 +563,13 @@ func (c *Catalog) StartScan(ctx context.Context, workers int) error {
 	ctx, c.cancel = context.WithCancel(ctx)
 	c.done = make(chan struct{})
 	c.scanning = true
+	c.scanCredentialRevision = c.metadataCredentialRevisionLocked()
+	c.forceMetadataRefresh = refreshDue
+	if refreshDue {
+		c.metadataRefreshAttemptedRevision = c.scanCredentialRevision
+		c.metadataRefreshAttemptedAt = time.Now()
+	}
+	c.metadataFailure = ""
 	c.status = ScanStatus{ID: scanID, StartedAt: time.Now().Unix(), Status: "running"}
 	status := c.status
 	c.mu.Unlock()
@@ -593,7 +612,11 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	}
 	c.status.FinishedAt = time.Now().Unix()
 	status := c.status
+	credentialRevision := c.scanCredentialRevision
 	c.mu.Unlock()
+	if status.Status == "complete" && credentialRevision != "" {
+		c.recordMetadataRefresh(credentialRevision)
+	}
 
 	// Keep the scan active until its terminal report is persisted. Otherwise a
 	// new scan can publish its running report first and the older scan's
@@ -601,7 +624,7 @@ func (c *Catalog) runScan(ctx context.Context, workers int) {
 	c.saveStatus(status)
 
 	c.mu.Lock()
-	c.scanning, c.cancel = false, nil
+	c.scanning, c.cancel, c.scanCredentialRevision, c.forceMetadataRefresh = false, nil, "", false
 	close(c.done)
 	c.done = nil
 	c.mu.Unlock()
@@ -819,7 +842,11 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 
 func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObservation, map[string]Series, error) {
 	c.mu.RLock()
-	provider, token := c.provider, c.token
+	provider, token := c.provider, ""
+	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
+		token = resolved
+	}
+	forceRefresh := c.forceMetadataRefresh
 	previousSeries := make(map[string]Series, len(c.series))
 	for id, series := range c.series {
 		previousSeries[id] = series
@@ -854,7 +881,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				enrichment, err = c.pendingArtwork(identity)
 				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
 					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
-					if err == nil && !legacyReconciliation {
+					if err == nil && !legacyReconciliation && !forceRefresh {
 						continue
 					}
 					if err == nil {
@@ -872,6 +899,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				if ctx.Err() != nil {
 					return nil, nil, ctx.Err()
 				}
+				c.noteMetadataFailure(err)
 				observations = append(observations, providerFailure("film:"+id, "provider_failed"))
 				continue
 			}
@@ -887,9 +915,11 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				continue
 			}
 			identity = artworkIdentity{catalogKind: "film", catalogID: id, providerID: enrichment.ProviderID}
-			if legacyReconciliation {
+			if legacyReconciliation || forceRefresh {
 				enrichment = c.unlockedArtwork("film", id, enrichment)
 				enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
+			}
+			if legacyReconciliation {
 				if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
 					return nil, nil, err
 				}
@@ -904,7 +934,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			if artworkFailed {
 				observations = append(observations, providerFailure("film:"+id, "provider_artwork_failed"))
 			}
-			if item.ProviderID == "" {
+			if item.ProviderID == "" || forceRefresh {
 				item.LocalOnly = false
 				item.Provider = "tmdb"
 				item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
@@ -947,8 +977,8 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				attempted = enrichmentErr != nil || enrichment.Poster != "" || enrichment.Backdrop != ""
 				if !attempted {
 					legacyReconciliation, enrichmentErr = c.pendingLegacyArtworkReconciliation(identity)
-					attempted = enrichmentErr != nil || legacyReconciliation
-					if enrichmentErr == nil && legacyReconciliation {
+					attempted = enrichmentErr != nil || legacyReconciliation || forceRefresh
+					if enrichmentErr == nil && (legacyReconciliation || forceRefresh) {
 						if exact, ok := provider.(CandidateProvider); ok {
 							enrichment, enrichmentErr = exact.ByID(ctx, token, "series", previous.ProviderID, previous.Language, previous.Region)
 						} else {
@@ -966,6 +996,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				if ctx.Err() != nil {
 					return nil, nil, ctx.Err()
 				}
+				c.noteMetadataFailure(enrichmentErr)
 				observations = append(observations, providerFailure("series:"+id, "provider_failed"))
 			} else if legacyReconciliation && enrichment.ProviderID != previous.ProviderID {
 				if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
@@ -976,9 +1007,11 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				observations = append(observations, providerFailure("series:"+id, "unmatched"))
 			} else {
 				identity = artworkIdentity{catalogKind: "series", catalogID: id, providerID: enrichment.ProviderID}
-				if legacyReconciliation {
+				if legacyReconciliation || forceRefresh {
 					enrichment = c.unlockedArtwork("series", id, enrichment)
 					enrichment = missingArtwork(enrichment, value.Poster, value.Backdrop)
+				}
+				if legacyReconciliation {
 					if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
 						return nil, nil, err
 					}
@@ -993,7 +1026,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				if artworkFailed {
 					observations = append(observations, providerFailure("series:"+id, "provider_artwork_failed"))
 				}
-				if value.ProviderID == "" {
+				if value.ProviderID == "" || forceRefresh {
 					value.LocalOnly = false
 					value.Provider = "tmdb"
 					value.ProviderID, value.Year, value.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
@@ -1025,7 +1058,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				enrichment, err = c.pendingArtwork(identity)
 				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
 					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
-					if err == nil && !legacyReconciliation {
+					if err == nil && !legacyReconciliation && !forceRefresh {
 						continue
 					}
 					if err == nil {
@@ -1039,6 +1072,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				if ctx.Err() != nil {
 					return nil, nil, ctx.Err()
 				}
+				c.noteMetadataFailure(err)
 				observations = append(observations, providerFailure("episode:"+id, "provider_failed"))
 				continue
 			}
@@ -1054,8 +1088,10 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				continue
 			}
 			identity = artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
-			if legacyReconciliation {
+			if legacyReconciliation || forceRefresh {
 				enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
+			}
+			if legacyReconciliation {
 				if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
 					return nil, nil, err
 				}
@@ -1070,7 +1106,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			if artworkFailed {
 				observations = append(observations, providerFailure("episode:"+id, "provider_artwork_failed"))
 			}
-			if item.ProviderID == "" {
+			if item.ProviderID == "" || forceRefresh {
 				item.LocalOnly = false
 				item.Provider = "tmdb"
 				item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis

@@ -4,6 +4,15 @@ This is the remaining publication check for [#91](https://github.com/mopeyjellyf
 It does not change repository or package visibility. Prepare the release and obtain
 explicit maintainer approval before making either public. Releases stay on **0.x**.
 
+## Metadata application-access gate
+
+An official candidate is not publishable until the TMDB application registration,
+public-distribution permission record, and `FLIXR_TMDB_APPLICATION_TOKEN` Actions secret
+described in [the release guide](releases.md#tmdb-application-access) exist. Acceptance
+must use the application source with both household token variables absent. Record only
+the image digest, version, status source, result counts, and response/image checks; never
+record the credential, private media names, or household paths.
+
 ## Before publication
 
 - Confirm the release's CI passed and its source tag and image commit label agree.

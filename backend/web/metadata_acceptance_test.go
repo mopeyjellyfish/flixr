@@ -106,6 +106,7 @@ func (s *metadataAcceptanceState) startApplication(t *testing.T, offline bool) s
 		providerURL = "http://127.0.0.1:1"
 	}
 	library.SetProvider(catalog.NewTMDBWithOrigins(http.DefaultClient, providerURL, providerURL))
+	library.SetApplicationTMDBToken("valid-token")
 	inner := httptest.NewServer(web.NewServer(home, library).Handler())
 	target, _ := url.Parse(inner.URL)
 	s.mu.Lock()

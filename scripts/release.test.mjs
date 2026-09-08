@@ -50,6 +50,48 @@ test('release publisher refuses malformed versions and non-main events before Do
   }
 });
 
+test('official release requires and forwards the application credential without a command-line value', async () => {
+  const { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const fixture = mkdtempSync(join(tmpdir(), 'flixr-release-credential-'));
+  const docker = join(fixture, 'docker');
+	const curl = join(fixture, 'curl');
+  const log = join(fixture, 'docker.log');
+  writeFileSync(docker, `#!/bin/sh
+printf '%s\\n' "$*" >> "$FLIXR_TEST_DOCKER_LOG"
+case "$*" in
+  *'run --rm'*'--version'*) echo 'Flixr 0.9.0 (test)' ;;
+  'port '*) echo '127.0.0.1:12345' ;;
+  'inspect '*) echo '0' ;;
+esac
+`);
+  writeFileSync(curl, `#!/bin/sh
+case "$*" in
+  *'/api/v1/setup/status'*) echo '{"claimed":false,"readiness":{"ffmpeg":true,"ffprobe":true},"metadata":{"configured":true,"source":"application"},"demo":false}' ;;
+  *) echo '<html></html>' ;;
+esac
+`);
+  chmodSync(docker, 0o755);
+	chmodSync(curl, 0o755);
+  const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const base = { ...process.env, PATH: `${fixture}:${process.env.PATH}`, GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', GITHUB_REPOSITORY: 'mopeyjellyfish/flixr', GITHUB_SHA: sha, FLIXR_TEST_DOCKER_LOG: log };
+  try {
+    const missing = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: base, encoding: 'utf8' });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /FlixR TMDB application credential/);
+
+    const token = 'test-application-token-never-log';
+    const prepared = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_TMDB_APPLICATION_TOKEN: token }, encoding: 'utf8' });
+    assert.equal(prepared.status, 0, prepared.stderr);
+    const invocation = readFileSync(log, 'utf8');
+    assert.match(invocation, /--secret id=tmdb_application_token,env=FLIXR_TMDB_APPLICATION_TOKEN/);
+    assert.doesNotMatch(invocation, new RegExp(token));
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('real release calculation starts at 0.1.0 and keeps breaking markers below v1', async () => {
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');

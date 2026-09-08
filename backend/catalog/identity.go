@@ -97,7 +97,10 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 	sources := map[scanKey]Item{}
 	var conflicts []identityPair
 	c.mu.RLock()
-	provider, token := c.provider, c.token
+	provider, token := c.provider, ""
+	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
+		token = resolved
+	}
 	primaries := make(map[string]scanKey, len(c.items))
 	anchors := append([]Item(nil), physicalProof...)
 	for id, item := range c.items {

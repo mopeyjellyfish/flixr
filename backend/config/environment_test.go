@@ -43,7 +43,7 @@ func TestEnvironmentOverridesSavedPlaybackAndReadsSecretFile(t *testing.T) {
 }
 
 func TestEnvironmentRejectsInvalidResourceLimits(t *testing.T) {
-	for _, pair := range [][2]string{{"FLIXR_GLOBAL_BYTES", "0"}, {"FLIXR_MAX_GENERATIONS", "999"}, {"FLIXR_LEASE_TTL", "1s"}, {"FLIXR_SEGMENT_WINDOW", "invalid"}, {"FLIXR_SCAN_WORKERS", "0"}, {"FLIXR_SEGMENT_DIR", "relative"}} {
+	for _, pair := range [][2]string{{"FLIXR_GLOBAL_BYTES", "0"}, {"FLIXR_MAX_GENERATIONS", "999"}, {"FLIXR_LEASE_TTL", "1s"}, {"FLIXR_SEGMENT_WINDOW", "invalid"}, {"FLIXR_SCAN_WORKERS", "0"}, {"FLIXR_SEGMENT_DIR", "relative"}, {"FLIXR_METADATA_ENABLED", "offline-ish"}} {
 		t.Run(pair[0], func(t *testing.T) {
 			t.Setenv(pair[0], pair[1])
 			cfg, err := config.Load()
@@ -54,5 +54,17 @@ func TestEnvironmentRejectsInvalidResourceLimits(t *testing.T) {
 				t.Fatal("invalid environment accepted")
 			}
 		})
+	}
+}
+
+func TestEnvironmentDistinguishesOmittedAndDisabledMetadata(t *testing.T) {
+	cfg, err := config.Load()
+	if err != nil || cfg.MetadataEnabled != nil {
+		t.Fatalf("omitted metadata enabled = %v, %v", cfg.MetadataEnabled, err)
+	}
+	t.Setenv("FLIXR_METADATA_ENABLED", "false")
+	cfg, err = config.Load()
+	if err != nil || cfg.MetadataEnabled == nil || *cfg.MetadataEnabled {
+		t.Fatalf("disabled metadata enabled = %v, %v", cfg.MetadataEnabled, err)
 	}
 }

@@ -183,6 +183,7 @@ jobs:
       - name: Version, publish verified images, and generate release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLIXR_TMDB_APPLICATION_TOKEN: ${{ secrets.FLIXR_TMDB_APPLICATION_TOKEN }}
         run: |
           bash scripts/release-baseline.sh
           npm run release

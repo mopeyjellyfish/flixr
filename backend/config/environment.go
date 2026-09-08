@@ -16,6 +16,7 @@ import (
 // Environment is applied at startup; omitted values retain saved settings.
 type Environment struct {
 	FilmsRoot, TVRoot, TMDBToken              *string
+	MetadataEnabled                           *bool
 	OwnerPassword, InitialProfile, SegmentDir string
 	ScanOnStart                               bool
 	ScanWorkers                               int
@@ -33,6 +34,13 @@ func loadEnvironment() (Environment, error) {
 	e.TMDBToken, err = secret("FLIXR_TMDB_TOKEN")
 	if err != nil {
 		return e, err
+	}
+	if value, ok := os.LookupEnv("FLIXR_METADATA_ENABLED"); ok {
+		enabled, parseErr := strconv.ParseBool(value)
+		if parseErr != nil {
+			return e, errors.New("FLIXR_METADATA_ENABLED must be a boolean")
+		}
+		e.MetadataEnabled = &enabled
 	}
 	password, err := secret("FLIXR_OWNER_PASSWORD")
 	if err != nil {

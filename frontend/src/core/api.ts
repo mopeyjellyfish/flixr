@@ -1,5 +1,5 @@
 export type Readiness = { ffprobe: boolean; ffmpeg: boolean };
-export type SetupStatus = { claimed: boolean; readiness: Readiness; demo?: boolean; demo_source?: string };
+export type SetupStatus = { claimed: boolean; readiness: Readiness; metadata: TMDBSettings; demo?: boolean; demo_source?: string };
 export type Profile = { id: string; name: string; protected: boolean; avatar?: string };
 export type ActiveSession = { id: string; subject: string; expires_at: number };
 export type CatalogItem = {
@@ -42,7 +42,7 @@ export type EpisodeSequence =
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
-export type TMDBSettings = { provider: 'tmdb'; configured: boolean; state: 'unavailable' | 'configured' | 'running' | 'failed'; message: string };
+export type TMDBSettings = { provider: 'tmdb'; enabled: boolean; configured: boolean; source: 'none' | 'application' | 'owner' | 'environment' | 'disabled'; state: 'unavailable' | 'configured' | 'running' | 'failed' | 'disabled' | 'rate_limited'; message: string };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
 export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
 export type MetadataTarget = CatalogItem & { provider_id?: string; metadata_provider?: string; metadata_language?: string; metadata_region?: string; match_confidence?: number; owner_matched?: boolean };

@@ -41,6 +41,39 @@ or create version tags for ordinary releases.
 6. Create the Git tag and GitHub release with generated notes.
 7. Promote `latest`, `X.Y` and `X` aliases to that verified image index.
 
+## TMDB application access
+
+The official image publisher requires `FLIXR_TMDB_APPLICATION_TOKEN` as a GitHub Actions
+repository secret. It passes the value to Docker BuildKit as the
+`tmdb_application_token` build secret and links it into the server executable. Build
+logs and image layers must not contain the value, but anyone with the published binary
+can extract it. Treat it as a distributable application credential, not as a secret.
+
+Before creating that repository secret, the maintainer must complete this one-time work:
+
+1. Sign in to a maintainer-controlled TMDB account and open **Settings → API** on a
+   desktop browser.
+2. Register a non-commercial application named **FlixR**, with
+   `https://github.com/mopeyjellyfish/flixr` as its public URL and a description that it
+   is a free, open-source, self-hosted movie/TV server whose official binaries make
+   server-side metadata and image requests for household libraries.
+3. Accept the current TMDB API terms for FlixR and retain the registration record.
+4. Establish with TMDB that use by publicly distributed self-hosted binaries, including
+   the extractable application bearer credential, is permitted. The general FAQ and API
+   terms do not by themselves expressly settle this distribution detail; do not infer
+   approval from project non-commercial status.
+5. Copy the application's **API Read Access Token** into the Actions secret named
+   `FLIXR_TMDB_APPLICATION_TOKEN`. Never use a token registered to another project.
+6. Run the release gates, inspect logs for credential disclosure, pull the immutable
+   multi-architecture image, and verify normal-mode movie, series, and episode enrichment
+   without any household token.
+
+Rotate access by updating the same Actions secret and publishing a new 0.x image. The new
+binary credential revision schedules one bounded refresh on upgraded installations. If
+the provider suspends access or permission changes, stop publication, set remote metadata
+disabled in affected deployments, retain local playback, and follow TMDB's termination
+and cache-removal requirements.
+
 No separate release-event workflow is required, avoiding the `GITHUB_TOKEN`
 event-trigger limitation. Authentication uses GitHub's job token with only
 `contents: write` and `packages: write`. Automatic issue/PR comments are disabled.

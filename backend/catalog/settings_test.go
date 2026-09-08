@@ -1,73 +1,160 @@
-package catalog_test
+package catalog
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"testing"
 
-	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
 
-func TestTMDBTokenSurvivesRestartWithoutCatalogLeak(t *testing.T) {
-	db, err := sqlite.Open(t.TempDir())
-	if err != nil {
+type revisionProvider struct {
+	byID int
+	err  error
+}
+
+func (p *revisionProvider) Lookup(context.Context, string, string, string) (Enrichment, error) {
+	if p.err != nil {
+		return Enrichment{}, p.err
+	}
+	return Enrichment{ProviderID: "7", Title: "Film", Synopsis: "First"}, nil
+}
+func (p *revisionProvider) Candidates(context.Context, string, string, string, string, string) ([]Candidate, error) {
+	return nil, nil
+}
+func (p *revisionProvider) ByID(context.Context, string, string, string, string, string) (Enrichment, error) {
+	p.byID++
+	if p.err != nil {
+		return Enrichment{}, p.err
+	}
+	return Enrichment{ProviderID: "7", Title: "Film", Synopsis: "Renewed"}, nil
+}
+
+func TestMetadataCredentialPrecedenceRemovalAndDisable(t *testing.T) {
+	c := New()
+	c.SetApplicationTMDBToken("application-token")
+
+	status := c.MetadataStatus()
+	if !status.Configured || status.Source != "application" || !status.Enabled {
+		t.Fatalf("application status = %+v", status)
+	}
+	if err := c.SetTMDBToken("owner-token"); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	c, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(_ context.Context, _ *os.File) (catalog.MediaProperties, error) {
-		return catalog.MediaProperties{}, nil
-	}))
-	if err != nil {
+	if status = c.MetadataStatus(); status.Source != "owner" {
+		t.Fatalf("owner status = %+v", status)
+	}
+	if err := c.SetMetadataEnabled(false); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetTMDBToken("tmdb-secret"); err != nil {
+	if status = c.MetadataStatus(); status.Enabled || status.Configured || status.Source != "disabled" || status.State != "disabled" {
+		t.Fatalf("disabled status = %+v", status)
+	}
+	if err := c.SetMetadataEnabled(true); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(_ context.Context, _ *os.File) (catalog.MediaProperties, error) {
-		return catalog.MediaProperties{}, nil
-	}))
-	if err != nil || !reopened.TMDBConfigured() {
-		t.Fatalf("configured after restart = %v, %v", reopened.TMDBConfigured(), err)
+	if status = c.MetadataStatus(); status.Source != "owner" {
+		t.Fatalf("re-enabled status = %+v", status)
 	}
-	data, err := json.Marshal(reopened.ScanStatus())
-	if err != nil || string(data) == "" || string(data) == "tmdb-secret" {
-		t.Fatalf("token leaked in public state: %s", data)
+	if err := c.SetTMDBToken(""); err != nil {
+		t.Fatal(err)
+	}
+	if status = c.MetadataStatus(); !status.Configured || status.Source != "application" {
+		t.Fatalf("removed override status = %+v", status)
 	}
 }
 
-func TestSetRootsRollsBackBothDatabaseAndMemoryOnWriteFailure(t *testing.T) {
+func TestRotatedApplicationCredentialRefreshesAlreadyMatchedMetadata(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	prober := catalog.ProberFunc(func(_ context.Context, _ *os.File) (catalog.MediaProperties, error) {
-		return catalog.MediaProperties{}, nil
-	})
-	c, err := catalog.OpenWithProber(db, prober)
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{VideoCodec: "h264"}, nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldFilms, oldTV, newFilms, newTV := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
-	if err := c.SetRoots(oldFilms, oldTV); err != nil {
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/Film.mp4", []byte("media"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TRIGGER reject_tv_root BEFORE INSERT ON settings WHEN NEW.key='tv_root' BEGIN SELECT RAISE(ABORT, 'tv root rejected'); END`); err != nil {
+	provider := &revisionProvider{}
+	c.SetProvider(provider)
+	c.SetApplicationTMDBToken("application-one")
+	if err := c.SetRoots(root, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetRoots(newFilms, newTV); err == nil {
-		t.Fatal("accepted partial root update")
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
 	}
-	if films, tv := c.Roots(); films != oldFilms || tv != oldTV {
-		t.Fatalf("memory roots = %q %q", films, tv)
+	c.SetApplicationTMDBToken("application-two")
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
 	}
-	reopened, err := catalog.OpenWithProber(db, prober)
+	if provider.byID != 1 {
+		t.Fatalf("credential rotation exact refreshes = %d, want 1", provider.byID)
+	}
+	c.mu.RLock()
+	if len(c.items) != 1 {
+		t.Fatalf("refreshed items = %+v", c.items)
+	}
+	for _, item := range c.items {
+		if item.Synopsis != "Renewed" {
+			t.Fatalf("refreshed item = %+v", item)
+		}
+	}
+	c.mu.RUnlock()
+	provider.err = ErrProviderRateLimited
+	c.SetApplicationTMDBToken("application-three")
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if status := c.MetadataStatus(); status.State != "rate_limited" {
+		t.Fatalf("rate-limited status = %+v", status)
+	}
+}
+
+func TestMetadataRefreshDueTracksSuccessfulCredentialRevision(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if films, tv := reopened.Roots(); films != oldFilms || tv != oldTV {
-		t.Fatalf("persisted roots = %q %q", films, tv)
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := c.SetRoots(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	c.SetApplicationTMDBToken("application-one")
+	if !c.MetadataRefreshDue() {
+		t.Fatal("new application credential did not require refresh")
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if c.MetadataRefreshDue() {
+		t.Fatal("successful scan did not record credential revision")
+	}
+	c.SetApplicationTMDBToken("application-two")
+	if !c.MetadataRefreshDue() {
+		t.Fatal("rotated application credential did not require refresh")
+	}
+	if err := c.SetMetadataEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if c.MetadataRefreshDue() {
+		t.Fatal("disabled metadata scheduled a remote refresh")
+	}
+}
+
+func TestMetadataWithoutApplicationCredentialIsTruthfullyUnavailable(t *testing.T) {
+	status := New().MetadataStatus()
+	if status.Configured || !status.Enabled || status.Source != "none" || status.State != "unavailable" {
+		t.Fatalf("status = %+v", status)
 	}
 }

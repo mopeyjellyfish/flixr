@@ -2,7 +2,7 @@ import { BusyButton } from '../../modules/ui/Feedback';
 import { useAsyncAction } from '../../vendor/interior/loading-button';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type OwnerRoots, type Profile } from '../../core/api';
+import { ApiError, type OwnerRoots, type Profile, type TMDBSettings } from '../../core/api';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
 
 type ReadinessProps = {
@@ -21,10 +21,10 @@ export function Readiness({ readiness }: ReadinessProps) {
   );
 }
 
-type SetupProps = ReadinessProps & { onCompleted: () => void; initialRoots?: OwnerRoots };
+type SetupProps = ReadinessProps & { onCompleted: () => void; initialRoots?: OwnerRoots; metadata?: TMDBSettings };
 type SetupStep = 'secure' | 'libraries' | 'profile';
 
-export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
+export function Setup({ readiness, metadata, onCompleted, initialRoots }: SetupProps) {
   const [step, setStep] = useState<SetupStep>(initialRoots ? 'libraries' : 'secure');
   const [token, setToken] = useState('');
   const [password, setPassword] = useState('');
@@ -111,7 +111,7 @@ export function Setup({ readiness, onCompleted, initialRoots }: SetupProps) {
         <p>{step === 'secure' ? 'Three quick steps. No Flixr account, cloud connection, or metadata provider is required.' : step === 'libraries' ? 'Choose folders on this server now, or start with a clean slate and add them later.' : 'Profiles stay in your home. A PIN is optional.'}</p>
       </div>
       {step === 'secure' && <><Readiness readiness={readiness} /><form onSubmit={claim} aria-busy={busy}><p className="setup-token-help">The setup token is shown in the server console and is never exposed by status.</p><label>Setup token<input required autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your server" /></label><label>Owner password<input required minLength={8} type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Create a private password" /></label>{error && <p role="alert">{error}</p>}<button className="primary" disabled={busy}>Secure this server →</button></form></>}
-      {step === 'libraries' && <form onSubmit={saveLibraries} aria-busy={busy}><label>Films library<input value={films} onChange={(event) => setFilms(event.target.value)} placeholder="/media/films" /></label><label>TV library<input value={tv} onChange={(event) => setTV(event.target.value)} placeholder="/media/tv" /></label><label>TMDB API Read Access Token (optional)<input type="password" value={tmdbToken} onChange={(event) => setTMDBToken(event.target.value)} autoComplete="new-password" /></label><p className="setup-note"><a href="https://www.themoviedb.org/settings/api">Get a TMDB API Read Access Token</a> for artwork, accurate titles, and descriptions. Flixr verifies it before saving. You can leave this empty and configure it later.</p>{error && <p role="alert">{error}</p>}<div className="setup-actions"><button className="primary" disabled={busy}>Save libraries</button><button type="button" disabled={busy} onClick={() => { setError(''); setNotice(''); setStep('profile'); }}>Skip for now</button></div></form>}
+      {step === 'libraries' && <form onSubmit={saveLibraries} aria-busy={busy}><label>Films library<input value={films} onChange={(event) => setFilms(event.target.value)} placeholder="/media/films" /></label><label>TV library<input value={tv} onChange={(event) => setTV(event.target.value)} placeholder="/media/tv" /></label><p className="setup-note">{metadata?.message ?? 'This build has no automatic metadata access. Local playback remains available.'}</p><details><summary>Advanced: personal TMDB credential</summary><label>TMDB API Read Access Token (optional)<input type="password" value={tmdbToken} onChange={(event) => setTMDBToken(event.target.value)} autoComplete="new-password" /></label><p className="setup-note"><a href="https://www.themoviedb.org/settings/api">Get a TMDB API Read Access Token</a> to override application access. Flixr verifies it before saving.</p></details>{error && <p role="alert">{error}</p>}<div className="setup-actions"><button className="primary" disabled={busy}>Save libraries</button><button type="button" disabled={busy} onClick={() => { setError(''); setNotice(''); setStep('profile'); }}>Skip for now</button></div></form>}
       {step === 'profile' && <form onSubmit={createProfile} aria-busy={busy}>{notice && <p role="status">{notice}</p>}{createdProfile && <p role="status">Profile created. Retry to enter Flixr.</p>}<label>Name<input required disabled={Boolean(createdProfile)} value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label><label>PIN (optional)<input disabled={Boolean(createdProfile)} type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} placeholder="For a little privacy" /></label>{error && <p role="alert">{error}</p>}<button className="primary" disabled={busy}>{createdProfile ? 'Retry entering Flixr →' : 'Create profile and enter Flixr →'}</button></form>}
       <p className="setup-promises"><span><b>✓</b> Stays on your LAN</span><span><b>✓</b> Metadata is optional</span><span><b>✓</b> Change settings anytime</span></p>
     </section>

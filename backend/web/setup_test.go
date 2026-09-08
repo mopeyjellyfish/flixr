@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
@@ -39,6 +40,17 @@ func TestOwnerClaimIsOneTime(t *testing.T) {
 	}
 	if got := claim(house.SetupToken()).Code; got != http.StatusConflict {
 		t.Fatalf("reused token status = %d, want 409", got)
+	}
+}
+
+func TestSetupStatusReportsAutomaticMetadataAvailabilityWithoutCredentials(t *testing.T) {
+	house := newHousehold(t)
+	catalogue := catalog.New()
+	catalogue.SetApplicationTMDBToken("application-token")
+	response := httptest.NewRecorder()
+	web.NewServer(house, catalogue).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"metadata":{"provider":"tmdb","enabled":true,"configured":true,"source":"application"`) || strings.Contains(response.Body.String(), "application-token") {
+		t.Fatalf("setup status = %d %s", response.Code, response.Body.String())
 	}
 }
 

@@ -27,6 +27,29 @@ func TestTMDBValidatesBearerCredential(t *testing.T) {
 	}
 }
 
+func TestTMDBClassifiesInvalidAndRateLimitedLookups(t *testing.T) {
+	status := http.StatusUnauthorized
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(status)
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	if _, err := provider.Lookup(context.Background(), "bad", "film", "Film"); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("unauthorized error = %v", err)
+	}
+	status = http.StatusTooManyRequests
+	requests = 0
+	if _, err := provider.Lookup(context.Background(), "valid", "film", "Film"); !errors.Is(err, ErrProviderRateLimited) {
+		t.Fatalf("rate-limit error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("rate-limit requests = %d, want 2", requests)
+	}
+}
+
 func TestTMDBLoadsEpisodeDetailsSeparatelyFromSeries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/3/tv/7/season/1/episode/2" {

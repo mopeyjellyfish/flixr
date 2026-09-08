@@ -590,7 +590,7 @@ func TestTMDBRateLimitStopsAfterOneRetryAndReportsFailedStatus(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("provider requests = %d, want one request and one retry", requests)
 	}
-	if status := c.MetadataStatus(); status.State != "failed" || !status.Configured || !strings.Contains(status.Message, "start another scan") {
+	if status := c.MetadataStatus(); status.State != "rate_limited" || !status.Configured || !strings.Contains(status.Message, "retry the scan later") {
 		t.Fatalf("metadata status = %#v", status)
 	}
 }

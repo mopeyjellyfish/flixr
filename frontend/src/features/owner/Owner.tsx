@@ -46,7 +46,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     api.playbackSettings().then(setPlaybackSettings).catch(() => setNotice('Playback settings are unavailable.'));
     api.playbackStatus().then(setPlaybackStatus).catch(() => setNotice('Playback status is unavailable.'));
     api.ownerScreens().then((result) => setScreens(result.screens ?? [])).catch(() => setNotice('Connected screens are unavailable.'));
-    api.settingsInventory().then((result) => setLocked(new Set((result.settings ?? []).filter((setting) => !setting.mutable).map((setting) => setting.key)))).catch(() => undefined);
+    api.settingsInventory().then((result) => setLocked(new Set((result.settings ?? []).filter((setting) => setting.source === 'environment').map((setting) => setting.key)))).catch(() => undefined);
   };
 
   const loadIdentityRepairs = (clearActionError = true) => {
@@ -114,6 +114,14 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to remove TMDB credential.');
     }
   };
+	const setMetadataEnabled = async (enabled: boolean) => {
+		try {
+			setTMDBSettings(await api.setMetadataEnabled(enabled));
+			setNotice(enabled ? 'Remote metadata enabled.' : 'Remote metadata disabled. Cached artwork and descriptions remain available.');
+		} catch (error) {
+			setNotice(error instanceof ApiError ? error.message : 'Unable to change remote metadata.');
+		}
+	};
   const findMatches = async (item: MetadataTarget) => { try { const result = await api.metadataCandidates(item.kind, item.id); setCandidates((current) => ({ ...current, [item.id]: result.candidates })); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Matches are unavailable.'); } };
   const selectMatch = async (item: MetadataTarget, candidate: MetadataCandidate) => { try { const matched = await api.matchMetadata(item.kind, item.id, candidate.id); setUnmatched((current) => current.map((value) => value.id === item.id ? matched : value)); setCandidates((current) => { const next = { ...current }; delete next[item.id]; return next; }); setNotice(`Matched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to save this match.'); } };
   const clearMatch = async (item: MetadataTarget) => { try { await api.unmatchMetadata(item.kind, item.id); setUnmatched((current) => current.map((value) => value.id === item.id ? { ...value, provider_id: '', owner_matched: false } : value)); setNotice(`Unmatched ${item.title}.`); } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to unmatch this title.'); } };
@@ -204,6 +212,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           </section>
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider; downloaded artwork stays on your server.</p>
+			<label><input type="checkbox" checked={tmdbSettings?.enabled ?? true} disabled={locked.has('metadata.enabled')} onChange={(event) => void setMetadataEnabled(event.target.checked)} /> Use online metadata</label>
+			{locked.has('metadata.enabled') && <p>Remote metadata policy is managed by the server environment.</p>}
             <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
             <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />
@@ -212,6 +222,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="support" className="owner-section" aria-labelledby="support-title">
             <h2 id="support-title">Support diagnostics</h2><p>Download a local ZIP with versions, runtime health, and recent failure IDs. It never includes media names, paths, passwords, or tokens.</p>
             <a className="button-link primary" href="/api/v1/owner/diagnostics" download>Download diagnostics</a>
+			<h3>Credits</h3><a href="https://www.themoviedb.org" aria-label="Visit TMDB"><img src="/tmdb-logo.svg" alt="TMDB" width="180" /></a><p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
           </section>
         </div>
       </div>
@@ -328,19 +339,19 @@ function ScanPanel({ scan, onStart }: { scan?: Scan; onStart: () => Promise<void
 }
 
 function TMDBForm({ settings, token, onTokenChange, onSave, onRemove, locked }: { settings?: TMDBSettings; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void>; locked: boolean }) {
-  const configured = settings?.configured ?? false;
+	const overrideConfigured = settings?.source === 'owner' || settings?.source === 'environment';
+	const state = settings?.state ?? (settings?.configured ? 'configured' : 'unavailable');
+	const message = settings?.message ?? (settings?.configured ? 'Credential configured. Enter a replacement token to change it.' : 'Metadata access is unavailable in this build.');
   return (
-    <PendingForm onSubmit={onSave}>
+		<section><p><strong>Provider status: {state} · {settings?.source ?? 'none'}</strong></p><p>{message}</p><details><summary>Advanced: personal TMDB credential</summary><PendingForm onSubmit={onSave}>
       <h2>TMDB metadata</h2>
-      <p><strong>Provider status: {settings?.state ?? (configured ? 'configured' : 'unavailable')}</strong></p>
-      <p>{settings?.message ?? (configured ? 'Credential configured. Enter a replacement token to change it.' : 'No credential configured. Add an API Read Access Token to download artwork and descriptions.')}</p>
-      <p><a href="https://www.themoviedb.org/settings/api">Get your TMDB API Read Access Token</a>. Flixr verifies it before saving it.</p>
+			<p><a href="https://www.themoviedb.org/settings/api">Get your TMDB API Read Access Token</a> only if you want to replace automatic application access. Flixr verifies it before saving it.</p>
       {locked && <p>Managed by the server environment.</p>}<label>TMDB API Read Access Token<input disabled={locked} type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
       <div className="actions">
         <button className="primary" disabled={locked}>Save TMDB credential</button>
-        {configured && <button disabled={locked} type="button" onClick={() => void onRemove()}>Remove credential</button>}
+				{overrideConfigured && <button disabled={locked} type="button" onClick={() => void onRemove()}>Remove credential</button>}
       </div>
-    </PendingForm>
+		</PendingForm></details></section>
   );
 }
 

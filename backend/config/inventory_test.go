@@ -12,7 +12,7 @@ func TestInventoryListsSupportedSettingsAndSecretFileMappings(t *testing.T) {
 	for _, setting := range settings {
 		byKey[setting.Key] = setting
 	}
-	for _, key := range []string{"library.films_root", "metadata.tmdb_token", "playback.global_bytes", "server.listen_addr"} {
+	for _, key := range []string{"library.films_root", "metadata.enabled", "metadata.tmdb_token", "playback.global_bytes", "server.listen_addr"} {
 		if _, ok := byKey[key]; !ok {
 			t.Fatalf("inventory missing %s", key)
 		}
@@ -28,8 +28,9 @@ func TestInventoryListsSupportedSettingsAndSecretFileMappings(t *testing.T) {
 func TestBootstrapLocksOnlyExplicitEnvironmentValues(t *testing.T) {
 	t.Setenv("FLIXR_GLOBAL_BYTES", "1024")
 	t.Setenv("FLIXR_TMDB_TOKEN_FILE", "/tmp/token")
+	t.Setenv("FLIXR_METADATA_ENABLED", "false")
 	locks := config.EnvironmentLocks()
-	if !locks["playback.global_bytes"] || !locks["metadata.tmdb_token"] || locks["library.films_root"] {
+	if !locks["playback.global_bytes"] || !locks["metadata.tmdb_token"] || !locks["metadata.enabled"] || locks["library.films_root"] {
 		t.Fatalf("locks = %#v", locks)
 	}
 }

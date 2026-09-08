@@ -4,6 +4,13 @@ import { Owner } from './Owner';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('owner operations', () => {
+	it('shows required TMDB attribution in credits', async () => {
+		vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true }, profiles: [], films: '', tv: '', configured: false, enabled: true, source: 'none', state: 'unavailable', message: 'Unavailable', scan: {}, screens: [] })));
+		render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+		expect(await screen.findByRole('img', { name: /TMDB/i })).toHaveAttribute('src', '/tmdb-logo.svg');
+		expect(screen.getByText(/uses the TMDB API but is not endorsed or certified by TMDB/i)).toBeVisible();
+		expect(screen.getByRole('link', { name: /visit TMDB/i })).toHaveAttribute('href', 'https://www.themoviedb.org');
+	});
   it('refreshes activity without replacing unsaved library changes', async () => {
     let activityLoads = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -57,7 +64,7 @@ describe('owner operations', () => {
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '/media/tv' }));
       if (path.endsWith('/owner/settings')) return new Response(JSON.stringify({ settings: [
-        { key: 'library.films_root', mutable: false }, { key: 'library.tv_root', mutable: true },
+        { key: 'library.films_root', mutable: false, source: 'environment' }, { key: 'library.tv_root', mutable: true, source: 'saved' },
       ] }));
       if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
       return new Response(JSON.stringify({ scan: {}, configured: false, screens: [] }));
@@ -111,6 +118,8 @@ describe('owner operations', () => {
     expect(screen.getByText(/provider status: running/i)).toBeVisible();
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/settings/tmdb', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ token: 'replace-me' }) }));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan', expect.objectContaining({ method: 'POST' }));
+		fireEvent.click(screen.getByLabelText(/use online metadata/i));
+		expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/settings/tmdb', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ enabled: false }) }));
   });
 
   it('shows actionable provider failure state', async () => {

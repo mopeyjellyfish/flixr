@@ -105,7 +105,7 @@ export function App() {
   if (route === 'failure') return <main className="auth-panel"><h1>Flixr is unavailable.</h1><p role="alert">The local server did not respond.</p><button onClick={() => void load()}>Try again</button></main>;
   if (route === 'loading' || !status) return <Splash />;
   if (route === 'gallery') return status.demo || import.meta.env.DEV ? <Suspense fallback={<Splash />}><InteriorGallery /></Suspense> : <main><h1>Development tools are unavailable.</h1><a href="/profiles">Back to profiles</a></main>;
-  if (route === 'setup') return <main className="setup-page"><Setup readiness={status.readiness} initialRoots={setupRoots} onCompleted={() => navigate('/home')} /></main>;
+  if (route === 'setup') return <main className="setup-page"><Setup readiness={status.readiness} metadata={status.metadata} initialRoots={setupRoots} onCompleted={() => navigate('/home')} /></main>;
   if (route === 'login') return <main><OwnerLogin onLogin={() => void ownerLoggedIn()} /></main>;
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
   if (route === 'history') return <Suspense fallback={<RouteFallback />}><History onBrowse={() => navigate('/home')} onExit={() => navigate('/profiles')} /></Suspense>;

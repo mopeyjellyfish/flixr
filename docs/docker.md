@@ -129,6 +129,7 @@ signs that profile out; changing or removing its PIN also signs its active sessi
 | `FLIXR_LISTEN_ADDR` | `0.0.0.0:8787` in Docker; `127.0.0.1:8787` natively |
 | `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | Saved roots; container paths. Explicit empty value clears that root |
 | `FLIXR_TMDB_TOKEN` / `FLIXR_TMDB_TOKEN_FILE` | Optional TMDB read-access token; empty direct value removes saved token |
+| `FLIXR_METADATA_ENABLED` | `true`; set `false` for explicit offline/disabled metadata without deleting credentials |
 | `FLIXR_OWNER_PASSWORD` / `FLIXR_OWNER_PASSWORD_FILE` | Optional first-start owner claim; never resets an existing owner |
 | `FLIXR_INITIAL_PROFILE` | Optional unprotected initial profile, created only for a claimed household with no profiles |
 | `FLIXR_SCAN_ON_START` | `false`; start a background scan on boot |
@@ -171,6 +172,14 @@ Make files readable by the container user. The `_FILE` reader bounds files to 16
 and strips trailing newlines; setting both forms fails rather than guessing.
 No automatic password reset occurs when a secret changes. Mounted TLS keys use their
 path variables directly. No arbitrary env-file parser or shell entrypoint is needed.
+
+The TMDB token variables are advanced personal overrides. A normal official image uses
+FlixR-owned application access when available, and removing an override returns to that
+default. A locally built image has no default unless its builder deliberately supplies
+one; setup reports `unavailable` and local playback continues. Provider outages and quota
+limits leave previously committed catalog data and artwork untouched. Retry after service
+recovery by starting another scan. To disable all remote requests, set
+`FLIXR_METADATA_ENABLED=false` or turn off online metadata in Server settings.
 
 ## Update and recovery
 

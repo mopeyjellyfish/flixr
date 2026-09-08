@@ -11,7 +11,8 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 | Owner password | unset | server / startup only | `FLIXR_OWNER_PASSWORD`, `_FILE` | yes |
 | Initial profile | unset | server / startup only | `FLIXR_INITIAL_PROFILE` | yes |
 | Film and TV roots | empty | server / database | `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | no |
-| TMDB token | unset | server / database | `FLIXR_TMDB_TOKEN`, `_FILE` | no |
+| Remote metadata | `true` | server / database | `FLIXR_METADATA_ENABLED` | no |
+| Personal TMDB override | application default when present | server / database | `FLIXR_TMDB_TOKEN`, `_FILE` | no |
 | Scan on start, workers | `false`, `4` | server / environment | `FLIXR_SCAN_ON_START`, `FLIXR_SCAN_WORKERS` | yes |
 | Segment directory | `<data-dir>/segments` | server / sidecar and database | `FLIXR_SEGMENT_DIR` | yes |
 | Generation/global bytes, generation count | 256 MiB, 512 MiB, 2 | server / database | `FLIXR_GENERATION_BYTES`, `FLIXR_GLOBAL_BYTES`, `FLIXR_MAX_GENERATIONS` | no |
@@ -26,3 +27,17 @@ In Server settings → Metadata, expand **Edit metadata** for a film or series. 
 To refresh a locked field, clear **Lock this field** and save first. **Preview provider refresh** shows the proposed values and their source; **Refresh unlocked fields** applies that provider snapshot while checking the current locks again. Previews last one minute, and the server retains the four most recent title previews. After expiry, eviction, or a restart, refresh fetches a new snapshot. Matching or unmatching a title invalidates older snapshots of its identity.
 
 Metadata and refreshed artwork references commit together. Provider, artwork-cache, cancellation, and database failures leave the previous committed values and artwork intact. Cached images remain local; failed refresh objects are removed, and bounded background maintenance collects objects abandoned by an interrupted process.
+
+Official images resolve metadata access in this order: an explicit disabled setting,
+an environment/file or saved owner override, then the FlixR application credential.
+Removing an override returns to automatic application access. Disabling remote metadata
+does not delete either credential. Source builds normally have no application credential
+and report that state truthfully; a personal token remains an optional advanced override.
+
+FlixR records only a one-way credential revision and the last successful refresh time.
+A new application revision or a refresh age of 150 days schedules one normal bounded
+scan of existing roots. A partial/provider-failed scan remains due. The scan preserves
+catalog identity, owner field locks, local overrides, cached artwork, and viewing history.
+TMDB's current API terms limit caching to six months; do not deliberately keep a server
+offline past that limit while continuing to use provider-derived content. If TMDB access
+is terminated, stop remote metadata and remove provider-derived cached data before reuse.

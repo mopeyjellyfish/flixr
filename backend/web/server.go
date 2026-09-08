@@ -183,7 +183,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	s.readyMu.RLock()
 	ready := s.readiness
 	s.readyMu.RUnlock()
-	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready, "demo": s.catalog.Demo(), "demo_source": s.catalog.DemoSource()})
+	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready, "metadata": s.metadataStatus(), "demo": s.catalog.Demo(), "demo_source": s.catalog.DemoSource()})
 }
 func (s *Server) checkReadiness() {
 	_, p := s.lookPath("ffprobe")
@@ -643,36 +643,57 @@ func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		write(w, http.StatusOK, s.catalog.MetadataStatus())
+		write(w, http.StatusOK, s.metadataStatus())
 		return
 	}
 	var v struct {
-		Token string `json:"token"`
+		Token   *string `json:"token"`
+		Enabled *bool   `json:"enabled"`
 	}
-	if s.settingsLocks["metadata.tmdb_token"] {
-		fail(w, http.StatusConflict, "environment_locked")
-		return
-	}
-	if !decode(r, &v) {
+	if !decode(r, &v) || (v.Token == nil && v.Enabled == nil) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	token := strings.TrimSpace(v.Token)
-	if token != "" {
-		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
-		defer cancel()
-		if err := s.catalog.ValidateTMDBToken(ctx, token); err != nil {
-			if errors.Is(err, catalog.ErrInvalidCredential) {
-				fail(w, http.StatusBadRequest, "metadata_invalid_credential")
-			} else {
-				fail(w, http.StatusServiceUnavailable, "metadata_unavailable")
+	if v.Token != nil && s.settingsLocks["metadata.tmdb_token"] {
+		fail(w, http.StatusConflict, "environment_locked")
+		return
+	}
+	if v.Enabled != nil && s.settingsLocks["metadata.enabled"] {
+		fail(w, http.StatusConflict, "environment_locked")
+		return
+	}
+	if v.Token != nil {
+		token := strings.TrimSpace(*v.Token)
+		if token != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+			defer cancel()
+			if err := s.catalog.ValidateTMDBToken(ctx, token); err != nil {
+				if errors.Is(err, catalog.ErrInvalidCredential) {
+					fail(w, http.StatusBadRequest, "metadata_invalid_credential")
+				} else {
+					fail(w, http.StatusServiceUnavailable, "metadata_unavailable")
+				}
+				return
 			}
+		}
+		if err := s.catalog.SetTMDBToken(token); err != nil {
+			fail(w, http.StatusInternalServerError, "settings_failed")
 			return
 		}
 	}
-	if err := s.catalog.SetTMDBToken(token); err != nil {
-		fail(w, http.StatusInternalServerError, "settings_failed")
-		return
+	if v.Enabled != nil {
+		if err := s.catalog.SetMetadataEnabled(*v.Enabled); err != nil {
+			fail(w, http.StatusInternalServerError, "settings_failed")
+			return
+		}
 	}
-	write(w, http.StatusOK, s.catalog.MetadataStatus())
+	write(w, http.StatusOK, s.metadataStatus())
+}
+
+func (s *Server) metadataStatus() catalog.MetadataStatus {
+	status := s.catalog.MetadataStatus()
+	if status.Configured && status.Source == "owner" && s.settingsLocks["metadata.tmdb_token"] {
+		status.Source = "environment"
+	}
+	return status
 }

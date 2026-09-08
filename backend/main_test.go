@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/config"
 	"path/filepath"
 	"testing"
 )
@@ -23,6 +25,35 @@ func TestExclusiveLocksRejectContention(t *testing.T) {
 				t.Fatal("second lock acquired")
 			}
 		})
+	}
+}
+
+func TestConfigureMetadataAppliesApplicationOverrideAndDisablePrecedence(t *testing.T) {
+	old := applicationTMDBToken
+	applicationTMDBToken = "application-token"
+	t.Cleanup(func() { applicationTMDBToken = old })
+
+	c := catalog.New()
+	disabled := false
+	override := "owner-token"
+	if err := configureMetadata(c, config.Environment{TMDBToken: &override, MetadataEnabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	status := c.MetadataStatus()
+	if status.State != "disabled" || status.Configured {
+		t.Fatalf("disabled status = %+v", status)
+	}
+	if err := c.SetMetadataEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	if status = c.MetadataStatus(); status.Source != "owner" {
+		t.Fatalf("override status = %+v", status)
+	}
+	if err := c.SetTMDBToken(""); err != nil {
+		t.Fatal(err)
+	}
+	if status = c.MetadataStatus(); status.Source != "application" {
+		t.Fatalf("application fallback = %+v", status)
 	}
 }
 

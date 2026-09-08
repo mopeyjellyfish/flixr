@@ -55,3 +55,38 @@ func TestTMDBSettingsValidateBeforeSavingAndExposeActionableState(t *testing.T) 
 		t.Fatalf("valid save = %d %s", saved.Code, saved.Body.String())
 	}
 }
+
+func TestTMDBSettingsDisableAndOverrideRemovalAreIndependent(t *testing.T) {
+	house, err := household.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := house.Claim(house.SetupToken(), "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogue := catalog.New()
+	catalogue.SetApplicationTMDBToken("application-token")
+	catalogue.SetProvider(validatingProvider{})
+	server := NewServer(house, catalogue)
+	request := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPut, "/api/v1/owner/settings/tmdb", bytes.NewBufferString(body))
+		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, r)
+		return w
+	}
+
+	if response := request(`{"token":"owner-token"}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"owner"`) {
+		t.Fatalf("owner override = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(`{"enabled":false}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"disabled"`) {
+		t.Fatalf("disable = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(`{"token":""}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"disabled"`) {
+		t.Fatalf("remove while disabled = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(`{"enabled":true}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"application"`) || strings.Contains(response.Body.String(), "application-token") {
+		t.Fatalf("re-enable = %d %s", response.Code, response.Body.String())
+	}
+}
