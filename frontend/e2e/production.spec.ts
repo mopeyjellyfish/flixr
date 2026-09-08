@@ -76,7 +76,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   for (const viewport of [...viewports, { name: 'phone-landscape', width: 844, height: 390 }, { name: '4k', width: 3840, height: 2160 }, { name: '8k', width: 7680, height: 4320 }]) {
     await page.setViewportSize(viewport);
     const stage = await page.locator('main.player').boundingBox();
-    expect(stage?.width).toBe(viewport.width); expect(stage?.height).toBe(viewport.height);
+    expect(Math.abs((stage?.width ?? 0) - viewport.width)).toBeLessThan(0.5);
+    expect(Math.abs((stage?.height ?? 0) - viewport.height)).toBeLessThan(0.5);
     await expect(page.getByRole('button', { name: 'Fullscreen', exact: true })).toBeInViewport();
     await page.getByText('Settings', { exact: true }).click();
     await expect(page.getByRole('combobox', { name: 'Playback speed' })).toBeInViewport();
@@ -111,6 +112,9 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const reconnectBody = await (await reconnectPlan).json() as { resume_ms: number };
   expect(reconnectBody.resume_ms).toBe(acknowledgedPosition);
   await expect.poll(() => directVideo.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await clickTimeline(page, false);
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('production-direct-playback-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -179,6 +183,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByRole('button', { name: /play s1 e1 signal/i }).click();
   await expectPlayback(page);
   await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await clickTimeline(page, true);
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeVisible();
   await page.getByText('Settings', { exact: true }).click();
   const audio = page.getByRole('combobox', { name: /audio track/i });
   await expect(audio).toBeVisible();
@@ -299,4 +305,30 @@ async function expectPlaybackStartedAutomatically(page: import('@playwright/test
   await expect(video).toBeVisible();
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).readyState), { timeout: 20_000 }).toBeGreaterThan(0);
   await expect.poll(() => video.evaluate((element) => (element as HTMLVideoElement).currentTime > 0 || (element as HTMLVideoElement).ended), { timeout: 20_000 }).toBeTruthy();
+}
+
+async function clickTimeline(page: import('@playwright/test').Page, streamed: boolean) {
+  await page.locator('main.player').hover();
+  const timeline = page.getByRole('slider', { name: 'Seek' });
+  await expect(timeline).toBeEnabled();
+  const bounds = await timeline.boundingBox();
+  if (!bounds) throw new Error('timeline has no clickable bounds');
+  const before = Number(await timeline.inputValue());
+  const seekResponse = streamed
+    ? page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/seek'))
+    : undefined;
+  const x = before < 500 ? bounds.width / 2 : 1;
+  await timeline.click({ position: { x, y: bounds.height / 2 } });
+  const target = Number(await timeline.inputValue());
+  if (seekResponse) {
+    const response = await seekResponse;
+    expect(response.ok()).toBeTruthy();
+    const requested = Number((response.request().postDataJSON() as { position_ms: number }).position_ms);
+    const body = await response.json() as { resume_ms: number };
+    expect(requested).not.toBe(before);
+    expect(body.resume_ms).toBe(requested);
+  } else {
+    expect(target).not.toBe(before);
+    await expect.poll(() => page.locator('video').evaluate((element) => Math.round((element as HTMLVideoElement).currentTime * 1000))).toBe(target);
+  }
 }

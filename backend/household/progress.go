@@ -109,6 +109,27 @@ func (m *Manager) RecordPlaybackProgress(profileID, catalogID string, position, 
 	return true, nil
 }
 
+// CanRecordPlaybackProgress reports whether an observation still has authority
+// without changing durable progress. The eventual write remains a compare-and-
+// swap so a concurrent newer observation can never be overwritten.
+func (m *Manager) CanRecordPlaybackProgress(profileID, catalogID string, generation, observation int64) (bool, error) {
+	if !m.validProgress(profileID, catalogID, 0) || generation < 0 || observation < 0 {
+		return false, ErrCredentials
+	}
+	if m.db == nil {
+		return true, nil
+	}
+	var currentGeneration, currentObservation int64
+	err := m.db.QueryRow(`SELECT generation,observation FROM progress WHERE profile_id=? AND catalog_id=?`, profileID, catalogID).Scan(&currentGeneration, &currentObservation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return currentGeneration == generation && (observation == 0 || currentObservation < observation), nil
+}
+
 // ProgressForProfile is a trusted server action. Session cleanup must not call it:
 // a cached position has no authority to start a new progress generation.
 func (m *Manager) ProgressForProfile(profileID, catalogID string, position int64) error {

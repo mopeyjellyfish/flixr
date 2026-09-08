@@ -701,10 +701,25 @@ func (m *Manager) HeartbeatForViewer(id, viewerID, profileID string, positionMS 
 }
 
 func (m *Manager) Seek(id, profileID string, positionMS int64) (Session, error) {
-	return m.SeekForViewer(id, "", profileID, positionMS)
+	return m.SeekForViewerContext(context.Background(), id, "", profileID, positionMS)
 }
 
 func (m *Manager) SeekForViewer(id, viewerID, profileID string, positionMS int64) (Session, error) {
+	return m.SeekForViewerContext(context.Background(), id, viewerID, profileID, positionMS)
+}
+
+// SeekForViewerContext reuses retained media or prepares a replacement before
+// releasing the authenticated viewer's current session.
+func (m *Manager) SeekForViewerContext(ctx context.Context, id, viewerID, profileID string, positionMS int64) (Session, error) {
+	return m.SeekForViewerContextWithCommit(ctx, id, viewerID, profileID, positionMS, nil)
+}
+
+// SeekForViewerContextWithCommit prepares a replacement, runs commit while the
+// old session is still valid, and only then releases the old generation.
+func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewerID, profileID string, positionMS int64, commit func() error) (Session, error) {
+	if err := ctx.Err(); err != nil {
+		return Session{}, err
+	}
 	m.mu.Lock()
 	session, ok := m.sessions[id]
 	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || session.GenerationID == "" {
@@ -714,6 +729,12 @@ func (m *Manager) SeekForViewer(id, viewerID, profileID string, positionMS int64
 	gen := m.generations[session.GenerationID]
 	start, end, retained := m.retainedRangeLocked(gen)
 	if retained && positionMS >= start && positionMS <= end {
+		if commit != nil {
+			if err := commit(); err != nil {
+				m.mu.Unlock()
+				return Session{}, err
+			}
+		}
 		session.PositionMS = max(0, positionMS)
 		session.ExpiresAt = time.Now().Add(m.settings.LeaseTTL)
 		m.sessions[id] = session
@@ -723,13 +744,44 @@ func (m *Manager) SeekForViewer(id, viewerID, profileID string, positionMS int64
 	}
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
-	replacement, err := m.CreateForViewer(viewerID, profileID, catalogID, plan, positionMS, session.ProgressGeneration)
+	replacement, err := m.create(viewerID, profileID, catalogID, plan, positionMS, session.GenerationID, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
-	if !m.StopForViewer(id, viewerID, profileID) {
+	m.mu.Lock()
+	current, oldValid := m.sessions[id]
+	candidate, candidateValid := m.sessions[replacement.ID]
+	_, viewerRevoked := m.revokedViewers[viewerID]
+	oldValid = oldValid && current.ViewerID == viewerID && current.ProfileID == profileID && current.GenerationID == session.GenerationID && current.ProgressGeneration == session.ProgressGeneration && time.Now().Before(current.ExpiresAt)
+	candidateValid = candidateValid && candidate.ViewerID == viewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
+	if ctx.Err() != nil || !oldValid || !candidateValid || (viewerID != "" && viewerRevoked) {
+		contextErr := ctx.Err()
+		m.mu.Unlock()
 		_ = m.StopForViewer(replacement.ID, viewerID, profileID)
+		if contextErr != nil {
+			return Session{}, contextErr
+		}
 		return Session{}, ErrSessionInvalid
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			m.mu.Unlock()
+			_ = m.StopForViewer(replacement.ID, viewerID, profileID)
+			return Session{}, err
+		}
+	}
+	delete(m.sessions, id)
+	m.cancelSubtitleJobsLocked(id)
+	var retire *generation
+	if oldGeneration := m.generations[current.GenerationID]; oldGeneration != nil {
+		delete(oldGeneration.leases, id)
+		if len(oldGeneration.leases) == 0 {
+			retire = m.detachGenerationLocked(oldGeneration.id)
+		}
+	}
+	m.mu.Unlock()
+	if retire != nil {
+		m.retireGeneration(context.Background(), retire)
 	}
 	return replacement, nil
 }
