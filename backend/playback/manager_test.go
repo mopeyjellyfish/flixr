@@ -50,6 +50,7 @@ type fakeExecutor struct {
 	ignoreSignal bool
 	skipManifest bool
 	onStart      func()
+	inspectStart func([]string)
 	startErr     error
 }
 
@@ -74,6 +75,9 @@ func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
 func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
+	}
+	if e.inspectStart != nil {
+		e.inspectStart(args)
 	}
 	if e.onStart != nil {
 		e.onStart()
@@ -132,6 +136,71 @@ func testManager(t *testing.T, mutate func(*Settings)) (*Manager, *fakeExecutor)
 		}
 	})
 	return manager, executor
+}
+
+func commandInputTokens(args []string) []string {
+	var tokens []string
+	for index, arg := range args {
+		if arg == "-i" && index+1 < len(args) {
+			tokens = append(tokens, filepath.Base(args[index+1]))
+		}
+	}
+	return tokens
+}
+
+func TestManagerAuthorizesInternalInputsBeforeStartingFFmpeg(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	inputTokens := make([]string, 0, 2)
+	authorized := make([]bool, 0, 2)
+	executor.inspectStart = func(args []string) {
+		for index, inputToken := range commandInputTokens(args) {
+			catalogID, sourceKey, audioStreamIndex, external, ok := manager.InputFile(inputToken)
+			inputTokens = append(inputTokens, inputToken)
+			wantAudioStreamIndex := -1
+			if index == 1 {
+				wantAudioStreamIndex = 2
+			}
+			authorized = append(authorized, ok && catalogID == "film-1" && sourceKey == "source-a" && audioStreamIndex == wantAudioStreamIndex && external == (index == 1))
+		}
+	}
+
+	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	session, err := manager.Create("profile-a", "film-1", plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authorized) != 2 || !authorized[0] || !authorized[1] {
+		t.Fatalf("internal inputs authorized at FFmpeg start = %v, want primary and external audio", authorized)
+	}
+	if !manager.Stop(session.ID, "profile-a") {
+		t.Fatal("stop failed")
+	}
+	for _, inputToken := range inputTokens {
+		if _, _, _, _, ok := manager.InputFile(inputToken); ok {
+			t.Fatal("stopped generation retained internal input authority")
+		}
+	}
+}
+
+func TestManagerRevokesInternalInputsWhenFFmpegFailsToStart(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	var inputTokens []string
+	executor.inspectStart = func(args []string) {
+		inputTokens = commandInputTokens(args)
+	}
+	executor.startErr = errors.New("synthetic startup failure")
+	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	if _, err := manager.Create("profile-a", "film-1", plan, 0); err == nil {
+		t.Fatal("create succeeded")
+	}
+	if len(inputTokens) != 2 {
+		t.Fatalf("FFmpeg inputs = %d, want primary and external audio", len(inputTokens))
+	}
+	for _, inputToken := range inputTokens {
+		if _, _, _, _, ok := manager.InputFile(inputToken); ok {
+			t.Fatal("failed FFmpeg start retained internal input authority")
+		}
+	}
 }
 
 func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
@@ -268,6 +337,13 @@ func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
 	manager, executor := testManager(t, nil)
 	started := make(chan struct{})
 	resume := make(chan struct{})
+	var resumeOnce sync.Once
+	release := func() { resumeOnce.Do(func() { close(resume) }) }
+	defer release()
+	var inputToken string
+	executor.inspectStart = func(args []string) {
+		inputToken = commandInputTokens(args)[0]
+	}
 	executor.onStart = func() {
 		close(started)
 		<-resume
@@ -280,10 +356,14 @@ func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
 	<-started
 
 	manager.StopViewer("viewer-a")
-	close(resume)
+	_, _, _, _, stillAuthorized := manager.InputFile(inputToken)
+	release()
 
 	if err := <-result; !errors.Is(err, ErrSessionInvalid) {
 		t.Fatalf("late create error = %v, want session invalid", err)
+	}
+	if stillAuthorized {
+		t.Fatal("viewer teardown left pending input authorized")
 	}
 	if len(executor.processes) != 1 || !executor.processes[0].signaled.Load() {
 		t.Fatal("late FFmpeg candidate was not interrupted")
@@ -295,6 +375,55 @@ func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
 	defer manager.mu.Unlock()
 	if len(manager.revokedViewers) != 0 {
 		t.Fatal("viewer revocation fence remained after pending create finished")
+	}
+}
+
+func TestManagerShutdownRevokesInputWhileFFmpegIsStarting(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	started := make(chan struct{})
+	resume := make(chan struct{})
+	var resumeOnce sync.Once
+	release := func() { resumeOnce.Do(func() { close(resume) }) }
+	defer release()
+	var inputToken string
+	executor.inspectStart = func(args []string) {
+		inputToken = commandInputTokens(args)[0]
+	}
+	executor.onStart = func() {
+		close(started)
+		<-resume
+	}
+	createResult := make(chan error, 1)
+	go func() {
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Transcode}, 0)
+		createResult <- err
+	}()
+	<-started
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- manager.Shutdown(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.mu.Lock()
+		closed := manager.closed
+		manager.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("shutdown did not close the manager")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, _, _, _, stillAuthorized := manager.InputFile(inputToken)
+	release()
+	if err := <-createResult; !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("create error = %v, want session invalid", err)
+	}
+	if err := <-shutdownResult; err != nil {
+		t.Fatal(err)
+	}
+	if stillAuthorized {
+		t.Fatal("shutdown left pending input authorized")
 	}
 }
 
@@ -637,6 +766,12 @@ func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
 	}
 	if current, ok := manager.Lookup(first.ID, "profile-a", false); !ok || current.PositionMS != 0 || current.ProgressGeneration != 7 {
 		t.Fatalf("failed replacement removed old session: %#v, %v", current, ok)
+	}
+	manager.mu.Lock()
+	inputCount := len(manager.inputs)
+	manager.mu.Unlock()
+	if inputCount != 1 {
+		t.Fatalf("failed replacement retained input authority: got %d, want original generation only", inputCount)
 	}
 	if len(executor.processes) != 1 || executor.processes[0].signaled.Load() {
 		t.Fatal("failed replacement interrupted old generation")
