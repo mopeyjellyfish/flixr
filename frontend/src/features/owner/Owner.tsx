@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -17,6 +17,7 @@ type OwnerProps = {
 export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [readiness, setReadiness] = useState<Readiness>();
   const [scan, setScan] = useState<Scan>();
+  const [locations, setLocations] = useState<LibraryLocation[]>([]);
   const [films, setFilms] = useState('');
   const [tv, setTV] = useState('');
   const [tmdbSettings, setTMDBSettings] = useState<TMDBSettings>();
@@ -38,7 +39,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
 
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
-    api.scanStatus().then((result) => setScan(result.scan.status ? result.scan : undefined)).catch(() => undefined);
+    api.scanStatus().then((result) => { setScan(result.scan.status ? result.scan : undefined); setLocations(result.locations ?? []); }).catch(() => undefined);
     api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
     api.tmdbSettings().then(setTMDBSettings).catch(() => setNotice('TMDB settings are unavailable.'));
     api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
@@ -72,6 +73,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     if (scan?.status !== 'running') return;
     const timer = window.setInterval(() => api.scanStatus().then((result) => {
       setScan(result.scan);
+      setLocations(result.locations ?? []);
       if (result.scan.status !== 'running') void api.tmdbSettings().then(setTMDBSettings).catch(() => undefined);
     }).catch(() => undefined), 1500);
     return () => clearInterval(timer);
@@ -172,6 +174,17 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to start scan.');
     }
   };
+  const confirmRemovals = async (location: LibraryLocation) => {
+    if (!location.pending_scan_id || !window.confirm(`Confirm removal of ${location.missing} missing files from the ${location.root_kind === 'film' ? 'Films' : 'TV'} library? Their titles and viewing history remain recoverable.`)) return;
+    try {
+      const result = await api.confirmScanRemovals(location.pending_scan_id, location.root_kind);
+      setLocations(result.locations ?? []);
+      setScan(result.scan);
+      setNotice('Library cleanup confirmed. Missing titles remain in your history and lists as unavailable.');
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : 'Unable to confirm library cleanup. Refresh scan status and try again.');
+    }
+  };
   const create = async (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -198,7 +211,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked} /><ScanPanel scan={scan} onStart={startScan} /></div>
+            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} /></div>
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -327,12 +340,16 @@ function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit, locked }: {
   );
 }
 
-function ScanPanel({ scan, onStart }: { scan?: Scan; onStart: () => Promise<void> }) {
+function ScanPanel({ scan, locations, onStart, onConfirm }: { scan?: Scan; locations: LibraryLocation[]; onStart: () => Promise<void>; onConfirm: (location: LibraryLocation) => Promise<void> }) {
   return (
     <section>
       <h2>Manual scan</h2>
       <p>{scan ? `${scan.status}: ${scan.scanned} scanned, ${scan.unmatched} unmatched, ${scan.failed} failed.` : 'No scan has started.'}</p>
       {scan?.message && <p role="alert">{scan.message}</p>}
+      {locations.map((location) => <div key={location.root_kind}>
+        <p><strong>{location.root_kind === 'film' ? 'Films' : 'TV'}:</strong> {location.state === 'available' && location.scan_complete ? `${location.items} files checked.` : location.state === 'unavailable' ? 'Location unavailable; the prior catalog was kept.' : location.state === 'review_required' ? `${location.missing} missing files need owner review.` : 'Last scan was incomplete.'}</p>
+        {location.state === 'review_required' && <button type="button" onClick={() => void onConfirm(location)}>Confirm removal</button>}
+      </div>)}
       <LoadingButton onAction={onStart} disabled={scan?.status === 'running'} pendingLabel="Starting…" successLabel="Start scan">{scan?.status === 'running' ? 'Scan in progress' : 'Start scan'}</LoadingButton>{scan?.status === 'running' && <ProgressBar value={null} label="Library scan" pendingLabel="Scanning your library…" />}
     </section>
   );

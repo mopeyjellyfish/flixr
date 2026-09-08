@@ -62,6 +62,9 @@ func TestMissingPhysicalFileRetainsUnavailableLogicalIdentityAndProgress(t *test
 	if err := os.WriteFile(path, []byte("physical file"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(films, "Keep.mp4"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	db, c := openCatalog(t, data)
 	defer db.Close()
 	if err := c.SetRoots(films, ""); err != nil {
@@ -70,7 +73,16 @@ func TestMissingPhysicalFileRetainsUnavailableLogicalIdentityAndProgress(t *test
 	if err := c.Scan(context.Background(), 1); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
-	before := c.MetadataTargets()[0]
+	var before catalog.Item
+	for _, item := range c.MetadataTargets() {
+		if item.Title == "Film" {
+			before = item
+			break
+		}
+	}
+	if before.ID == "" {
+		t.Fatal("Film metadata target not found")
+	}
 	h, err := household.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -1199,6 +1211,9 @@ func TestMissingReplacementUsesLastObservedAnchorNotNewestFileMtime(t *testing.T
 	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(films, "Keep.mp4"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	db, c := openCatalog(t, data)
 	defer db.Close()
 	c.SetProvider(ownerMatchProvider{enrichment: catalog.Enrichment{ProviderID: "1"}})
@@ -1223,7 +1238,7 @@ func TestMissingReplacementUsesLastObservedAnchorNotNewestFileMtime(t *testing.T
 		t.Fatal(err)
 	}
 	var replacementID string
-	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE present=1").Scan(&replacementID); err != nil {
+	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE relative_path='Film.mp4' AND present=1").Scan(&replacementID); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(path); err != nil {
@@ -1242,7 +1257,7 @@ func TestMissingReplacementUsesLastObservedAnchorNotNewestFileMtime(t *testing.T
 		t.Fatal(err)
 	}
 	var restored string
-	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE present=1").Scan(&restored); err != nil || restored != replacementID {
+	if err := db.QueryRow("SELECT catalog_id FROM catalog_physical_files WHERE relative_path='Film.mp4' AND present=1").Scan(&restored); err != nil || restored != replacementID {
 		t.Fatalf("reappearance chose historical mtime anchor %s instead of %s: %v", restored, replacementID, err)
 	}
 }
@@ -1269,7 +1284,14 @@ func TestMissingSeriesIsUnavailableWithoutLosingItsIdentity(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Scan(t.Context(), 1); err != nil {
+	if err := c.Scan(t.Context(), 1); err == nil {
+		t.Fatal("empty TV root did not require review")
+	}
+	locations, err := c.LibraryLocations()
+	if err != nil || len(locations) != 1 {
+		t.Fatalf("TV removal review = %#v, %v", locations, err)
+	}
+	if err := c.ConfirmRemovals(t.Context(), locations[0].PendingScanID, "episode"); err != nil {
 		t.Fatal(err)
 	}
 	series, ok := c.Series(before.ID)

@@ -86,9 +86,14 @@ volumes:
 
 Use long bind syntax with `bind: {create_host_path: false}` as in the shipped Compose
 file to fail clearly when a host path is missing. A mounted but empty network share
-cannot always be distinguished from an intentionally emptied library; ensure the
-share is available before scanning. Unreadable or missing roots fail scans without
-replacing the last catalog.
+can look like an intentionally emptied library. FlixR keeps the last catalog and asks
+the owner to review cleanup when a previously populated root becomes empty, or when
+one scan loses at least 10 files and half of that root. Reconnect the share and scan
+again to clear the review, or use **Server settings → Libraries → Confirm removal**
+to mark the captured files unavailable. Their title records, history, progress, lists,
+ratings, and owner metadata remain recoverable. Smaller ordinary removals are marked
+unavailable after a complete scan. Unreadable or missing roots and canceled scans do
+not publish catalog changes.
 
 ### External audio tracks
 

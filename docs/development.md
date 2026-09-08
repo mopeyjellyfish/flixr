@@ -288,6 +288,14 @@ evidence contradicts it. Missing files leave unavailable titles and their
 progress, My List membership, viewing ledger, and owner metadata intact.
 Byte-identical duplicates retain their physical sources and keep the existing
 primary while it is present.
+Each configured film or TV location records whether its last trusted scan completed
+and whether the location was available. If a populated root becomes empty, or a scan
+loses at least 10 files and half of that root, the scan stops before publishing any
+catalog changes and records an owner review. A later complete scan clears stale review
+state when the files return. The owner can instead confirm the exact captured review;
+that marks its missing physical sources unavailable without deleting logical titles or
+household state. Missing or unreadable roots and cancellation retain the last complete
+location and catalog state.
 Admitted playback pins a private source version; a changed source requires a new
 playback plan instead of changing bytes under an existing session.
 
@@ -304,5 +312,11 @@ The owner-only HTTP contract is `GET /api/v1/owner/identity/repairs`,
 and `POST /api/v1/owner/identity/merges/{id}/unmerge`. Overlapping active repairs
 or repeated undo return HTTP 409 `identity_conflict`. Responses contain public
 title details and reconciliation decisions, never filesystem paths or digests.
+
+Library scan status adds per-location availability through
+`GET /api/v1/owner/scan/status`. Confirm a pending review with
+`POST /api/v1/owner/scan/removals/confirm` and the exact `scan_id` and `root_kind`
+returned by that status. Stale confirmations return HTTP 409
+`removal_review_changed`; physical candidate paths are never returned.
 
 Player controls and local chapter/preview limits are described in [Watching with FlixR](player.md).

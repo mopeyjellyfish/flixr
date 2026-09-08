@@ -122,6 +122,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/owner/roots", s.roots)
 	s.mux.HandleFunc("POST /api/v1/owner/scan", s.scan)
 	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
+	s.mux.HandleFunc("POST /api/v1/owner/scan/removals/confirm", s.confirmScanRemovals)
 	s.mux.HandleFunc("GET /api/v1/owner/settings/tmdb", s.tmdbSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/tmdb", s.tmdbSettings)
 	s.mux.HandleFunc("GET /api/v1/owner/identity/repairs", s.identityRepairs)
@@ -641,7 +642,43 @@ func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	write(w, http.StatusOK, map[string]any{"scan": s.catalog.ScanStatus()})
+	locations, err := s.catalog.LibraryLocations()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "scan_status_failed")
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"scan": s.catalog.ScanStatus(), "locations": locations})
+}
+
+func (s *Server) confirmScanRemovals(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	var request struct {
+		ScanID   string `json:"scan_id"`
+		RootKind string `json:"root_kind"`
+	}
+	if !decode(r, &request) || request.ScanID == "" || (request.RootKind != "film" && request.RootKind != "episode") {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if err := s.catalog.ConfirmRemovals(r.Context(), request.ScanID, request.RootKind); err != nil {
+		switch {
+		case errors.Is(err, catalog.ErrRemovalReviewNotFound):
+			fail(w, http.StatusConflict, "removal_review_changed")
+		case errors.Is(err, catalog.ErrScanActive):
+			fail(w, http.StatusConflict, "scan_active")
+		default:
+			fail(w, http.StatusInternalServerError, "library_cleanup_failed")
+		}
+		return
+	}
+	locations, err := s.catalog.LibraryLocations()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "scan_status_failed")
+		return
+	}
+	write(w, http.StatusOK, map[string]any{"confirmed": true, "scan": s.catalog.ScanStatus(), "locations": locations})
 }
 
 func (s *Server) tmdbSettings(w http.ResponseWriter, r *http.Request) {
