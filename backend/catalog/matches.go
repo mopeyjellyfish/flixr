@@ -60,7 +60,10 @@ func publicMetadataItem(item Item) Item {
 func (c *Catalog) Candidates(ctx context.Context, kind, id, query, language, region string) ([]Candidate, error) {
 	c.mu.RLock()
 	item, ok := c.metadataTarget(kind, id)
-	provider, token := c.provider, c.token
+	provider, token := c.provider, ""
+	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
+		token = resolved
+	}
 	c.mu.RUnlock()
 	if !ok {
 		return nil, ErrMetadataNotFound
@@ -78,7 +81,10 @@ func (c *Catalog) Candidates(ctx context.Context, kind, id, query, language, reg
 func (c *Catalog) Match(ctx context.Context, kind, id, providerID, language, region string) (Item, error) {
 	c.mu.RLock()
 	expected, ok := c.metadataTarget(kind, id)
-	provider, token := c.provider, c.token
+	provider, token := c.provider, ""
+	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
+		token = resolved
+	}
 	c.mu.RUnlock()
 	if !ok {
 		return Item{}, ErrMetadataNotFound

@@ -28,6 +28,7 @@ func Inventory(dataDir string) []SettingDefinition {
 		{"household.initial_profile", "Household", "server", "", "FLIXR_INITIAL_PROFILE", "", "startup only", "restart", "valid profile name", false, true},
 		{"library.films_root", "Libraries", "server", "", "FLIXR_FILMS_ROOT", "", "database", "immediate", "empty or existing directory", false, false},
 		{"library.tv_root", "Libraries", "server", "", "FLIXR_TV_ROOT", "", "database", "immediate", "empty or existing directory", false, false},
+		{"metadata.enabled", "Metadata", "server", "true", "FLIXR_METADATA_ENABLED", "", "database", "immediate", "boolean", false, false},
 		{"metadata.tmdb_token", "Metadata", "server", "", "FLIXR_TMDB_TOKEN", "FLIXR_TMDB_TOKEN_FILE", "database", "immediate", "provider token", true, false},
 		{"background.scan_on_start", "Background work", "server", "false", "FLIXR_SCAN_ON_START", "", "environment", "restart", "boolean", false, true},
 		{"background.scan_workers", "Background work", "server", "4", "FLIXR_SCAN_WORKERS", "", "environment", "restart", "integer 1–32", false, true},
@@ -67,6 +68,9 @@ func (b Bootstrap) NonSecretValues() map[string]string {
 		"server.data_dir": b.DataDir, "server.listen_addr": b.ListenAddr, "server.tls_cert": b.TLSCert,
 		"server.demo": strconv.FormatBool(b.Demo), "household.initial_profile": b.InitialProfile,
 		"background.scan_on_start": strconv.FormatBool(b.ScanOnStart), "background.scan_workers": strconv.Itoa(b.ScanWorkers),
+	}
+	if b.MetadataEnabled != nil {
+		values["metadata.enabled"] = strconv.FormatBool(*b.MetadataEnabled)
 	}
 	if b.SegmentDir != "" {
 		values["playback.segment_dir"] = b.SegmentDir

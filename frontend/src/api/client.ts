@@ -34,6 +34,7 @@ export const api = {
   tmdbSettings: () => request<TMDBSettings>('/owner/settings/tmdb'),
   saveTMDBToken: (token: string) => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token }) }),
   removeTMDBToken: () => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token: '' }) }),
+  setMetadataEnabled: (enabled: boolean) => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ enabled }) }),
   settingsInventory: () => request<SettingsInventory>('/owner/settings'),
   settingsExport: () => request<{ version: number; settings: Record<string, string> }>('/owner/settings/export'),
   settingsImportPreview: (data: { version: number; settings: Record<string, string> }) => request<{ changes: Record<string, { from: string; to: string }>; requires_review: boolean; restart_required?: boolean }>('/owner/settings/import/preview', { method: 'POST', body: JSON.stringify(data) }),

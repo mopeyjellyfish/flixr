@@ -27,6 +27,9 @@ for attempt in {1..60}; do
 done
 status="$(curl -fsS "http://127.0.0.1:$port/api/v1/setup/status")"
 for field in '"claimed":false' '"ffmpeg":true' '"ffprobe":true'; do grep -q "$field" <<< "$status"; done
+if [[ "${FLIXR_EXPECT_APPLICATION_METADATA:-}" == 1 ]]; then
+	for field in '"configured":true' '"source":"application"'; do grep -q "$field" <<< "$status"; done
+fi
 if grep -q '"demo":true' <<< "$status"; then echo 'Production image started in demo mode' >&2; exit 1; fi
 curl -fsS "http://127.0.0.1:$port/" | grep -q '<html'
 docker stop --time 15 "$name" >/dev/null

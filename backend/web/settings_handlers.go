@@ -27,7 +27,7 @@ func (s *Server) effectiveSettings() []effectiveSetting {
 	films, tv := s.catalog.Roots()
 	p := s.playback.Settings()
 	values := map[string]string{
-		"library.films_root": films, "library.tv_root": tv, "metadata.tmdb_token": configured(s.catalog.TMDBConfigured()),
+		"library.films_root": films, "library.tv_root": tv, "metadata.enabled": strconv.FormatBool(s.catalog.MetadataEnabled()), "metadata.tmdb_token": configured(s.catalog.TMDBOverrideConfigured()),
 		"playback.segment_dir": p.SegmentDir, "playback.generation_bytes": strconv.FormatInt(p.GenerationBytes, 10),
 		"playback.global_bytes": strconv.FormatInt(p.GlobalBytes, 10), "playback.max_generations": strconv.Itoa(p.MaxGenerations),
 		"playback.lease_ttl": p.LeaseTTL.String(), "playback.heartbeat_interval": p.HeartbeatInterval.String(),
@@ -79,7 +79,7 @@ func configured(value bool) string {
 	return "not configured"
 }
 func (s *Server) secretConfigured(key string) bool {
-	return key == "metadata.tmdb_token" && s.catalog.TMDBConfigured()
+	return key == "metadata.tmdb_token" && s.catalog.TMDBOverrideConfigured()
 }
 
 func (s *Server) settingsExport(w http.ResponseWriter, r *http.Request) {

@@ -18,8 +18,12 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG REVISION=unknown
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=$TARGETARCH go build -trimpath \
-    -ldflags="-s -w -X main.version=$VERSION -X main.revision=$REVISION" -o /out/flixr .
+	--mount=type=secret,id=tmdb_application_token,required=false \
+	tmdb_token="$(cat /run/secrets/tmdb_application_token 2>/dev/null || true)" \
+	&& ldflags="-s -w -X main.version=$VERSION -X main.revision=$REVISION" \
+	&& if [ -n "$tmdb_token" ]; then ldflags="$ldflags -X main.applicationTMDBToken=$tmdb_token"; fi \
+	&& CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=$TARGETARCH go build -trimpath \
+	-ldflags="$ldflags" -o /out/flixr .
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 RUN apk upgrade --no-cache \

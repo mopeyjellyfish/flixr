@@ -287,7 +287,10 @@ func (c *Catalog) RefreshPreview(ctx context.Context, kind, id string) ([]Metada
 func (c *Catalog) refreshEdit(ctx context.Context, kind, id string) (MetadataEdit, map[string]Artwork, Item, error) {
 	c.mu.RLock()
 	item, ok := c.metadataTarget(kind, id)
-	provider, token := c.provider, c.token
+	provider, token := c.provider, ""
+	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
+		token = resolved
+	}
 	c.mu.RUnlock()
 	if !ok {
 		return MetadataEdit{}, nil, Item{}, ErrMetadataNotFound

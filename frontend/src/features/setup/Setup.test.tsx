@@ -19,3 +19,9 @@ it('validates an optional TMDB credential before starting the first normal-mode 
   expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/settings/tmdb', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ token: 'credential' }) }));
   expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan', expect.objectContaining({ method: 'POST' }));
 });
+
+it('explains automatic metadata access and keeps personal credentials advanced', () => {
+	render(<Setup readiness={{ ffprobe: true, ffmpeg: true }} metadata={{ provider: 'tmdb', enabled: true, configured: true, source: 'application', state: 'configured', message: 'Automatic TMDB access is available.' }} initialRoots={{ films: '/media/films', tv: '' }} onCompleted={() => undefined} />);
+	expect(screen.getByText(/automatic TMDB access is available/i)).toBeVisible();
+	expect(screen.getByText(/advanced: personal TMDB credential/i)).toBeVisible();
+});

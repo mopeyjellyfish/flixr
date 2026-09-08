@@ -421,6 +421,9 @@ func (c *Catalog) cacheEnrichmentArtwork(ctx context.Context, identity artworkId
 	enrichment.Poster, enrichment.Backdrop = existingPoster, existingBackdrop
 	failed := false
 	if enrichment.Poster == "" && posterPath != "" {
+		if !c.MetadataEnabled() {
+			return false, nil
+		}
 		if art, err := provider.FetchArtwork(ctx, posterPath); err == nil {
 			if cached, err := c.cacheArtworkAndClearRetry(identity, "poster", art); err == nil && cached != "" {
 				enrichment.Poster = cached
@@ -437,6 +440,9 @@ func (c *Catalog) cacheEnrichmentArtwork(ctx context.Context, identity artworkId
 		}
 	}
 	if enrichment.Backdrop == "" && backdropPath != "" {
+		if !c.MetadataEnabled() {
+			return failed, nil
+		}
 		if art, err := provider.FetchArtwork(ctx, backdropPath); err == nil {
 			if cached, err := c.cacheArtworkAndClearRetry(identity, "backdrop", art); err == nil && cached != "" {
 				enrichment.Backdrop = cached

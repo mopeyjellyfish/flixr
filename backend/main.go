@@ -28,6 +28,7 @@ import (
 
 var version = "dev"
 var revision = "unknown"
+var applicationTMDBToken string
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
@@ -136,10 +137,8 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 			return fmt.Errorf("environment media roots: %w", err)
 		}
 	}
-	if cfg.TMDBToken != nil {
-		if err := c.SetTMDBToken(*cfg.TMDBToken); err != nil {
-			return err
-		}
+	if err := configureMetadata(c, cfg.Environment); err != nil {
+		return err
 	}
 	if cfg.Demo && c.DemoSource() != "" {
 		if err := prepareDemoHousehold(h, c); err != nil {
@@ -172,7 +171,7 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	if !h.Claimed() {
 		fmt.Printf("Flixr setup token: %s\n", h.SetupToken())
 	}
-	if cfg.ScanOnStart {
+	if cfg.ScanOnStart || c.MetadataRefreshDue() {
 		workers := cfg.ScanWorkers
 		if workers == 0 {
 			workers = 4
@@ -223,6 +222,21 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	scanErr := c.Shutdown(shutdown)
 	if err := errors.Join(serveErr, scanErr, playbackErr, inputErr, serverErr); err != nil {
 		return fmt.Errorf("bounded shutdown: %w", err)
+	}
+	return nil
+}
+
+func configureMetadata(c *catalog.Catalog, environment config.Environment) error {
+	c.SetApplicationTMDBToken(applicationTMDBToken)
+	if environment.TMDBToken != nil {
+		if err := c.SetTMDBToken(*environment.TMDBToken); err != nil {
+			return fmt.Errorf("apply metadata credential override: %w", err)
+		}
+	}
+	if environment.MetadataEnabled != nil {
+		if err := c.SetMetadataEnabled(*environment.MetadataEnabled); err != nil {
+			return fmt.Errorf("apply metadata enabled policy: %w", err)
+		}
 	}
 	return nil
 }

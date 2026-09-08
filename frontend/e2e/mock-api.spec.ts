@@ -75,7 +75,10 @@ for (const viewport of viewports) {
     await page.getByLabel(/owner password/i).fill('safe owner password');
     await page.getByRole('button', { name: /secure this server/i }).click();
     await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
-    await expect(page.getByLabel(/TMDB API Read Access Token/i)).toBeVisible();
+    const personalCredential = page.getByLabel(/TMDB API Read Access Token/i);
+    await expect(personalCredential).toBeHidden();
+    await page.getByText(/advanced: personal TMDB credential/i).click();
+    await expect(personalCredential).toBeVisible();
     await expect(page.getByRole('button', { name: /save libraries/i })).toBeVisible();
     await check(page, errors);
     await page.getByLabel(/films library/i).fill('/media/films');

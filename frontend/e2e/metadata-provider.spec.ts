@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 type CatalogItem = { id: string; title: string; kind: string; year: number; synopsis: string; poster: string; backdrop: string };
 type SeriesDetail = CatalogItem & { seasons: Array<{ episodes: CatalogItem[] }> };
 
-test('configured normal-mode metadata survives reverse-proxy restart offline', async ({ page, browser }, testInfo) => {
+test('automatic normal-mode metadata survives reverse-proxy restart offline', async ({ page, browser }, testInfo) => {
   test.setTimeout(90_000);
   const configResponse = await page.request.get('/__acceptance/config');
   expect(configResponse.ok()).toBeTruthy();
@@ -18,9 +18,9 @@ test('configured normal-mode metadata survives reverse-proxy restart offline', a
   await page.getByLabel(/owner password/i).fill('metadata-acceptance-password');
   await page.getByRole('button', { name: /secure this server/i }).click();
   await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
+	await expect(page.getByText(/automatic TMDB access is available/i)).toBeVisible();
   await page.getByLabel(/films library/i).fill(config.films);
   await page.getByLabel(/tv library/i).fill(config.tv);
-  await page.getByLabel(/TMDB API Read Access Token/i).fill('valid-token');
   await page.getByRole('button', { name: /save libraries/i }).click();
   await expect(page.getByRole('heading', { name: /profile/i })).toBeVisible();
   await expect.poll(async () => page.evaluate(async () => {

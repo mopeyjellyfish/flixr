@@ -50,6 +50,7 @@ type Enrichment struct {
 }
 
 var ErrInvalidCredential = errors.New("metadata provider credential is invalid")
+var ErrProviderRateLimited = errors.New("metadata provider rate limit reached")
 
 type TMDB struct {
 	client                 *http.Client
@@ -90,11 +91,8 @@ func (t *TMDB) Validate(ctx context.Context, token string) error {
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return ErrInvalidCredential
-	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return providerHTTPError(resp.StatusCode)
 	}
 	return nil
 }
@@ -131,7 +129,7 @@ func (t *TMDB) Lookup(ctx context.Context, token, kind, title string) (Enrichmen
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Enrichment{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return Enrichment{}, providerHTTPError(resp.StatusCode)
 	}
 	var body struct {
 		Results []struct {
@@ -250,7 +248,7 @@ func (t *TMDB) ByID(ctx context.Context, token, kind, providerID, language, regi
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Enrichment{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return Enrichment{}, providerHTTPError(resp.StatusCode)
 	}
 	var x struct {
 		ID           int    `json:"id"`
@@ -307,7 +305,7 @@ func (t *TMDB) LookupEpisode(ctx context.Context, token, seriesID string, season
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Enrichment{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return Enrichment{}, providerHTTPError(resp.StatusCode)
 	}
 	var value struct {
 		ID        int    `json:"id"`
@@ -375,7 +373,7 @@ func (t *TMDB) search(ctx context.Context, token, kind, title, language, region 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return tmdbSearch{}, fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return tmdbSearch{}, providerHTTPError(resp.StatusCode)
 	}
 	var body tmdbSearch
 	if err := decodeLimitedJSON(resp.Body, &body); err != nil {
@@ -433,7 +431,7 @@ func (t *TMDB) FetchArtwork(ctx context.Context, imagePath string) (Artwork, err
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Artwork{}, fmt.Errorf("tmdb image status %d", resp.StatusCode)
+		return Artwork{}, providerHTTPError(resp.StatusCode)
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
 	if !strings.HasPrefix(contentType, "image/") {
@@ -458,10 +456,7 @@ func (t *TMDB) do(req *http.Request) (*http.Response, error) {
 		}
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		delay := time.Second
-		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds >= 0 && seconds < 1 {
-			delay = time.Duration(seconds) * time.Second
-		}
+		delay := retryAfter(resp.Header.Get("Retry-After"), time.Now())
 		timer := time.NewTimer(delay)
 		select {
 		case <-req.Context().Done():
@@ -470,6 +465,28 @@ func (t *TMDB) do(req *http.Request) (*http.Response, error) {
 		case <-timer.C:
 		}
 	}
+}
+
+func providerHTTPError(status int) error {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrInvalidCredential
+	case http.StatusTooManyRequests:
+		return ErrProviderRateLimited
+	default:
+		return fmt.Errorf("%w: tmdb status %d", ErrProviderUnavailable, status)
+	}
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	const maximum = 5 * time.Second
+	if seconds, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && seconds >= 0 {
+		return min(time.Duration(seconds)*time.Second, maximum)
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		return min(max(when.Sub(now), time.Duration(0)), maximum)
+	}
+	return time.Second
 }
 func validImagePath(value string) bool {
 	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "?#\\") {
