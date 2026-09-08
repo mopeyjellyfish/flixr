@@ -55,6 +55,17 @@ func TestConvertSanitizesWebVTTAndDropsNonCueBlocks(t *testing.T) {
 	}
 }
 
+func TestConvertAcceptsUTF8BOMBeforeWebVTTHeader(t *testing.T) {
+	input := []byte("\xef\xbb\xbfWEBVTT\n\n00:00.000 --> 00:01.000\nCaption\n")
+	got, err := captions.Convert(input, "webvtt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "00:00:00.000 --> 00:00:01.000\nCaption") {
+		t.Fatalf("BOM-prefixed WebVTT cue missing:\n%s", got)
+	}
+}
+
 func TestConvertRejectsUnsupportedAndOversizedInput(t *testing.T) {
 	if _, err := captions.Convert([]byte("text"), "ass", 0); !errors.Is(err, captions.ErrUnsupported) {
 		t.Fatalf("unsupported error = %v", err)

@@ -72,6 +72,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const hls = useRef<Hls | null>(null);
   const sourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
+  const subtitleSwitchVersion = useRef(0);
   const audioSwitchTask = useRef<Promise<void> | null>(null);
   const replacingSession = useRef<string | undefined>(undefined);
   const playback = useRef<PlaybackPlan | null>(null);
@@ -101,6 +102,8 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     const element = video.current;
     if (!element) return;
     const version = ++sourceVersion.current;
+    subtitleSwitchVersion.current += 1;
+    setSwitchingSubtitle(false);
     hls.current?.destroy();
     hls.current = null;
     playback.current = plan;
@@ -516,6 +519,8 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
   const changeSubtitle = async (value: string) => {
     const plan = playback.current;
     if (!plan || switchingSubtitle) return;
+    const version = sourceVersion.current;
+    const switchVersion = ++subtitleSwitchVersion.current;
     setSwitchingSubtitle(true);
     setTrackError(undefined);
     try {
@@ -526,11 +531,13 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
             return { mode: 'track' as const, subtitle_stream_index: Number(rawIndex), subtitle_external: source === 'external' };
           })();
       const updated = await api.playbackSubtitle(plan.session_id, selection);
-      if (playback.current?.session_id === plan.session_id) playback.current = updated;
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) playback.current = updated;
     } catch (error: unknown) {
-      setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change subtitles.');
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) {
+        setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change subtitles.');
+      }
     } finally {
-      setSwitchingSubtitle(false);
+      if (version === sourceVersion.current && switchVersion === subtitleSwitchVersion.current && playback.current?.session_id === plan.session_id) setSwitchingSubtitle(false);
     }
   };
 

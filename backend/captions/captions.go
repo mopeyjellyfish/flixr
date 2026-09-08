@@ -44,6 +44,7 @@ func Convert(input []byte, codec string, offsetMS int64) ([]byte, error) {
 	}
 	normalized := strings.ReplaceAll(string(input), "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	normalized = strings.TrimPrefix(normalized, "\ufeff")
 	blocks := strings.Split(normalized, "\n\n")
 	var output strings.Builder
 	output.WriteString("WEBVTT\n")

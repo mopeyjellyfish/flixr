@@ -997,6 +997,38 @@ it('switches native subtitle tracks without replacing the media session', async 
   expect(requests.filter(({ path }) => path.endsWith('/playback/plans'))).toHaveLength(1);
 });
 
+it('ignores a delayed subtitle failure from a retired session', async () => {
+  let finishSubtitle: ((value: Response) => void) | undefined;
+  const subtitle = { index: 2, codec: 'subrip', language: 'eng', default: true };
+  const plan = (session: string) => ({
+    plan: { kind: 'transcode' }, session_id: session, media_url: `/${session}/manifest.m3u8`,
+    resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999,
+    subtitle_url: `/api/v1/playback/sessions/${session}/subtitle.vtt?index=2&external=false`,
+    selected_subtitle: subtitle, subtitle_tracks: [subtitle],
+  });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify(plan('session-1')));
+    if (path.endsWith('/subtitle')) return await new Promise<Response>((resolve) => { finishSubtitle = resolve; });
+    if (path.endsWith('/seek')) return new Response(JSON.stringify(plan('session-2')));
+    return new Response(JSON.stringify({ stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Subtitles' }), { target: { value: 'off' } });
+  await waitFor(() => expect(finishSubtitle).toBeTypeOf('function'));
+  video.currentTime = 1;
+  fireEvent.seeked(video);
+  await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2')));
+  await act(async () => { finishSubtitle!(new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 })); });
+
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('combobox', { name: 'Subtitles' })).toBeEnabled();
+  expect(screen.getByRole('combobox', { name: 'Subtitles' })).toHaveValue('embedded:2');
+});
+
 it('reattaches source-relative captions across repeated HLS seeks', async () => {
   const seekPositions: number[] = [];
   const subtitle = { index: 2, codec: 'subrip', language: 'eng' };
