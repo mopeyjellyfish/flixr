@@ -86,6 +86,9 @@ func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 	if c.scanning {
 		return ErrMetadataBusy
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	current, ok := c.playbackSource(id)
 	current.sourceRoot = c.film
 	if current.rootKind == "episode" {
