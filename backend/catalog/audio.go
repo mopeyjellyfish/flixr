@@ -137,7 +137,7 @@ func (c *Catalog) appendAudioSidecars(ctx context.Context, root *os.Root, file s
 }
 
 func (c *Catalog) loadExternalAudio() error {
-	rows, err := c.db.Query(`SELECT catalog_id,selection_index,source_stream_index,relative_path,codec,channels,language,title,is_default,is_forced FROM catalog_audio_sidecars ORDER BY catalog_id,selection_index`)
+	rows, err := c.db.Query(`SELECT catalog_id,selection_index,source_stream_index,relative_path,codec,profile,channels,sample_rate,bitrate,language,title,is_default,is_forced FROM catalog_audio_sidecars ORDER BY catalog_id,selection_index`)
 	if err != nil {
 		return fmt.Errorf("load external audio: %w", err)
 	}
@@ -146,7 +146,7 @@ func (c *Catalog) loadExternalAudio() error {
 		var catalogID string
 		var track AudioTrack
 		var defaultValue, forced int
-		if err := rows.Scan(&catalogID, &track.Index, &track.sourceIndex, &track.path, &track.Codec, &track.Channels, &track.Language, &track.Title, &defaultValue, &forced); err != nil {
+		if err := rows.Scan(&catalogID, &track.Index, &track.sourceIndex, &track.path, &track.Codec, &track.Profile, &track.Channels, &track.SampleRate, &track.Bitrate, &track.Language, &track.Title, &defaultValue, &forced); err != nil {
 			return fmt.Errorf("scan external audio: %w", err)
 		}
 		item, ok := c.items[catalogID]

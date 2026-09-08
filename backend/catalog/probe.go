@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -76,19 +77,29 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 		Format struct {
 			FormatName string `json:"format_name"`
 			Duration   string `json:"duration"`
+			BitRate    string `json:"bit_rate"`
 		} `json:"format"`
 		Streams []struct {
 			Index         *int              `json:"index"`
 			CodecType     string            `json:"codec_type"`
 			CodecName     string            `json:"codec_name"`
 			Profile       string            `json:"profile"`
+			Level         int               `json:"level"`
 			Channels      int               `json:"channels"`
+			SampleRate    string            `json:"sample_rate"`
 			Width         int               `json:"width"`
 			Height        int               `json:"height"`
 			BitRate       string            `json:"bit_rate"`
+			AvgFrameRate  string            `json:"avg_frame_rate"`
+			RFrameRate    string            `json:"r_frame_rate"`
+			BitsPerSample json.Number       `json:"bits_per_sample"`
+			BitsPerRaw    json.Number       `json:"bits_per_raw_sample"`
 			ColorTransfer string            `json:"color_transfer"`
 			Tags          map[string]string `json:"tags"`
-			Disposition   struct {
+			SideDataList  []struct {
+				Rotation int `json:"rotation"`
+			} `json:"side_data_list"`
+			Disposition struct {
 				Default int `json:"default"`
 				Forced  int `json:"forced"`
 			} `json:"disposition"`
@@ -99,24 +110,95 @@ func (p ffprobe) Probe(ctx context.Context, file *os.File) (MediaProperties, err
 	}
 	media := MediaProperties{Container: value.Format.FormatName, PrimaryVideoStreamIndex: -1}
 	media.DurationMS = durationMilliseconds(value.Format.Duration)
+	formatBitrate := positiveInt64(value.Format.BitRate)
 	for _, stream := range value.Streams {
 		switch stream.CodecType {
 		case "video":
 			if media.VideoCodec == "" {
+				width, height := nonNegative(stream.Width), nonNegative(stream.Height)
+				for _, sideData := range stream.SideDataList {
+					rotation := (sideData.Rotation%360 + 360) % 360
+					switch rotation {
+					case 90, 270:
+						width, height = height, width
+					case 0, 180:
+						continue
+					default:
+						width, height = 0, 0
+					}
+					break
+				}
 				media.VideoCodec = stream.CodecName
-				media.VideoProfile = stream.Profile
-				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), nonNegative(stream.Width), nonNegative(stream.Height), stream.ColorTransfer
-				if bitrate, err := strconv.ParseInt(stream.BitRate, 10, 64); err == nil && bitrate >= 0 {
-					media.Bitrate = bitrate
+				media.VideoProfile, media.VideoLevel = stream.Profile, nonNegative(stream.Level)
+				media.PrimaryVideoStreamIndex, media.Width, media.Height, media.HDR = normalizedIndex(stream.Index), width, height, hdrTransfer(stream.ColorTransfer)
+				media.FrameRateMilli = max(frameRateMilli(stream.AvgFrameRate), frameRateMilli(stream.RFrameRate))
+				media.BitDepth = bitDepth(stream.BitsPerSample, stream.BitsPerRaw)
+				media.Bitrate = positiveInt64(stream.BitRate)
+				if media.Bitrate == 0 {
+					media.Bitrate = formatBitrate
 				}
 			}
 		case "audio":
-			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Channels: nonNegative(stream.Channels), Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
+			bitrate := positiveInt64(stream.BitRate)
+			if bitrate == 0 {
+				bitrate = formatBitrate
+			}
+			media.Audio = append(media.Audio, AudioTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Profile: stream.Profile, Channels: nonNegative(stream.Channels), SampleRate: positiveInt(stream.SampleRate), Bitrate: bitrate, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		case "subtitle":
 			media.Subtitles = append(media.Subtitles, SubtitleTrack{Index: normalizedIndex(stream.Index), Codec: stream.CodecName, Language: stream.Tags["language"], Title: stream.Tags["title"], Default: stream.Disposition.Default != 0, Forced: stream.Disposition.Forced != 0})
 		}
 	}
 	return media, nil
+}
+
+func positiveInt(value string) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
+}
+
+func positiveInt64(value string) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
+}
+
+func bitDepth(values ...json.Number) int {
+	max := 0
+	for _, value := range values {
+		if parsed, err := strconv.Atoi(value.String()); err == nil && parsed > 0 {
+			if parsed > max {
+				max = parsed
+			}
+		}
+	}
+	return max
+}
+
+func hdrTransfer(value string) string {
+	switch strings.ToLower(value) {
+	case "smpte2084", "arib-std-b67":
+		return strings.ToLower(value)
+	default:
+		return ""
+	}
+}
+
+func frameRateMilli(value string) int {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 {
+		return 0
+	}
+	numerator, numeratorErr := strconv.ParseInt(parts[0], 10, 64)
+	denominator, denominatorErr := strconv.ParseInt(parts[1], 10, 64)
+	if numeratorErr != nil || denominatorErr != nil || numerator < 0 || denominator <= 0 || numerator > int64(math.MaxInt)/1000 {
+		return 0
+	}
+	return int(numerator * 1000 / denominator)
 }
 
 func durationMilliseconds(value string) int64 {

@@ -29,7 +29,73 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined);
   vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: undefined });
+});
+
+const assessedItem = {
+  id: 'film-1', title: 'Blue Horizon', kind: 'film', local_only: true,
+  container: 'mov,mp4,m4a,3gp,3g2,mj2', video_codec: 'h264', video_profile: 'High', video_level: 12,
+  width: 320, height: 180, bitrate: 5968, frame_rate_milli: 24000, bit_depth: 8,
+  audio: [{ codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 2323 }],
+};
+
+it('posts the exact per-title source and compatibility evidence', async () => {
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+  const requests: Array<{ path: string; body?: string }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    requests.push({ path, body: init?.body as string | undefined });
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(assessedItem));
+    return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+
+  await waitFor(() => expect(requests.some(({ path }) => path.endsWith('/playback/plans'))).toBe(true));
+  const posted = JSON.parse(requests.find(({ path }) => path.endsWith('/playback/plans'))!.body!);
+  expect(posted).toEqual({
+    catalog_id: 'film-1',
+    capabilities: expect.objectContaining({
+      supports_direct: true,
+      supports_remux: true,
+      supports_transcode: true,
+      max_width: 320,
+      max_height: 180,
+      max_frame_rate_milli: 24000,
+      max_bit_depth: 8,
+      max_audio_channels: 2,
+    }),
+  });
+});
+
+it('does not create a playback session after unmount while capability assessment is pending', async () => {
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+  let finishAssessment: ((value: MediaCapabilitiesDecodingInfo) => void) | undefined;
+  const decodingInfo = vi.fn()
+    .mockImplementationOnce(() => new Promise<MediaCapabilitiesDecodingInfo>((resolve) => { finishAssessment = resolve; }))
+    .mockResolvedValue({ supported: true, smooth: true, powerEfficient: true, keySystemAccess: null });
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
+  const requests: string[] = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    requests.push(path);
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(assessedItem));
+    return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+  });
+  const { unmount } = render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(finishAssessment).toBeTypeOf('function'));
+
+  unmount();
+  await act(async () => { finishAssessment!({ supported: true, smooth: true, powerEfficient: true, keySystemAccess: null }); });
+
+  await waitFor(() => expect(decodingInfo).toHaveBeenCalled());
+  expect(requests.some((path) => path.endsWith('/playback/plans'))).toBe(false);
+});
 
 it('shows an actionable error when native media playback fails', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/missing.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
@@ -109,9 +175,10 @@ it('bounds a hung final heartbeat before stopping an unmounted player', async ()
 it('beacons progress on pagehide for the active plan', async () => {
   Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: vi.fn(() => true) });
   const beacon = vi.spyOn(navigator, 'sendBeacon');
-  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
-  render(<Player catalogID="film-1" onExit={() => undefined} />);
-  await screen.findByRole('button', { name: /back to library/i });
+	const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 })));
+	render(<Player catalogID="film-1" onExit={() => undefined} />);
+	await screen.findByRole('button', { name: /back to library/i });
+	await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
   await waitFor(() => fireEvent(window, new Event('pagehide')));
   expect(beacon).toHaveBeenCalledWith('/heartbeat', expect.any(Blob));
 });
@@ -613,6 +680,7 @@ it('pause cancels a pending countdown and prevents a late advance', async () => 
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
+    if (path.endsWith('/catalog/items/episode-1')) return new Response(JSON.stringify({ ...assessedItem, id: 'episode-1', kind: 'episode', season: 1, episode: 1 }));
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
     if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
     return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
@@ -706,6 +774,7 @@ it('shows an actionable error when next-episode resolution fails', async () => {
 it('does not advance when stopping the completed session fails', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
+    if (path.endsWith('/catalog/items/episode-1')) return new Response(JSON.stringify({ ...assessedItem, id: 'episode-1', kind: 'episode', season: 1, episode: 1 }));
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
     if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ accepted: true, expires_at: 9999999999 }));
     if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));

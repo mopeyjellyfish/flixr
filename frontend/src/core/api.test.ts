@@ -5,6 +5,7 @@ describe('API error messages', () => {
   it('explains credential hashing capacity and owner login rate limits', () => {
     expect(messageFor('credential_busy')).toBe('Flixr is busy securing credentials. Please wait and try again.');
     expect(messageFor('login_rate_limited')).toBe('Too many sign-in attempts. Please wait and try again.');
+		expect(messageFor('playback_capability_unknown')).toContain('unsupported playback capability');
   });
 
   it('renders a correlated support ID with request failures', () => {

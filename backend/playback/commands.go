@@ -13,12 +13,12 @@ import (
 
 const hlsSegmentDuration = 4 * time.Second
 
-func ffmpegCommand(kind Kind, inputURL, audioInputURL string, audioStreamIndex int, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
+func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex int, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
 	if _, err := validatedLoopbackURL(inputURL); err != nil {
 		return "", nil, err
 	}
-	if kind != Remux && kind != Transcode {
-		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", kind)
+	if plan.Kind != Remux && plan.Kind != Transcode {
+		return "", nil, fmt.Errorf("plan %q does not use FFmpeg", plan.Kind)
 	}
 	if outputDir == "" || !filepath.IsAbs(outputDir) {
 		return "", nil, fmt.Errorf("output directory must be absolute")
@@ -48,13 +48,20 @@ func ffmpegCommand(kind Kind, inputURL, audioInputURL string, audioStreamIndex i
 		audioMap = fmt.Sprintf("%d:%d", audioInput, audioStreamIndex)
 	}
 	args = append(args, "-map", "0:v:0", "-map", audioMap)
-	if kind == Remux {
-		args = append(args, "-c", "copy")
+	if plan.Kind == Remux {
+		if plan.VideoBitrate <= 0 || plan.AudioCodec != "" && plan.AudioBitrate <= 0 {
+			return "", nil, fmt.Errorf("remux bitrate evidence is required")
+		}
+		args = append(args, "-c", "copy", "-b:v", strconv.FormatInt(plan.VideoBitrate, 10))
+		if plan.AudioCodec != "" {
+			args = append(args, "-b:a", strconv.FormatInt(plan.AudioBitrate, 10))
+		}
 	} else {
 		args = append(args,
-			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-pix_fmt", "yuv420p",
+			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),
+			"-b:v", strconv.FormatInt(compatibilityVideoBitrate, 10), "-maxrate", strconv.FormatInt(compatibilityVideoBitrate, 10), "-bufsize", strconv.FormatInt(compatibilityVideoBitrate*2, 10),
 			"-force_key_frames", "expr:gte(t,n_forced*4)", "-sc_threshold", "0",
-			"-c:a", "aac", "-ac", "2", "-b:a", "128k",
+			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(compatibilityAudioBitrate, 10),
 		)
 	}
 	args = append(args,
@@ -66,6 +73,7 @@ func ffmpegCommand(kind Kind, inputURL, audioInputURL string, audioStreamIndex i
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
 		"-hls_fmp4_init_filename", "init.mp4",
 		"-hls_segment_filename", filepath.Join(outputDir, "segment-%06d.m4s"),
+		"-master_pl_name", "master.m3u8",
 		filepath.Join(outputDir, "index.m3u8"),
 	)
 	for _, arg := range args {

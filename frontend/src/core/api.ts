@@ -14,6 +14,14 @@ export type CatalogItem = {
   container?: string;
   video_codec?: string;
   video_profile?: string;
+	video_level?: number;
+	width?: number;
+	height?: number;
+	bitrate?: number;
+	frame_rate_milli?: number;
+	bit_depth?: number;
+	hdr?: string;
+	audio?: AudioTrack[];
   audio_codec?: string;
   duration_ms?: number;
   year?: number;
@@ -53,6 +61,7 @@ export type ApiErrorCode =
   | 'credential_busy' | 'login_rate_limited'
   | 'ffprobe_unavailable' | 'owner_required' | 'profile_required' | 'request_failed'
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
+  | 'playback_capability_unknown'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
   | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
@@ -60,8 +69,8 @@ export type ApiErrorCode =
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
-export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean };
-export type AudioTrack = { index: number; codec: string; channels?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
+export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
+export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean };
   session_id: string;
@@ -100,6 +109,7 @@ export function messageFor(code: string): string {
     metadata_not_found: 'That title is no longer available for identity repair.',
     identity_conflict: 'This title is already part of an identity repair. Refresh the repair list and try again.',
     playback_unsupported: 'This title is not compatible with this browser.',
+	playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
     playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
     playback_preparing: 'This local stream is already preparing. Try again in a moment.',

@@ -66,7 +66,7 @@ func TestOwnerRevocationRejectsExistingPlaybackAuthority(t *testing.T) {
 	for _, route := range []struct{ method, path string }{{"GET", "/api/v1/owner/sessions"}, {"DELETE", "/api/v1/owner/sessions/" + sessionID}, {"DELETE", "/api/v1/profiles/" + profile.ID}} {
 		require.Equal(t, http.StatusForbidden, request(route.method, route.path, "", viewer).Code)
 	}
-	w = request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`, viewer)
+	w = request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`, viewer)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 	var plan struct {
 		MediaURL  string `json:"media_url"`
@@ -86,7 +86,7 @@ func TestOwnerRevocationRejectsExistingPlaybackAuthority(t *testing.T) {
 	require.False(t, ok, "revoking viewer authorization must release its playback session")
 
 	planFor := func(token string) (string, string) {
-		response := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`, token)
+		response := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`, token)
 		require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
 		var created struct {
 			SessionID string `json:"session_id"`
@@ -153,7 +153,7 @@ func TestProfileChangeAndLogoutReleaseOnlyThePriorViewerPlayback(t *testing.T) {
 		return w
 	}
 	plan := func(token string) string {
-		w := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`, token)
+		w := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`, token)
 		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 		var response struct {
 			SessionID string `json:"session_id"`

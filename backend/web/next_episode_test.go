@@ -89,7 +89,7 @@ func TestPlaybackNextUsesTheAuthorizedSessionProfileAndCatalogContext(t *testing
 		return w
 	}
 
-	plan := request(oneToken, http.MethodPost, "/api/v1/playback/plans", `{"catalog_id":"`+ids[1]+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`)
+	plan := request(oneToken, http.MethodPost, "/api/v1/playback/plans", `{"catalog_id":"`+ids[1]+`","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`)
 	if plan.Code != http.StatusCreated {
 		t.Fatalf("plan = %d: %s", plan.Code, plan.Body)
 	}

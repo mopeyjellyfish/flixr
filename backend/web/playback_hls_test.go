@@ -22,6 +22,14 @@ import (
 	"github.com/spf13/afero"
 )
 
+func TestPlaybackPlannerReceivesExactPrimaryStreamProperties(t *testing.T) {
+	item := catalog.Item{MediaProperties: catalog.MediaProperties{Container: "matroska", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 12, Width: 320, Height: 180, Bitrate: 157945, FrameRateMilli: 24000, BitDepth: 8, Audio: []catalog.AudioTrack{{Codec: "aac", Profile: "LC", Channels: 1, SampleRate: 48000, Bitrate: 157945}}}}
+	got := mediaProperties(item, item.Audio[0], true)
+	if got.VideoLevel != 12 || got.VideoBitrate != 157945 || got.AudioProfile != "LC" || got.AudioSampleRate != 48000 || got.AudioBitrate != 157945 {
+		t.Fatalf("planner media = %#v", got)
+	}
+}
+
 type webFakeProcess struct {
 	once     sync.Once
 	done     chan struct{}
@@ -77,6 +85,9 @@ func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.
 	if err := files.WriteFile(filepath.Join(dir, "index.m3u8"), []byte("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\nsegment-000001.m4s\n"), 0o600); err != nil {
 		return nil, err
 	}
+	if err := files.WriteFile(filepath.Join(dir, "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=320x180,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
+		return nil, err
+	}
 	if err := files.WriteFile(filepath.Join(dir, "init.mp4"), []byte("init"), 0o600); err != nil {
 		return nil, err
 	}
@@ -97,7 +108,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	if err := afero.WriteFile(afero.NewOsFs(), filepath.Join(root, "film.mkv"), media, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High','[{"codec":"aac"}]','[]',0)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska,webm','h264','High',12,320,180,157945,24000,8,'[{"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":157945}]','[]',0)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
@@ -135,7 +146,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	server.readyMu.Unlock()
 	handler := server.Handler()
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -157,8 +168,17 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("#EXTM3U")) {
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" || !bytes.Contains(response.Body.Bytes(), []byte(`CODECS="avc1.640028,mp4a.40.2"`)) || !bytes.Contains(response.Body.Bytes(), []byte("index.m3u8")) {
 		t.Fatalf("manifest = %d: %s", response.Code, response.Body.String())
+	}
+	for _, asset := range []struct{ name, contentType string }{{"index.m3u8", "application/vnd.apple.mpegurl"}, {"init.mp4", "video/mp4"}, {"segment-000001.m4s", "video/mp4"}} {
+		request = httptest.NewRequest(http.MethodGet, "/api/v1/playback/sessions/"+plan.SessionID+"/"+asset.name, nil)
+		request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != asset.contentType {
+			t.Fatalf("%s = %d, content type %q", asset.name, response.Code, response.Header().Get("Content-Type"))
+		}
 	}
 	request = httptest.NewRequest(http.MethodGet, plan.MediaURL, nil)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: twoToken})
@@ -200,7 +220,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	}
 	// A different plan cannot fit beside the active HLS generation. Admission
 	// failure must leave the original session's progress authority intact.
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"video_profiles":["Baseline"],"supports_fmp4_hls":true}}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"video_profiles":["Baseline"],"supports_fmp4_hls":true,"supports_transcode":true}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -257,7 +277,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -279,7 +299,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	executor.onStart = cancel
-	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true}}`)).WithContext(ctx)
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`)).WithContext(ctx)
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -304,9 +324,9 @@ func TestAudioSelectionPersistsLanguageAndPreservesPosition(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	audio := `[{"index":1,"codec":"aac","language":"eng","title":"English","default":true},{"index":2,"codec":"aac","language":"fra","title":"French"},{"index":3,"codec":"aac","language":"und","title":"Director Commentary"}]`
+	audio := `[{"index":1,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"eng","title":"English","default":true},{"index":2,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"fra","title":"French"},{"index":3,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"und","title":"Director Commentary"}]`
 	for _, row := range []struct{ id, path string }{{"one", "one.mp4"}, {"two", "two.mp4"}} {
-		if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,audio_json,subtitle_json,updated_at) VALUES(?,?,?,?,1,'film','mp4','h264',?,'[]',0)`, row.id, "film", row.id, row.path, audio); err != nil {
+		if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,updated_at) VALUES(?,?,?,?,1,'film','mp4','h264','High',12,320,180,1000000,24000,8,?,'[]',0)`, row.id, "film", row.id, row.path, audio); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -344,7 +364,7 @@ func TestAudioSelectionPersistsLanguageAndPreservesPosition(t *testing.T) {
 	server.readiness.FFmpeg = true
 	server.readyMu.Unlock()
 	handler := server.Handler()
-	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_fmp4_hls":true}`
+	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_direct":true,"supports_remux":true,"supports_transcode":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}`
 	plan := func(token, catalogID, extra string) *httptest.ResponseRecorder {
 		body := `{"catalog_id":"` + catalogID + `",` + capabilities + extra + `}`
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(body))
@@ -456,8 +476,8 @@ func TestCanceledAudioPreparationPreservesLiveSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("film"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	audio := `[{"index":1,"codec":"aac","language":"eng","default":true},{"index":2,"codec":"aac","language":"fra"}]`
-	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mp4',1,'film','mp4','h264',?,'[]',0)`, audio); err != nil {
+	audio := `[{"index":1,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"eng","default":true},{"index":2,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"fra"}]`
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,updated_at) VALUES('film','film','Film','film.mp4',1,'film','mp4','h264','High',12,320,180,1000000,24000,8,?,'[]',0)`, audio); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
@@ -498,7 +518,7 @@ func TestCanceledAudioPreparationPreservesLiveSession(t *testing.T) {
 	server.readiness.FFmpeg = true
 	server.readyMu.Unlock()
 	handler := server.Handler()
-	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_fmp4_hls":true}`
+	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_direct":true,"supports_remux":true,"supports_transcode":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}`
 
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film",`+capabilities+`}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})

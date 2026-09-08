@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	assetName         = regexp.MustCompile(`^(?:index\.m3u8|init\.mp4|segment-[0-9]+\.m4s)$`)
+	assetName         = regexp.MustCompile(`^(?:master\.m3u8|index\.m3u8|init\.mp4|segment-[0-9]+\.m4s)$`)
 	generationDirName = regexp.MustCompile(`^[A-Za-z0-9_-]{32}$`)
 )
 
@@ -367,7 +367,7 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	if plan.AudioSelected {
 		audioSourceStreamIndex = plan.AudioSourceStreamIndex
 	}
-	name, args, err := ffmpegCommand(plan.Kind, inputURL, audioInputURL, audioSourceStreamIndex, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
+	name, args, err := ffmpegCommand(plan, inputURL, audioInputURL, audioSourceStreamIndex, dir, time.Duration(positionMS)*time.Millisecond, settings.SegmentWindow)
 	if err != nil {
 		releaseReservation(true)
 		_ = m.files.RemoveAll(dir)
@@ -409,7 +409,7 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	}
 	m.mu.Unlock()
 	if m.manifestWait > 0 {
-		if err := waitForFile(m.files.Fs, filepath.Join(dir, "index.m3u8"), gen.done, m.manifestWait); err != nil {
+		if err := waitForFile(m.files.Fs, filepath.Join(dir, "master.m3u8"), gen.done, m.manifestWait); err != nil {
 			_ = m.StopForViewer(session.ID, viewerID, profileID)
 			m.mu.Lock()
 			_, viewerRevoked = m.revokedViewers[viewerID]
