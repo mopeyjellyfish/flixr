@@ -265,7 +265,7 @@ as are episodes that this profile has already completed. Season 0 specials are
 excluded from the normal queue; API clients must opt in with
 `include_specials=true`.
 
-Automatic advancement stays within the current TV root and edition/version
+Automatic advancement stays within the current TV library location and edition/version
 folder. If the next number has multiple playable files in that same context, or
 only a different cut/context is available, Flixr does not guess and shows that no
 next episode is available in this version. A ten-second countdown offers Play now
@@ -302,14 +302,18 @@ evidence contradicts it. Missing files leave unavailable titles and their
 progress, My List membership, viewing ledger, and owner metadata intact.
 Byte-identical duplicates retain their physical sources and keep the existing
 primary while it is present.
-Each configured film or TV location records whether its last trusted scan completed
-and whether the location was available. If a populated root becomes empty, or a scan
-loses at least 10 files and half of that root, the scan stops before publishing any
-catalog changes and records an owner review. A later complete scan clears stale review
+Named film and TV libraries contain independently tracked locations with stable
+opaque IDs. Physical source identity combines that location ID with its relative
+path; byte-identical files in different locations remain separate sources of one
+logical title. Overlapping, nested, and symlink-aliased roots are rejected. Each
+location records whether its last trusted scan completed and whether it was
+available. If a populated location becomes empty, or a scan loses at least 10 files
+and half of that location, the scan protects that location while healthy locations
+still publish and records an owner review. A later complete scan clears stale review
 state when the files return. The owner can instead confirm the exact captured review;
 that marks its missing physical sources unavailable without deleting logical titles or
-household state. Missing or unreadable roots and cancellation retain the last complete
-location and catalog state.
+household state. Missing or unreadable locations retain their prior physical
+sources; cancellation retains the entire last complete catalog state.
 Admitted playback pins a private source version; a changed source requires a new
 playback plan instead of changing bytes under an existing session.
 
@@ -327,10 +331,15 @@ and `POST /api/v1/owner/identity/merges/{id}/unmerge`. Overlapping active repair
 or repeated undo return HTTP 409 `identity_conflict`. Responses contain public
 title details and reconciliation decisions, never filesystem paths or digests.
 
-Library scan status adds per-location availability through
-`GET /api/v1/owner/scan/status`. Confirm a pending review with
-`POST /api/v1/owner/scan/removals/confirm` and the exact `scan_id` and `root_kind`
-returned by that status. Stale confirmations return HTTP 409
+Library management uses `GET` and `POST /api/v1/owner/libraries`, `PATCH` or
+`DELETE /api/v1/owner/libraries/{id}`, and
+`POST /api/v1/owner/libraries/{id}/locations`. Move or removal is a two-step
+`POST /api/v1/owner/library-locations/{id}/change-preview` followed by
+`POST /api/v1/owner/library-location-changes/{previewID}/confirm`. Library scan
+status adds per-location availability through `GET /api/v1/owner/scan/status`.
+Confirm a pending scan review with `POST /api/v1/owner/scan/removals/confirm` and
+the exact `scan_id` and `location_id` returned by that status. Stale confirmations
+return HTTP 409
 `removal_review_changed`; physical candidate paths are never returned.
 
 Player controls and local chapter/preview limits are described in [Watching with FlixR](player.md).

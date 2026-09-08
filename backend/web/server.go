@@ -122,6 +122,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/progress/{id}", s.progress)
 	s.mux.HandleFunc("GET /api/v1/owner/roots", s.roots)
 	s.mux.HandleFunc("POST /api/v1/owner/roots", s.roots)
+	s.mux.HandleFunc("GET /api/v1/owner/libraries", s.libraries)
+	s.mux.HandleFunc("POST /api/v1/owner/libraries", s.libraries)
+	s.mux.HandleFunc("PATCH /api/v1/owner/libraries/{id}", s.library)
+	s.mux.HandleFunc("DELETE /api/v1/owner/libraries/{id}", s.library)
+	s.mux.HandleFunc("POST /api/v1/owner/libraries/{id}/locations", s.libraryLocations)
+	s.mux.HandleFunc("POST /api/v1/owner/library-locations/{id}/change-preview", s.previewLibraryLocationChange)
+	s.mux.HandleFunc("POST /api/v1/owner/library-location-changes/{id}/confirm", s.confirmLibraryLocationChange)
 	s.mux.HandleFunc("POST /api/v1/owner/scan", s.scan)
 	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
 	s.mux.HandleFunc("POST /api/v1/owner/scan/removals/confirm", s.confirmScanRemovals)
@@ -657,14 +664,19 @@ func (s *Server) confirmScanRemovals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		ScanID   string `json:"scan_id"`
-		RootKind string `json:"root_kind"`
+		ScanID     string `json:"scan_id"`
+		LocationID string `json:"location_id"`
+		RootKind   string `json:"root_kind"`
 	}
-	if !decode(r, &request) || request.ScanID == "" || (request.RootKind != "film" && request.RootKind != "episode") {
+	if !decode(r, &request) || request.ScanID == "" || (request.LocationID == "" && request.RootKind != "film" && request.RootKind != "episode") {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err := s.catalog.ConfirmRemovals(r.Context(), request.ScanID, request.RootKind); err != nil {
+	locationID := request.LocationID
+	if locationID == "" {
+		locationID = request.RootKind
+	}
+	if err := s.catalog.ConfirmRemovals(r.Context(), request.ScanID, locationID); err != nil {
 		switch {
 		case errors.Is(err, catalog.ErrRemovalReviewNotFound):
 			fail(w, http.StatusConflict, "removal_review_changed")

@@ -173,11 +173,6 @@ func (c *Catalog) OpenAudioSource(id, sourceKey string, selectionIndex int, exte
 	}
 	c.mu.RLock()
 	item, ok := c.playbackSource(id)
-	rootPath := c.film
-	if item.rootKind == "episode" {
-		rootPath = c.tv
-	}
-	item.sourceRoot = rootPath
 	var relativePath string
 	for _, track := range item.Audio {
 		if track.External && track.Index == selectionIndex {
@@ -186,6 +181,11 @@ func (c *Catalog) OpenAudioSource(id, sourceKey string, selectionIndex int, exte
 		}
 	}
 	c.mu.RUnlock()
+	rootPath, err := c.sourceRoot(item)
+	if err != nil {
+		return nil, os.ErrNotExist
+	}
+	item.sourceRoot = rootPath
 	if !ok || !item.Playable || relativePath == "" || (sourceKey != "" && item.SourceKey() != sourceKey) {
 		return nil, os.ErrNotExist
 	}

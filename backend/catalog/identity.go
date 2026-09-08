@@ -56,15 +56,15 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 	if c.db == nil {
 		return nil, nil
 	}
-	rows, err := c.db.Query(`SELECT catalog_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix FROM catalog_physical_files ORDER BY present,last_seen,id`)
+	rows, err := c.db.Query(`SELECT catalog_id,location_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix FROM catalog_physical_files ORDER BY present,last_seen,id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var catalogID, root, path, fp, digest, token, sourceSeries string
+		var catalogID, locationID, root, path, fp, digest, token, sourceSeries string
 		var size, mtime int64
-		if err := rows.Scan(&catalogID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime); err != nil {
+		if err := rows.Scan(&catalogID, &locationID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime); err != nil {
 			return nil, err
 		}
 		c.mu.RLock()
@@ -73,9 +73,9 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 		if !ok {
 			continue
 		}
-		item.path, item.rootKind, item.fingerprint, item.digest, item.changeToken, item.size, item.mtime = path, root, fp, digest, token, size, mtime
+		item.path, item.rootKind, item.sourceLocationID, item.fingerprint, item.digest, item.changeToken, item.size, item.mtime = path, root, locationID, fp, digest, token, size, mtime
 		item.sourceSeriesID = sourceSeries
-		previous[scanKey{root, path}] = item
+		previous[scanKey{locationID, root, path}] = item
 		proof = append(proof, item)
 	}
 	return proof, rows.Err()
@@ -104,7 +104,7 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 	primaries := make(map[string]scanKey, len(c.items))
 	anchors := append([]Item(nil), physicalProof...)
 	for id, item := range c.items {
-		primaries[id] = scanKey{item.rootKind, item.path}
+		primaries[id] = scanKey{item.sourceLocationID, item.rootKind, item.path}
 		anchors = append(anchors, item)
 	}
 	knownSeries := make(map[string]bool, len(c.series))
@@ -114,11 +114,11 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 	c.mu.RUnlock()
 	discovered := map[scanKey]bool{}
 	for _, result := range results {
-		discovered[scanKey{result.item.rootKind, result.item.path}] = true
+		discovered[scanKey{result.item.sourceLocationID, result.item.rootKind, result.item.path}] = true
 	}
 	for _, result := range results {
 		item := result.item
-		key := scanKey{item.rootKind, item.path}
+		key := scanKey{item.sourceLocationID, item.rootKind, item.path}
 		old, samePath := previous[key]
 		// Fresh lookup is evidence only: owner metadata is applied after reconciliation.
 		if samePath && old.digest != item.digest && providerIdentity(old.Provider, old.Kind, old.ProviderID) != "" && provider != nil && token != "" {
@@ -165,7 +165,7 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 				evidence := item
 				// A proven move can rename the containing series directory. A
 				// second present source or an existing different series stays isolated.
-				if item.Kind == "episode" && !discovered[scanKey{candidate.rootKind, candidate.path}] && !knownSeries[item.SeriesID] {
+				if item.Kind == "episode" && !discovered[scanKey{candidate.sourceLocationID, candidate.rootKind, candidate.path}] && !knownSeries[item.SeriesID] {
 					evidence.sourceSeriesID = candidate.sourceSeriesID
 				}
 				if candidate.digest != "" && candidate.digest == item.digest && !contradictoryIdentity(candidate, evidence) {
@@ -189,7 +189,7 @@ func (c *Catalog) reconcileIdentity(ctx context.Context, results []scanResult, p
 			}
 		}
 		sources[key] = item
-		if primary, ok := next[item.ID]; !ok || key == primaries[item.ID] || (scanKey{primary.rootKind, primary.path} != primaries[item.ID] && item.path < primary.path) {
+		if primary, ok := next[item.ID]; !ok || key == primaries[item.ID] || (scanKey{primary.sourceLocationID, primary.rootKind, primary.path} != primaries[item.ID] && item.sourceLocationID+"/"+item.path < primary.sourceLocationID+"/"+primary.path) {
 			next[item.ID] = item
 		}
 	}

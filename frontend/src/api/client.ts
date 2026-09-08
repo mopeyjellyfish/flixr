@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -31,6 +31,13 @@ export const api = {
   selectProfile: (id: string, pin = '') => request(`/profiles/${id}/select`, { method: 'POST', body: JSON.stringify({ pin }) }),
   ownerRoots: () => request<OwnerRoots>('/owner/roots'),
   roots: (films: string, tv: string) => request<{ saved: boolean }>('/owner/roots', { method: 'POST', body: JSON.stringify({ films, tv }) }),
+  libraries: () => request<{ libraries: Library[] }>('/owner/libraries'),
+  createLibrary: (name: string, kind: Library['kind']) => request<Library>('/owner/libraries', { method: 'POST', body: JSON.stringify({ name, kind }) }),
+  renameLibrary: (id: string, name: string) => request<Library>(`/owner/libraries/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteLibrary: (id: string) => request<{ deleted: boolean }>(`/owner/libraries/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  addLibraryLocation: (libraryID: string, path: string) => request<LibraryLocation>(`/owner/libraries/${encodeURIComponent(libraryID)}/locations`, { method: 'POST', body: JSON.stringify({ path }) }),
+  previewLibraryLocationChange: (locationID: string, path: string) => request<LocationChangePreview>(`/owner/library-locations/${encodeURIComponent(locationID)}/change-preview`, { method: 'POST', body: JSON.stringify({ path }) }),
+  confirmLibraryLocationChange: (previewID: string) => request<{ libraries: Library[] }>(`/owner/library-location-changes/${encodeURIComponent(previewID)}/confirm`, { method: 'POST' }),
   tmdbSettings: () => request<TMDBSettings>('/owner/settings/tmdb'),
   saveTMDBToken: (token: string) => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token }) }),
   removeTMDBToken: () => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token: '' }) }),
@@ -41,7 +48,7 @@ export const api = {
   settingsImport: (data: { version: number; settings: Record<string, string> }) => request<{ imported: boolean; restart_required?: boolean }>('/owner/settings/import', { method: 'POST', body: JSON.stringify(data) }),
   scan: () => request<{ scan: Scan }>('/owner/scan', { method: 'POST' }),
   scanStatus: () => request<{ scan: Scan; locations: LibraryLocation[] }>('/owner/scan/status'),
-  confirmScanRemovals: (scanID: string, rootKind: LibraryLocation['root_kind']) => request<{ confirmed: boolean; scan: Scan; locations: LibraryLocation[] }>('/owner/scan/removals/confirm', { method: 'POST', body: JSON.stringify({ scan_id: scanID, root_kind: rootKind }) }),
+  confirmScanRemovals: (scanID: string, locationID: string) => request<{ confirmed: boolean; scan: Scan; locations: LibraryLocation[] }>('/owner/scan/removals/confirm', { method: 'POST', body: JSON.stringify({ scan_id: scanID, location_id: locationID }) }),
   unmatchedMetadata: () => request<{ items: MetadataTarget[] }>('/owner/metadata/unmatched'),
   metadataCandidates: (kind: string, id: string) => request<{ candidates: MetadataCandidate[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/candidates`),
   matchMetadata: (kind: string, id: string, providerID: string) => request<MetadataTarget>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/match`, { method: 'PUT', body: JSON.stringify({ provider_id: providerID, language: 'en-US', region: 'US' }) }),

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Owner } from './Owner';
 
@@ -16,14 +16,14 @@ describe('owner operations', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
-      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '' }));
+      if (path.includes('/owner/libraries')) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] }] }));
       if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
       if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
       if (path.includes('/owner/screens')) return new Response(JSON.stringify({ screens: ++activityLoads > 1 ? [{ id: 'tv', name: 'Living room', state: 'available' }] : [] }));
       return new Response('{}');
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
-    const films = await screen.findByDisplayValue('/media/films');
+    const films = await screen.findByLabelText(/add folder to films/i);
     fireEvent.change(films, { target: { value: '/media/new-films' } });
     fireEvent.click(screen.getByRole('button', { name: /refresh activity/i }));
     expect(await screen.findByText(/living room/i)).toBeVisible();
@@ -45,14 +45,14 @@ describe('owner operations', () => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: false, ffmpeg: true } }));
       if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: { status: 'partial', scanned: 4, unmatched: 1, failed: 1 } }));
-      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '/media/tv' }));
+      if (path.includes('/owner/libraries')) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] }, { id: 'tv', name: 'TV', kind: 'episode', locations: [{ id: 'tv-root', library_id: 'tv', path: '/media/tv', root_kind: 'episode', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] }] }));
       if (path.includes('/settings/tmdb')) return new Response(JSON.stringify({ configured: true }));
       if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
       return new Response('{}');
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
-    expect(await screen.findByDisplayValue('/media/films')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('/media/tv')).toBeInTheDocument();
+    expect(await screen.findByText('/media/films')).toBeInTheDocument();
+    expect(screen.getByText('/media/tv')).toBeInTheDocument();
     expect(screen.getByText(/credential configured/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/TMDB API Read Access Token/i)).toHaveValue('');
     expect(screen.queryByText(/token-/i)).not.toBeInTheDocument();
@@ -62,7 +62,7 @@ describe('owner operations', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
-      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '/media/tv' }));
+      if (path.includes('/owner/libraries')) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] }, { id: 'tv', name: 'TV', kind: 'episode', locations: [{ id: 'tv-root', library_id: 'tv', path: '/media/tv', root_kind: 'episode', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] }] }));
       if (path.endsWith('/owner/settings')) return new Response(JSON.stringify({ settings: [
         { key: 'library.films_root', mutable: false, source: 'environment' }, { key: 'library.tv_root', mutable: true, source: 'saved' },
       ] }));
@@ -70,9 +70,9 @@ describe('owner operations', () => {
       return new Response(JSON.stringify({ scan: {}, configured: false, screens: [] }));
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
-    expect(await screen.findByDisplayValue('/media/films')).toBeDisabled();
-    expect(screen.getByDisplayValue('/media/tv')).toBeEnabled();
-    expect(screen.getByRole('button', { name: /save roots/i })).toBeEnabled();
+    expect(await screen.findByText('Managed by environment')).toBeVisible();
+    expect(within(screen.getByText('/media/films').parentElement!).queryByRole('button', { name: 'Move folder' })).not.toBeInTheDocument();
+    expect(within(screen.getByText('/media/tv').parentElement!).getByRole('button', { name: 'Move folder' })).toBeEnabled();
   });
 
   it('shows the explicit initial scan state', async () => {
@@ -96,16 +96,36 @@ describe('owner operations', () => {
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '/media/films', tv: '' }));
       if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
-      if (path.includes('/scan/removals/confirm') && init?.method === 'POST') return new Response(JSON.stringify({ confirmed: true, locations: [{ root_kind: 'film', state: 'available', scan_complete: true, items: 0, missing: 0 }] }));
-      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: { status: 'review_required', scanned: 0, unmatched: 0, failed: 0, message: 'library removals require owner review' }, locations: [{ root_kind: 'film', state: 'review_required', scan_complete: false, items: 0, missing: 2, pending_scan_id: 'scan-1' }] }));
+      if (path.includes('/scan/removals/confirm') && init?.method === 'POST') return new Response(JSON.stringify({ confirmed: true, locations: [{ id: 'films-root', library_id: 'films', root_kind: 'film', state: 'available', scan_complete: true, items: 0, missing: 0 }] }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: { status: 'review_required', scanned: 0, unmatched: 0, failed: 0, message: 'library removals require owner review' }, locations: [{ id: 'films-root', library_id: 'films', root_kind: 'film', state: 'review_required', scan_complete: false, items: 0, missing: 2, pending_scan_id: 'scan-1' }] }));
       return new Response(JSON.stringify({ configured: false, settings: [], screens: [] }));
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     expect(await screen.findByText(/2 missing files/i)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /confirm removal/i }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 missing files'));
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/removals/confirm', expect.objectContaining({ method: 'POST', body: JSON.stringify({ scan_id: 'scan-1', root_kind: 'film' }) }));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/removals/confirm', expect.objectContaining({ method: 'POST', body: JSON.stringify({ scan_id: 'scan-1', location_id: 'films-root' }) }));
     expect(await screen.findByText(/cleanup confirmed/i)).toBeVisible();
+  });
+
+  it('previews a folder removal before applying the explicit owner confirmation', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.endsWith('/owner/libraries') && !init?.method) return new Response(JSON.stringify({ libraries: [{ id: 'archive', name: 'Archive', kind: 'film', locations: [{ id: 'disk-2', library_id: 'archive', path: '/media/archive', root_kind: 'film', state: 'available', scan_complete: true, items: 3, missing: 0, updated_at: 1 }] }] }));
+      if (path.includes('/change-preview')) return new Response(JSON.stringify({ id: 'preview-1', location_id: 'disk-2', affected_sources: 3, affected_titles: 2 }));
+      if (path.includes('/library-location-changes/preview-1/confirm')) return new Response(JSON.stringify({ libraries: [{ id: 'archive', name: 'Archive', kind: 'film', locations: [] }] }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ configured: false, settings: [], screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: /remove folder/i }));
+    expect(await screen.findByText(/media files were untouched/i)).toBeVisible();
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 affected titles'));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-locations/disk-2/change-preview', expect.objectContaining({ method: 'POST', body: JSON.stringify({ path: '' }) }));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1/confirm', expect.objectContaining({ method: 'POST' }));
   });
 
   it('offers an owner-only local diagnostics download and explains its contents', async () => {

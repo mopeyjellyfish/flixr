@@ -10,13 +10,22 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 | Demo | `false` | server / environment | `FLIXR_DEMO` | yes |
 | Owner password | unset | server / startup only | `FLIXR_OWNER_PASSWORD`, `_FILE` | yes |
 | Initial profile | unset | server / startup only | `FLIXR_INITIAL_PROFILE` | yes |
-| Film and TV roots | empty | server / database | `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | no |
+| Initial Films and TV locations | empty | server / database | `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | no |
 | Remote metadata | `true` | server / database | `FLIXR_METADATA_ENABLED` | no |
 | Personal TMDB override | application default when present | server / database | `FLIXR_TMDB_TOKEN`, `_FILE` | no |
 | Scan on start, workers | `false`, `4` | server / environment | `FLIXR_SCAN_ON_START`, `FLIXR_SCAN_WORKERS` | yes |
 | Segment directory | `<data-dir>/segments` | server / sidecar and database | `FLIXR_SEGMENT_DIR` | yes |
 | Generation/global bytes, generation count | 256 MiB, 512 MiB, 2 | server / database | `FLIXR_GENERATION_BYTES`, `FLIXR_GLOBAL_BYTES`, `FLIXR_MAX_GENERATIONS` | no |
 | Lease TTL, heartbeat, segment window, process grace | 45s, 15s, 60s, 2s | server / environment | `FLIXR_LEASE_TTL`, `FLIXR_HEARTBEAT_INTERVAL`, `FLIXR_SEGMENT_WINDOW`, `FLIXR_PROCESS_GRACE` | yes |
+
+The owner Libraries panel supports any number of named film or TV libraries and
+folders. The two environment roots remain compatible as read-only locations in
+the default Films and TV libraries. Adding a folder rejects the same directory,
+nested directories, parent directories, and symlink aliases already covered by
+another location. Moving or removing a folder first creates an exact, durable
+preview of affected sources and titles; confirmation fails if a scan changed that
+snapshot. Logical titles, profile progress, lists, ratings, history, and owner
+metadata remain stored after removal.
 
 The owner Configuration panel provides a searchable Basic view, an Advanced view, portable non-secret export, and import preview. Imports use the same validated library or playback setter as the owner form and accept exactly one scope per request, so each applied change is atomic at that scope. Mixed scopes, network and access settings require explicit review. Exports omit all secret values; previews reject environment-managed values.
 

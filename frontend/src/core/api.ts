@@ -56,7 +56,9 @@ export type PlaybackStatus = { settings: PlaybackSettings; generations: Playback
 export type EffectiveSetting = { key: string; category: string; scope: string; default: string; environment: string; file_secret: string; persistence: string; restart: string; valid: string; secret: boolean; advanced: boolean; value: string; source: 'default' | 'saved' | 'environment'; mutable: boolean };
 export type SettingsInventory = { settings: EffectiveSetting[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; failed: number; unmatched: number; message?: string; finished_at?: number };
-export type LibraryLocation = { root_kind: 'film' | 'episode'; state: 'unknown' | 'available' | 'unavailable' | 'review_required'; scan_complete: boolean; items: number; missing: number; pending_scan_id?: string; last_scan_id?: string; updated_at: number; message?: string };
+export type LibraryLocation = { id: string; library_id: string; library_name?: string; path?: string; revision?: number; root_kind: 'film' | 'episode'; state: 'unknown' | 'available' | 'unavailable' | 'review_required'; scan_complete: boolean; items: number; missing: number; pending_scan_id?: string; last_scan_id?: string; updated_at: number; message?: string };
+export type Library = { id: string; name: string; kind: 'film' | 'episode'; locations: LibraryLocation[] };
+export type LocationChangePreview = { id: string; location_id: string; new_path?: string; affected_sources: number; affected_titles: number };
 export type ApiErrorCode =
   | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'pin_rate_limited'
   | 'credential_busy' | 'login_rate_limited'
@@ -108,6 +110,10 @@ export function messageFor(code: string): string {
     bad_origin: 'This request was blocked because it came from another site.', logout_failed: 'Flixr could not sign out.',
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
+    invalid_library: 'That library name or media type is not valid.', library_not_found: 'That library no longer exists.',
+    library_has_locations: 'Remove this library’s folders before deleting it.', invalid_library_location: 'That library folder is not valid.',
+    library_location_overlap: 'That folder overlaps another configured library folder.', library_change_changed: 'This folder preview changed. Review it again before confirming.',
+    library_change_failed: 'Flixr could not change that library folder.', libraries_failed: 'Flixr could not load libraries.',
     scan_failed: 'Flixr could not start a scan.', scan_status_failed: 'Flixr could not load scan status.',
     removal_review_changed: 'This removal review changed. Refresh scan status before confirming cleanup.',
     library_cleanup_failed: 'Flixr could not confirm library cleanup.', settings_failed: 'Flixr could not save those settings.',

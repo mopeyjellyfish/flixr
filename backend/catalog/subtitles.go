@@ -196,10 +196,6 @@ func (c *Catalog) OpenSubtitleSource(id, videoSourceKey, subtitleSourceKey strin
 	}
 	c.mu.RLock()
 	item, ok := c.playbackSource(id)
-	rootPath := c.film
-	if item.rootKind == "episode" {
-		rootPath = c.tv
-	}
 	var selected SubtitleTrack
 	for _, track := range item.Subtitles {
 		if track.External && track.Index == selectionIndex {
@@ -207,8 +203,12 @@ func (c *Catalog) OpenSubtitleSource(id, videoSourceKey, subtitleSourceKey strin
 			break
 		}
 	}
-	item.sourceRoot = rootPath
 	c.mu.RUnlock()
+	rootPath, err := c.sourceRoot(item)
+	if err != nil {
+		return nil, os.ErrNotExist
+	}
+	item.sourceRoot = rootPath
 	if !ok || !item.Playable || item.SourceKey() != videoSourceKey || selected.path == "" || selected.SourceKey() != subtitleSourceKey {
 		return nil, os.ErrNotExist
 	}

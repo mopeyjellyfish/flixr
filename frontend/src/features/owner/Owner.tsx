@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -18,8 +18,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [readiness, setReadiness] = useState<Readiness>();
   const [scan, setScan] = useState<Scan>();
   const [locations, setLocations] = useState<LibraryLocation[]>([]);
-  const [films, setFilms] = useState('');
-  const [tv, setTV] = useState('');
+  const [libraries, setLibraries] = useState<Library[]>([]);
   const [tmdbSettings, setTMDBSettings] = useState<TMDBSettings>();
   const [tmdbToken, setTMDBToken] = useState('');
   const [unmatched, setUnmatched] = useState<MetadataTarget[]>([]);
@@ -40,7 +39,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
     api.scanStatus().then((result) => { setScan(result.scan.status ? result.scan : undefined); setLocations(result.locations ?? []); }).catch(() => undefined);
-    api.ownerRoots().then((roots) => { setFilms(roots.films); setTV(roots.tv); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Library roots are unavailable.'); });
+    api.libraries().then((result) => setLibraries(result.libraries ?? [])).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Libraries are unavailable.'); });
     api.tmdbSettings().then(setTMDBSettings).catch(() => setNotice('TMDB settings are unavailable.'));
     api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
     loadIdentityRepairs();
@@ -79,14 +78,35 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     return () => clearInterval(timer);
   }, [scan?.status]);
 
-  const roots = async (event: FormEvent) => {
-    event.preventDefault();
+  const refreshLibraries = async () => setLibraries((await api.libraries()).libraries ?? []);
+  const createLibrary = async (name: string, kind: Library['kind']) => {
+    try { await api.createLibrary(name, kind); await refreshLibraries(); setNotice(`Library ${name.trim()} created.`); }
+    catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to create library.'); }
+  };
+  const renameLibrary = async (library: Library) => {
+    const name = window.prompt('Library name', library.name)?.trim();
+    if (!name || name === library.name) return;
+    try { await api.renameLibrary(library.id, name); await refreshLibraries(); setNotice('Library renamed.'); }
+    catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to rename library.'); }
+  };
+  const deleteLibrary = async (library: Library) => {
+    if (!window.confirm(`Delete the empty library “${library.name}”?`)) return;
+    try { await api.deleteLibrary(library.id); await refreshLibraries(); setNotice('Empty library deleted.'); }
+    catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to delete library.'); }
+  };
+  const addLocation = async (library: Library, path: string) => {
+    try { await api.addLibraryLocation(library.id, path); await refreshLibraries(); setNotice(`Folder added to ${library.name}.`); }
+    catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to add folder.'); }
+  };
+  const changeLocation = async (location: LibraryLocation, path: string) => {
     try {
-      await api.roots(films, tv);
-      setNotice('Library roots saved.');
-    } catch (error) {
-      setNotice(error instanceof ApiError ? error.message : 'Unable to save roots.');
-    }
+      const preview = await api.previewLibraryLocationChange(location.id, path);
+      const action = path ? 'move this folder' : 'remove this folder';
+      if (!window.confirm(`This will ${action} and make ${preview.affected_titles} affected titles unavailable until another location or a fresh scan verifies them. Media files and viewing history are kept. Continue?`)) return;
+      const result = await api.confirmLibraryLocationChange(preview.id);
+      setLibraries(result.libraries ?? []);
+      setNotice(path ? 'Library folder moved. Start a scan to verify the new location.' : 'Library folder removed. Media files were untouched and title history was kept.');
+    } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to change library folder.'); }
   };
   const saveTMDB = async (event: FormEvent) => {
     event.preventDefault();
@@ -177,7 +197,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const confirmRemovals = async (location: LibraryLocation) => {
     if (!location.pending_scan_id || !window.confirm(`Confirm removal of ${location.missing} missing files from the ${location.root_kind === 'film' ? 'Films' : 'TV'} library? Their titles and viewing history remain recoverable.`)) return;
     try {
-      const result = await api.confirmScanRemovals(location.pending_scan_id, location.root_kind);
+      const result = await api.confirmScanRemovals(location.pending_scan_id, location.id);
       setLocations(result.locations ?? []);
       setScan(result.scan);
       setNotice('Library cleanup confirmed. Missing titles remain in your history and lists as unavailable.');
@@ -211,7 +231,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-            <div className="owner-columns"><RootsForm films={films} tv={tv} onFilmsChange={setFilms} onTVChange={setTV} onSubmit={roots} locked={locked} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} /></div>
+            <LibraryManager libraries={libraries} locked={locked} onCreate={createLibrary} onRename={renameLibrary} onDelete={deleteLibrary} onAddLocation={addLocation} onChangeLocation={changeLocation} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} />
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -329,15 +349,18 @@ function ReadinessControls({ readiness, onRecheck }: { readiness: Readiness; onR
   );
 }
 
-function RootsForm({ films, tv, onFilmsChange, onTVChange, onSubmit, locked }: { films: string; tv: string; onFilmsChange: (value: string) => void; onTVChange: (value: string) => void; onSubmit: (event: FormEvent) => void; locked: Set<string> }) {
-  return (
-    <PendingForm onSubmit={onSubmit}>
-      <h2>Library roots</h2>
-      {(locked.has('library.films_root') || locked.has('library.tv_root')) && <p>Environment-managed fields are read-only.</p>}<label>Films root<input disabled={locked.has('library.films_root')} value={films} onChange={(event) => onFilmsChange(event.target.value)} placeholder="/media/films" /></label>
-      <label>TV root<input disabled={locked.has('library.tv_root')} value={tv} onChange={(event) => onTVChange(event.target.value)} placeholder="/media/tv" /></label>
-      <button className="primary" disabled={locked.has('library.films_root') && locked.has('library.tv_root')}>Save roots</button>
-    </PendingForm>
-  );
+function LibraryManager({ libraries, locked, onCreate, onRename, onDelete, onAddLocation, onChangeLocation }: { libraries: Library[]; locked: Set<string>; onCreate: (name: string, kind: Library['kind']) => Promise<void>; onRename: (library: Library) => Promise<void>; onDelete: (library: Library) => Promise<void>; onAddLocation: (library: Library, path: string) => Promise<void>; onChangeLocation: (location: LibraryLocation, path: string) => Promise<void> }) {
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState<Library['kind']>('film');
+  const [paths, setPaths] = useState<Record<string, string>>({});
+  const locationLocked = (location: LibraryLocation) => (location.id === 'films-root' && locked.has('library.films_root')) || (location.id === 'tv-root' && locked.has('library.tv_root'));
+  return <section className="library-manager"><h2>Named libraries</h2><p>Group folders from local disks and mounted shares. Overlapping folders are rejected.</p>
+    {libraries.map((library) => <section key={library.id}><div className="actions"><h3>{library.name}</h3><span>{library.kind === 'film' ? 'Films' : 'TV'}</span><button type="button" onClick={() => void onRename(library)}>Rename</button>{library.locations.length === 0 && <button type="button" onClick={() => void onDelete(library)}>Delete library</button>}</div>
+      {library.locations.map((location) => <div key={location.id} className="library-location"><code>{location.path}</code><span>{location.state === 'available' ? `${location.items} files` : location.state.replace('_', ' ')}</span>{locationLocked(location) ? <span>Managed by environment</span> : <><button type="button" onClick={() => { const next = window.prompt('New folder path', location.path ?? '')?.trim(); if (next) void onChangeLocation(location, next); }}>Move folder</button><button type="button" onClick={() => void onChangeLocation(location, '')}>Remove folder</button></>}</div>)}
+      <PendingForm onSubmit={async (event) => { event.preventDefault(); const path = paths[library.id]?.trim(); if (!path) return; await onAddLocation(library, path); setPaths((current) => ({ ...current, [library.id]: '' })); }}><label>Add folder to {library.name}<input value={paths[library.id] ?? ''} onChange={(event) => setPaths((current) => ({ ...current, [library.id]: event.target.value }))} placeholder="/media/library" /></label><button>Add folder</button></PendingForm>
+    </section>)}
+    <PendingForm onSubmit={async (event) => { event.preventDefault(); if (!name.trim()) return; await onCreate(name, kind); setName(''); }}><h3>Create library</h3><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Media type<select value={kind} onChange={(event) => setKind(event.target.value as Library['kind'])}><option value="film">Films</option><option value="episode">TV episodes</option></select></label><button>Create library</button></PendingForm>
+  </section>;
 }
 
 function ScanPanel({ scan, locations, onStart, onConfirm }: { scan?: Scan; locations: LibraryLocation[]; onStart: () => Promise<void>; onConfirm: (location: LibraryLocation) => Promise<void> }) {
@@ -346,7 +369,7 @@ function ScanPanel({ scan, locations, onStart, onConfirm }: { scan?: Scan; locat
       <h2>Manual scan</h2>
       <p>{scan ? `${scan.status}: ${scan.scanned} scanned, ${scan.unmatched} unmatched, ${scan.failed} failed.` : 'No scan has started.'}</p>
       {scan?.message && <p role="alert">{scan.message}</p>}
-      {locations.map((location) => <div key={location.root_kind}>
+      {locations.map((location) => <div key={location.id}>
         <p><strong>{location.root_kind === 'film' ? 'Films' : 'TV'}:</strong> {location.state === 'available' && location.scan_complete ? `${location.items} files checked.` : location.state === 'unavailable' ? 'Location unavailable; the prior catalog was kept.' : location.state === 'review_required' ? `${location.missing} missing files need owner review.` : 'Last scan was incomplete.'}</p>
         {location.state === 'review_required' && <button type="button" onClick={() => void onConfirm(location)}>Confirm removal</button>}
       </div>)}

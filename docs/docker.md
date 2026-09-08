@@ -74,6 +74,11 @@ or set Compose `user: "1000:1000"` and grant that account access. Use `group_add
 for supplementary media-read groups. Flixr does not recursively chown your media.
 Keep SQLite on storage with reliable local file locking; network media mounts are fine.
 
+A named Films or TV library can include folders from several mounts. Add each
+container path in **Server settings → Libraries**; every folder is scanned and
+reports availability independently, so an offline disk does not suppress healthy
+disks in the same library.
+
 Separate mounts can replace the single `/media` mount:
 
 ```yaml
@@ -92,8 +97,8 @@ one scan loses at least 10 files and half of that root. Reconnect the share and 
 again to clear the review, or use **Server settings → Libraries → Confirm removal**
 to mark the captured files unavailable. Their title records, history, progress, lists,
 ratings, and owner metadata remain recoverable. Smaller ordinary removals are marked
-unavailable after a complete scan. Unreadable or missing roots and canceled scans do
-not publish catalog changes.
+unavailable after a complete scan. Unreadable or missing folders retain their prior sources while healthy folders
+still publish completed scan results. Canceled scans publish no catalog changes.
 
 ### External audio tracks
 

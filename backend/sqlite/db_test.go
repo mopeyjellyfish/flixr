@@ -98,13 +98,13 @@ func TestLibraryLocationSafetySchemaIsInstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`INSERT INTO library_locations(root_kind,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,updated_at,message) VALUES('film','/media/films','review_required',0,0,1,'scan-1',1,'review removals')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO library_locations(id,library_id,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,updated_at,message) VALUES('location-1','films','/media/films','review_required',0,0,1,'scan-1',1,'review removals')`); err != nil {
 		t.Fatalf("insert library location: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,root_kind) VALUES('catalog-1','film','Film','film.mp4','film'); INSERT INTO catalog_physical_files(id,catalog_id,root_kind,relative_path,fingerprint) VALUES('physical-1','catalog-1','film','film.mp4','fingerprint')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,root_kind) VALUES('catalog-1','film','Film','film.mp4','film'); INSERT INTO catalog_physical_files(id,catalog_id,location_id,root_kind,relative_path,fingerprint) VALUES('physical-1','catalog-1','location-1','film','film.mp4','fingerprint')`); err != nil {
 		t.Fatalf("insert catalog source: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO library_removal_candidates(root_kind,scan_id,physical_file_id,catalog_id) VALUES('film','scan-1','physical-1','catalog-1')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO library_removal_candidates(location_id,scan_id,physical_file_id,catalog_id) VALUES('location-1','scan-1','physical-1','catalog-1')`); err != nil {
 		t.Fatalf("insert removal candidate: %v", err)
 	}
 	if _, err := db.Exec(`DELETE FROM catalog_physical_files WHERE id='physical-1'`); err != nil {

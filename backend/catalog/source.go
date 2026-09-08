@@ -37,15 +37,15 @@ func (c *Catalog) loadSourceProof() error {
 func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 	c.mu.RLock()
 	x, ok := c.playbackSource(id)
-	rootPath := c.film
-	if x.rootKind == "episode" {
-		rootPath = c.tv
-	}
-	x.sourceRoot = rootPath
 	c.mu.RUnlock()
 	if !ok || !x.Playable || x.probeRevision == 0 || x.digest == "" {
 		return nil
 	}
+	rootPath, err := c.sourceRoot(x)
+	if err != nil {
+		return err
+	}
+	x.sourceRoot = rootPath
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -90,10 +90,11 @@ func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 		return err
 	}
 	current, ok := c.playbackSource(id)
-	current.sourceRoot = c.film
-	if current.rootKind == "episode" {
-		current.sourceRoot = c.tv
+	currentRoot, rootErr := c.sourceRoot(current)
+	if rootErr != nil {
+		return rootErr
 	}
+	current.sourceRoot = currentRoot
 	if !ok {
 		return ErrNotPlayable
 	}
@@ -111,7 +112,7 @@ func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 	var physicalID, sourceID string
-	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE root_kind=? AND relative_path=? AND present=1`, x.rootKind, x.path).Scan(&physicalID, &sourceID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE location_id=? AND relative_path=? AND present=1`, x.sourceLocationID, x.path).Scan(&physicalID, &sourceID); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET change_token=? WHERE id=? AND full_digest=? AND change_token=?`, token, physicalID, x.digest, x.changeToken)
@@ -139,12 +140,12 @@ func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 func (c *Catalog) OpenSource(id, key string) (*os.File, error) {
 	c.mu.RLock()
 	x, ok := c.playbackSource(id)
-	root := c.film
-	if x.rootKind == "episode" {
-		root = c.tv
+	c.mu.RUnlock()
+	root, err := c.sourceRoot(x)
+	if err != nil {
+		return nil, os.ErrNotExist
 	}
 	x.sourceRoot = root
-	c.mu.RUnlock()
 	if !ok || !x.Playable || (key != "" && x.SourceKey() != key) {
 		return nil, os.ErrNotExist
 	}
@@ -180,7 +181,7 @@ func (c *Catalog) playbackSource(id string) (Item, bool) {
 	err := c.db.QueryRow(`SELECT m.source_catalog_id FROM catalog_identity_merges m JOIN catalog_items survivor ON survivor.id=m.survivor_catalog_id JOIN catalog_items source ON source.id=m.source_catalog_id WHERE m.survivor_catalog_id=? AND m.state='active' AND m.kind<>'series' AND survivor.available=0 AND source.available=1`, id).Scan(&sourceID)
 	if err == nil {
 		source := c.items[sourceID]
-		x.path, x.rootKind, x.digest, x.changeToken, x.size, x.mtime, x.probeRevision = source.path, source.rootKind, source.digest, source.changeToken, source.size, source.mtime, source.probeRevision
+		x.path, x.rootKind, x.sourceLocationID, x.digest, x.changeToken, x.size, x.mtime, x.probeRevision = source.path, source.rootKind, source.sourceLocationID, source.digest, source.changeToken, source.size, source.mtime, source.probeRevision
 		x.fingerprint = source.fingerprint
 		x.MediaProperties = source.MediaProperties
 	}
@@ -193,15 +194,15 @@ func (c *Catalog) playbackSource(id string) (Item, bool) {
 func (c *Catalog) hydrateLegacySource(ctx context.Context, id string) error {
 	c.mu.RLock()
 	x, ok := c.playbackSource(id)
-	root := c.film
-	if x.rootKind == "episode" {
-		root = c.tv
-	}
-	x.sourceRoot = root
 	c.mu.RUnlock()
 	if !ok || !x.Playable || x.probeRevision == 0 || x.digest != "" {
 		return nil
 	}
+	root, err := c.sourceRoot(x)
+	if err != nil {
+		return err
+	}
+	x.sourceRoot = root
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -247,10 +248,11 @@ func (c *Catalog) hydrateLegacySource(ctx context.Context, id string) error {
 		return ErrMetadataBusy
 	}
 	current, ok := c.playbackSource(id)
-	current.sourceRoot = c.film
-	if current.rootKind == "episode" {
-		current.sourceRoot = c.tv
+	currentRoot, rootErr := c.sourceRoot(current)
+	if rootErr != nil {
+		return rootErr
 	}
+	current.sourceRoot = currentRoot
 	if !ok {
 		return ErrNotPlayable
 	}
@@ -271,7 +273,7 @@ func (c *Catalog) hydrateLegacySource(ctx context.Context, id string) error {
 	}
 	defer tx.Rollback()
 	var physicalID, sourceID string
-	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE root_kind=? AND relative_path=? AND present=1`, x.rootKind, x.path).Scan(&physicalID, &sourceID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,catalog_id FROM catalog_physical_files WHERE location_id=? AND relative_path=? AND present=1`, x.sourceLocationID, x.path).Scan(&physicalID, &sourceID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET full_digest=?,change_token=? WHERE id=?`, digest, token, physicalID); err != nil {
