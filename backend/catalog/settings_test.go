@@ -13,6 +13,21 @@ type revisionProvider struct {
 	err  error
 }
 
+type disableDuringScanProvider struct {
+	calls   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *disableDuringScanProvider) Lookup(context.Context, string, string, string) (Enrichment, error) {
+	p.calls++
+	if p.calls == 1 {
+		close(p.started)
+		<-p.release
+	}
+	return Enrichment{ProviderID: "7", Title: "Film"}, nil
+}
+
 func (p *revisionProvider) Lookup(context.Context, string, string, string) (Enrichment, error) {
 	if p.err != nil {
 		return Enrichment{}, p.err
@@ -156,5 +171,56 @@ func TestMetadataWithoutApplicationCredentialIsTruthfullyUnavailable(t *testing.
 	status := New().MetadataStatus()
 	if status.Configured || !status.Enabled || status.Source != "none" || status.State != "unavailable" {
 		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestMetadataProviderOutageIsTruthfullyUnavailableWithoutDatabase(t *testing.T) {
+	c := New()
+	c.SetApplicationTMDBToken("application-token")
+	c.noteMetadataFailure(ErrProviderUnavailable)
+	status := c.MetadataStatus()
+	if status.State != "unavailable" || !status.Configured || status.Source != "application" {
+		t.Fatalf("outage status = %+v", status)
+	}
+}
+
+func TestDisablingMetadataDuringScanStopsSubsequentProviderCalls(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{VideoCodec: "h264"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, name := range []string{"First.mp4", "Second.mp4"} {
+		if err := os.WriteFile(root+"/"+name, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &disableDuringScanProvider{started: make(chan struct{}), release: make(chan struct{})}
+	c.SetProvider(provider)
+	c.SetApplicationTMDBToken("application-token")
+	if err := c.SetRoots(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartScan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	<-provider.started
+	if err := c.SetMetadataEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.RLock()
+	done := c.done
+	c.mu.RUnlock()
+	close(provider.release)
+	<-done
+	if provider.calls != 1 {
+		t.Fatalf("provider calls after disable = %d, want 1 in-flight call only", provider.calls)
 	}
 }

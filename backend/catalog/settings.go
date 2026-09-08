@@ -59,6 +59,9 @@ func (c *Catalog) MetadataStatus() MetadataStatus {
 	if failure == "invalid_credential" {
 		return MetadataStatus{Provider: "tmdb", Enabled: true, Configured: true, Source: source, State: "failed", Message: "TMDB rejected the configured access. Cached metadata remains available; replace the override or update the application build."}
 	}
+	if failure == "unavailable" {
+		return MetadataStatus{Provider: "tmdb", Enabled: true, Configured: true, Source: source, State: "unavailable", Message: "TMDB is unavailable. Cached metadata remains available; retry the scan after service or network recovery."}
+	}
 	if c.db != nil && scan.ID != "" {
 		var failures int
 		_ = c.db.QueryRow(`SELECT COUNT(*) FROM scan_files WHERE scan_id=? AND outcome IN ('provider_failed','provider_artwork_failed')`, scan.ID).Scan(&failures)
@@ -96,6 +99,13 @@ func (c *Catalog) effectiveTMDBTokenLocked() (string, string) {
 		return c.applicationToken, "application"
 	}
 	return "", "none"
+}
+
+func (c *Catalog) metadataAccessActive(token string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	current, _ := c.effectiveTMDBTokenLocked()
+	return token != "" && current == token
 }
 
 func (c *Catalog) metadataCredentialRevisionLocked() string {

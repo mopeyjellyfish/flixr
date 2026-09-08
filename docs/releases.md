@@ -43,8 +43,11 @@ or create version tags for ordinary releases.
 
 ## TMDB application access
 
-The official image publisher requires `FLIXR_TMDB_APPLICATION_TOKEN` as a GitHub Actions
-repository secret. It passes the value to Docker BuildKit as the
+Credential-optional official releases remain supported while application distribution
+permission is unresolved. Setting the Actions variable
+`FLIXR_REQUIRE_APPLICATION_METADATA=1` turns on the fail-closed distribution gate; the
+publisher then requires `FLIXR_TMDB_APPLICATION_TOKEN` as a repository secret. It passes
+the value to Docker BuildKit as the
 `tmdb_application_token` build secret and links it into the server executable. Build
 logs and image layers must not contain the value, but anyone with the published binary
 can extract it. Treat it as a distributable application credential, not as a secret.
@@ -64,7 +67,9 @@ Before creating that repository secret, the maintainer must complete this one-ti
    approval from project non-commercial status.
 5. Copy the application's **API Read Access Token** into the Actions secret named
    `FLIXR_TMDB_APPLICATION_TOKEN`. Never use a token registered to another project.
-6. Run the release gates, inspect logs for credential disclosure, pull the immutable
+6. Set the Actions variable `FLIXR_REQUIRE_APPLICATION_METADATA` to `1`. A credential
+   without this explicit distribution gate is rejected rather than embedded.
+7. Run the release gates, inspect logs for credential disclosure, pull the immutable
    multi-architecture image, and verify normal-mode movie, series, and episode enrichment
    without any household token.
 

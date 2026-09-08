@@ -6,10 +6,13 @@ explicit maintainer approval before making either public. Releases stay on **0.x
 
 ## Metadata application-access gate
 
-An official candidate is not publishable until the TMDB application registration,
-public-distribution permission record, and `FLIXR_TMDB_APPLICATION_TOKEN` Actions secret
-described in [the release guide](releases.md#tmdb-application-access) exist. Acceptance
-must use the application source with both household token variables absent. Record only
+An official candidate advertised with automatic metadata access is not publishable until
+the TMDB application registration, public-distribution permission record, the
+`FLIXR_TMDB_APPLICATION_TOKEN` Actions secret, and the explicit distribution gate
+described in [the release guide](releases.md#tmdb-application-access) exist.
+Credential-optional releases may continue and must truthfully report the application
+source as unavailable. Automatic-access acceptance must use the application source with
+both household token variables absent. Record only
 the image digest, version, status source, result counts, and response/image checks; never
 record the credential, private media names, or household paths.
 

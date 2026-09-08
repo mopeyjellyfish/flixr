@@ -91,11 +91,8 @@ func (t *TMDB) Validate(ctx context.Context, token string) error {
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return ErrInvalidCredential
-	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("tmdb status %d", resp.StatusCode)
+		return providerHTTPError(resp.StatusCode)
 	}
 	return nil
 }

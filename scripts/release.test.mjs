@@ -50,7 +50,7 @@ test('release publisher refuses malformed versions and non-main events before Do
   }
 });
 
-test('official release requires and forwards the application credential without a command-line value', async () => {
+test('automatic metadata distribution is explicitly gated and keeps credential-optional releases', async () => {
   const { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -77,12 +77,20 @@ esac
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const base = { ...process.env, PATH: `${fixture}:${process.env.PATH}`, GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'push', GITHUB_REPOSITORY: 'mopeyjellyfish/flixr', GITHUB_SHA: sha, FLIXR_TEST_DOCKER_LOG: log };
   try {
-    const missing = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: base, encoding: 'utf8' });
-    assert.notEqual(missing.status, 0);
-    assert.match(missing.stderr, /FlixR TMDB application credential/);
+    const credentialOptional = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: base, encoding: 'utf8' });
+    assert.equal(credentialOptional.status, 0, credentialOptional.stderr);
+    assert.doesNotMatch(readFileSync(log, 'utf8'), /tmdb_application_token/);
+
+    const gatedMissing = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_REQUIRE_APPLICATION_METADATA: '1' }, encoding: 'utf8' });
+    assert.notEqual(gatedMissing.status, 0);
+    assert.match(gatedMissing.stderr, /Automatic metadata distribution requires/);
 
     const token = 'test-application-token-never-log';
-    const prepared = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_TMDB_APPLICATION_TOKEN: token }, encoding: 'utf8' });
+    const ungated = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_TMDB_APPLICATION_TOKEN: token }, encoding: 'utf8' });
+    assert.notEqual(ungated.status, 0);
+    assert.match(ungated.stderr, /without the distribution gate/);
+
+    const prepared = spawnSync('bash', ['scripts/release-image.sh', 'prepare', '0.9.0'], { env: { ...base, FLIXR_REQUIRE_APPLICATION_METADATA: '1', FLIXR_TMDB_APPLICATION_TOKEN: token }, encoding: 'utf8' });
     assert.equal(prepared.status, 0, prepared.stderr);
     const invocation = readFileSync(log, 'utf8');
     assert.match(invocation, /--secret id=tmdb_application_token,env=FLIXR_TMDB_APPLICATION_TOKEN/);

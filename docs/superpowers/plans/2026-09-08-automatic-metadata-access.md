@@ -69,7 +69,7 @@
 
 **Interfaces:** Release prepare requires `FLIXR_TMDB_APPLICATION_TOKEN`, forwards it as BuildKit secret `tmdb_application_token`, and embeds it only in the backend executable. Acceptance supplies a fake application credential at link time and uses no household token.
 
-- [ ] Write failing release-policy and normal-mode acceptance tests for absent-secret refusal, non-leaking BuildKit forwarding, fresh install, upgrade refresh, and offline cached browsing.
+- [ ] Write failing release-policy and normal-mode acceptance tests for credential-optional compatibility, explicit distribution-gate refusal, non-leaking BuildKit forwarding, fresh install, upgrade refresh, and offline cached browsing.
 - [ ] Run the script/unit tests and confirm the expected failures.
 - [ ] Implement Docker/release/CI wiring and extend acceptance fixtures.
 - [ ] Run release, backend, frontend, browser, Docker, and offline checks required by `CONTRIBUTING.md` through the coordination validator where heavy.

@@ -7,12 +7,11 @@ Run it at home, choose a profile, and watch in your browser. Your accounts,
 library and playback stay on your server and work without an internet connection.
 Internet access is needed to download FlixR and optional metadata or artwork.
 
-Official images are designed to include FlixR-owned TMDB application access, so
-households do not need a metadata-provider account. Automatic access is enabled
-only after the maintainer completes the provider registration and distribution
-review described in [the release guide](docs/releases.md#tmdb-application-access).
-Source builds without that application credential say so in setup and can use an
-optional personal override.
+FlixR supports project-owned TMDB application access so households do not need a
+metadata-provider account. Until the maintainer completes the provider registration
+and distribution review described in [the release guide](docs/releases.md#tmdb-application-access),
+official and source builds report automatic access as unavailable and can use an
+optional personal override. Existing credential-optional releases continue normally.
 
 **Early development (0.x).** Browser playback and per-profile audio selection are
 available; native TV/mobile apps, Cast, AirPlay and subtitle selection are still

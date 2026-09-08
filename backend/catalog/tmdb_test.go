@@ -50,6 +50,18 @@ func TestTMDBClassifiesInvalidAndRateLimitedLookups(t *testing.T) {
 	}
 }
 
+func TestTMDBClassifiesRateLimitedValidation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	if err := provider.Validate(context.Background(), "valid"); !errors.Is(err, ErrProviderRateLimited) {
+		t.Fatalf("validation rate-limit error = %v", err)
+	}
+}
+
 func TestTMDBLoadsEpisodeDetailsSeparatelyFromSeries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/3/tv/7/season/1/episode/2" {

@@ -870,6 +870,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	}
 	if provider != nil && token != "" {
 		for id, item := range next {
+			if !c.metadataAccessActive(token) {
+				break
+			}
 			if item.Kind != "film" || item.OwnerUnmatch {
 				continue
 			}
@@ -972,7 +975,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			value.Title = previous.Title
 			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly
-			if !previous.OwnerUnmatch && provider != nil && token != "" {
+			if !previous.OwnerUnmatch && provider != nil && c.metadataAccessActive(token) {
 				enrichment, enrichmentErr = c.pendingArtwork(identity)
 				attempted = enrichmentErr != nil || enrichment.Poster != "" || enrichment.Backdrop != ""
 				if !attempted {
@@ -987,7 +990,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 					}
 				}
 			}
-		} else if provider != nil && token != "" {
+		} else if provider != nil && c.metadataAccessActive(token) {
 			enrichment, enrichmentErr = provider.Lookup(ctx, token, "series", value.Title)
 			attempted = true
 		}
@@ -1046,6 +1049,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	}
 	if episodeProvider, ok := provider.(EpisodeProvider); ok && token != "" {
 		for id, item := range next {
+			if !c.metadataAccessActive(token) {
+				break
+			}
 			parent, found := series[item.SeriesID]
 			if item.Kind != "episode" || !found || parent.ProviderID == "" {
 				continue

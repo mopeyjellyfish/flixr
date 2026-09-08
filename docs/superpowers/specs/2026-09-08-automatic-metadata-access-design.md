@@ -36,7 +36,7 @@ An About/Credits section displays an approved TMDB logo, links to TMDB, and incl
 
 ## Release boundary
 
-Pull-request and local Docker builds work without a default and test the truthful unavailable state. The official main-branch release path refuses to prepare an image unless the dedicated release secret is present, passes it to BuildKit without logging it, and verifies inside a test image that the application source is selected without a household token. The existing 0.x-only release guard remains unchanged.
+Pull-request, local Docker, and current credential-optional release builds work without a default and test the truthful unavailable state. The official main-branch release path embeds application access only when the explicit distribution gate and dedicated credential are both present; either one alone fails closed. It passes the credential to BuildKit without logging it and verifies inside a test image that the application source is selected without a household token. The existing 0.x-only release guard remains unchanged.
 
 The issue stays open after plumbing lands. Closure additionally requires the registered FlixR credential and distribution permission record, a published multi-architecture image verified without household credentials, and private home-library verification without publishing titles or paths.
 

@@ -473,7 +473,7 @@ func TestScanRecordsProviderOutcomes(t *testing.T) {
 		if status := c.ScanStatus(); status.Status != "partial" || status.Failed != 1 || status.Unmatched != 0 {
 			t.Fatalf("status = %#v", status)
 		}
-		if status := c.MetadataStatus(); status.State != "failed" || !status.Configured {
+		if status := c.MetadataStatus(); status.State != "unavailable" || !status.Configured || !strings.Contains(status.Message, "retry the scan") {
 			t.Fatalf("metadata status = %#v", status)
 		}
 		rows, err := db.Query("SELECT relative_path, outcome, message FROM scan_files WHERE scan_id=?", c.ScanStatus().ID)
