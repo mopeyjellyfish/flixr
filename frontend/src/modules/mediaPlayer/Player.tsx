@@ -5,6 +5,7 @@ import { ApiError, type Episode, type PlaybackCapabilities, type PlaybackPlan } 
 import { initialPlayerState, playerReducer } from './state';
 import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
+import { browserCapabilities } from './capabilities';
 
 const maxConsecutiveRecoveries = 3;
 const finalHeartbeatWaitMS = 2_000;
@@ -36,21 +37,6 @@ function audioLabel(track: NonNullable<PlaybackPlan['audio_tracks']>[number]): s
   if (track.default) parts.push('Default');
   if (track.external) parts.push('External');
   return parts.join(' · ');
-}
-
-function browserCapabilities(): PlaybackCapabilities {
-  const probe = document.createElement('video');
-  const mp4 = probe.canPlayType('video/mp4; codecs="avc1.64001f, mp4a.40.2"') !== '';
-  const webm = probe.canPlayType('video/webm; codecs="vp9, opus"') !== '';
-  const nativeHLS = probe.canPlayType('application/vnd.apple.mpegurl') !== '';
-  const mediaSourceHLS = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.64001f, mp4a.40.2"');
-  return {
-    containers: [...(mp4 ? ['mp4'] : []), ...(webm ? ['webm'] : [])],
-    video_codecs: [...(mp4 ? ['h264'] : []), ...(webm ? ['vp9'] : [])],
-    video_profiles: mp4 ? ['Baseline', 'Main', 'High'] : [],
-    audio_codecs: [...(mp4 ? ['aac'] : []), ...(webm ? ['opus'] : [])],
-    supports_fmp4_hls: nativeHLS || mediaSourceHLS,
-  };
 }
 
 type AutoplayState =
@@ -166,7 +152,7 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     try {
       const next = await recovery.current.run(async () => {
         if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
-        return api.playbackPlan(catalogID, browserCapabilities());
+        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)));
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
       observation.current = 0;
@@ -225,7 +211,11 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     setAudioLocked(false);
     setAutoplay({ kind: 'idle' });
     recoveryController.run(
-      () => api.playbackPlan(catalogID, browserCapabilities()),
+      async () => {
+        const capabilities: PlaybackCapabilities = await browserCapabilities(await api.item(catalogID));
+        if (!active) throw new Error('player unmounted');
+        return api.playbackPlan(catalogID, capabilities);
+      },
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
     ).then(async (initial) => {
       if (!initial) return;
@@ -486,7 +476,10 @@ export function Player({ catalogID, startPositionMS, active = true, onAdvance, o
     replacingSession.current = plan.session_id;
     const performSwitch = async () => {
       try {
-        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, browserCapabilities());
+        const item = await api.item(catalogID);
+        const selected = plan.audio_tracks?.find((track) => track.index === streamIndex && Boolean(track.external) === (source === 'external'));
+        const capabilities = await browserCapabilities(selected ? { ...item, audio: [selected] } : item);
+        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, capabilities);
         if (version !== sourceVersion.current || !video.current) {
           void api.playbackStop(updated.session_id).catch(() => undefined);
           return;

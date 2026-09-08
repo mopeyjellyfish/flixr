@@ -54,7 +54,7 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	}
 	plan := func() string {
 		t.Helper()
-		w := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`)
+		w := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`)
 		if w.Code != 201 {
 			t.Fatalf("plan: %d %s", w.Code, w.Body)
 		}
@@ -183,7 +183,7 @@ func TestPlaybackObservationsUseServerGeneration(t *testing.T) {
 	}
 	handler = web.NewServerWithPlayback(h, c, closed).Handler()
 	before := request("GET", "/api/v1/progress/film", "").Body.String()
-	failed := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"]}}`)
+	failed := request("POST", "/api/v1/playback/plans", `{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true}}`)
 	if failed.Code != http.StatusForbidden {
 		t.Fatalf("closed direct manager=%d %s", failed.Code, failed.Body)
 	}

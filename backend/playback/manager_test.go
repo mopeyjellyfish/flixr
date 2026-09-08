@@ -62,7 +62,7 @@ type pauseSuccessfulManifestStatFS struct {
 
 func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
 	info, err := f.Fs.Stat(name)
-	if err == nil && filepath.Base(name) == "index.m3u8" {
+	if err == nil && filepath.Base(name) == "master.m3u8" {
 		f.once.Do(func() {
 			close(f.observed)
 			<-f.release
@@ -99,6 +99,9 @@ func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, 
 		if err := os.WriteFile(manifest, []byte(playlist.String()), 0o600); err != nil {
 			return nil, err
 		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(manifest), "master.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\"\nindex.m3u8\n"), 0o600); err != nil {
+			return nil, err
+		}
 	}
 	return process, nil
 }
@@ -133,7 +136,7 @@ func testManager(t *testing.T, mutate func(*Settings)) (*Manager, *fakeExecutor)
 
 func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	first, err := manager.Create("profile-a", "film-1", plan, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +170,7 @@ func TestManagerSharesGenerationUntilLastLeaseStops(t *testing.T) {
 
 func TestManagerStopsOnlyPlaybackOwnedByOneViewerSession(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	first, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +205,7 @@ func TestManagerStopsOnlyPlaybackOwnedByOneViewerSession(t *testing.T) {
 
 func TestManagerSupersedesOnlyOlderPlansForTheSameViewerAndTitle(t *testing.T) {
 	manager, _ := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", plan, 0, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -271,7 +274,7 @@ func TestManagerRejectsAViewerCreateThatFinishesAfterTeardown(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 		result <- err
 	}()
 	<-started
@@ -300,7 +303,7 @@ func TestManagerRejectsAViewerCreateRevokedWhileWaitingForManifest(t *testing.T)
 	executor.skipManifest = true
 	result := make(chan error, 1)
 	go func() {
-		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 		result <- err
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -353,7 +356,7 @@ func TestManagerRejectsAViewerRevokedAfterSuccessfulManifestWait(t *testing.T) {
 	})
 	result := make(chan error, 1)
 	go func() {
-		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		_, err := manager.CreateForViewer("viewer-a", "profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 		result <- err
 	}()
 	<-fs.observed
@@ -377,7 +380,7 @@ func TestManagerForcesKillAfterGracePeriod(t *testing.T) {
 		settings.ProcessGrace = 5 * time.Millisecond
 	})
 	executor.ignoreSignal = true
-	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +448,7 @@ func TestOutOfWindowSeekReplacesOneLeaseAndKeepsSharedGeneration(t *testing.T) {
 
 func TestRetainedRangeUsesObservedSegmentDurations(t *testing.T) {
 	manager, _ := testManager(t, nil)
-	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+	session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +474,7 @@ func TestRetainedRangeUsesObservedSegmentDurations(t *testing.T) {
 	if !ok || start != 7_500 || end != 16_500 {
 		t.Fatalf("slid retained range = %d..%d, %v", start, end, ok)
 	}
-	shared, err := manager.Create("profile-b", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 8_000)
+	shared, err := manager.Create("profile-b", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 8_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +504,7 @@ func TestManagerExpiryAndByteLimitReclaimGenerations(t *testing.T) {
 		settings.GenerationBytes = 8
 		settings.GlobalBytes = 16
 	})
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
 	session, err := manager.Create("profile-a", "film-1", plan, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +570,7 @@ func TestCleanupOrphansRefusesUnownedNonEmptyDirectory(t *testing.T) {
 
 func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	dir := t.TempDir()
-	name, args, err := ffmpegCommand(Transcode, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", 2, dir, time.Second, time.Minute)
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", 2, dir, time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,10 +578,16 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 	if name != "ffmpeg" || !strings.Contains(command, "libx264") || !strings.Contains(command, "-map 0:2") {
 		t.Fatalf("unexpected command: %s %v", name, args)
 	}
-	if _, _, err := ffmpegCommand(Remux, "https://media.example/file", "", 1, dir, 0, time.Minute); err == nil {
+	joined := strings.Join(args, " ")
+	for _, exact := range []string{"-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-master_pl_name master.m3u8"} {
+		if !strings.Contains(joined, exact) {
+			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
+		}
+	}
+	if _, _, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1}, "https://media.example/file", "", 1, dir, 0, time.Minute); err == nil {
 		t.Fatal("accepted a non-loopback input")
 	}
-	_, externalArgs, err := ffmpegCommand(Remux, "http://127.0.0.1:8787/api/v1/playback/input/video", "http://127.0.0.1:8787/api/v1/playback/input/audio", 0, dir, 23*time.Second, time.Minute)
+	_, externalArgs, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, "http://127.0.0.1:8787/api/v1/playback/input/video", "http://127.0.0.1:8787/api/v1/playback/input/audio", 0, dir, 23*time.Second, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +602,7 @@ func TestManagerAudioReplacementUsesDistinctJobAtGenerationLimit(t *testing.T) {
 		settings.MaxGenerations = 1
 		settings.GlobalBytes = settings.GenerationBytes
 	})
-	firstPlan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	firstPlan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
 	first, err := manager.Create("profile-a", "film-1", firstPlan, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -614,7 +623,7 @@ func TestManagerAudioReplacementUsesDistinctJobAtGenerationLimit(t *testing.T) {
 
 func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
+	plan := Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 1, AudioSourceStreamIndex: 1, AudioSelected: true}
 	first, err := manager.Create("profile-a", "film-1", plan, 0, 7)
 	if err != nil {
 		t.Fatal(err)
@@ -636,7 +645,7 @@ func TestManagerAudioReplacementKeepsOldSessionOnStartupFailure(t *testing.T) {
 
 func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
 	manager, executor := testManager(t, nil)
-	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoCodec: "h264", AudioCodec: "aac", AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
+	plan := Plan{Kind: Remux, SourceKey: "source-a", VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000, AudioStreamIndex: 2, AudioSourceStreamIndex: 0, AudioExternal: true, AudioSelected: true}
 	session, err := manager.Create("profile-a", "film-1", plan, 4_000)
 	if err != nil {
 		t.Fatal(err)
@@ -664,6 +673,19 @@ func TestManagerExternalAudioAuthorityEndsWithGeneration(t *testing.T) {
 	}
 	if _, _, _, ok := manager.Input(tokens[1]); ok {
 		t.Fatal("external audio authority survived generation stop")
+	}
+}
+
+func TestFFmpegCommandSuppliesRemuxBitrateEvidenceForTheMasterPlaylist(t *testing.T) {
+	_, args, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 4_000_000, AudioCodec: "aac", AudioBitrate: 192_000}, "http://127.0.0.1:8787/api/v1/playback/input/server-token", "", -1, t.TempDir(), 0, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, exact := range []string{"-b:v 4000000", "-b:a 192000"} {
+		if !strings.Contains(joined, exact) {
+			t.Fatalf("remux command %q lacks master-playlist evidence %q", joined, exact)
+		}
 	}
 }
 
@@ -721,7 +743,7 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", AudioCodec: "aac"}, 0)
+		session, err := manager.Create("profile-a", "film-1", Plan{Kind: Remux, VideoCodec: "h264", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -744,11 +766,11 @@ func TestLeaseJanitorExpiresAbandonedGenerationWithSyntheticTime(t *testing.T) {
 
 func TestSourceVersionSeparatesGenerationsAndInputAuthority(t *testing.T) {
 	manager, _ := testManager(t, nil)
-	first, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "original"}, 0)
+	first, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "original", VideoBitrate: 1_000_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "replacement"}, 0)
+	second, err := manager.Create("p", "film", Plan{Kind: Remux, SourceKey: "replacement", VideoBitrate: 1_000_000}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

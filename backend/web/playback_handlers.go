@@ -47,9 +47,10 @@ func mediaProperties(item catalog.Item, selected catalog.AudioTrack, hasAudio bo
 	for _, track := range item.Subtitles {
 		subtitles = append(subtitles, track.Codec)
 	}
-	properties := playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, AudioStreamIndex: -1, AudioSourceStreamIndex: -1, Subtitles: subtitles}
+	properties := playback.MediaProperties{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, VideoLevel: item.VideoLevel, Width: item.Width, Height: item.Height, VideoBitrate: item.Bitrate, FrameRateMilli: item.FrameRateMilli, BitDepth: item.BitDepth, HDR: item.HDR, AudioStreamIndex: -1, AudioSourceStreamIndex: -1, Subtitles: subtitles}
 	if hasAudio {
-		properties.AudioCodec = selected.Codec
+		properties.AudioCodec, properties.AudioProfile = selected.Codec, selected.Profile
+		properties.AudioChannels, properties.AudioSampleRate, properties.AudioBitrate = selected.Channels, selected.SampleRate, selected.Bitrate
 		properties.AudioStreamIndex = selected.Index
 		properties.AudioSourceStreamIndex = selected.SourceStreamIndex()
 		properties.AudioExternal = selected.External
@@ -248,6 +249,10 @@ func playbackFailure(w http.ResponseWriter, err error) {
 		fail(w, http.StatusServiceUnavailable, "playback_capacity")
 	case errors.Is(err, playback.ErrSessionInvalid):
 		fail(w, http.StatusForbidden, "playback_session_invalid")
+	case errors.Is(err, playback.ErrInvalidCapabilities):
+		fail(w, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, playback.ErrUnknownCapability):
+		fail(w, http.StatusUnprocessableEntity, "playback_capability_unknown")
 	default:
 		fail(w, http.StatusInternalServerError, "playback_failed")
 	}
@@ -321,7 +326,7 @@ func (s *Server) playbackNext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) playbackManifest(w http.ResponseWriter, r *http.Request) {
-	s.servePlaybackAsset(w, r, "index.m3u8")
+	s.servePlaybackAsset(w, r, "master.m3u8")
 }
 
 func (s *Server) playbackSegment(w http.ResponseWriter, r *http.Request) {

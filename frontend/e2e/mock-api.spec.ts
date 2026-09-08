@@ -8,7 +8,7 @@ const ready = { claimed: true, readiness: { ffprobe: true, ffmpeg: true } };
 const posterArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="#183a82"/><stop offset="1" stop-color="#05070c"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="295" cy="160" r="105" fill="#5b8cff" opacity=".52"/><path d="M0 430L230 250l170 155v195H0z" fill="#101623" opacity=".82"/></svg>').toString('base64')}`;
 const backdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><defs><radialGradient id="g"><stop stop-color="#5b8cff"/><stop offset="1" stop-color="#05070c"/></radialGradient></defs><rect width="1600" height="900" fill="#05070c"/><ellipse cx="1180" cy="330" rx="520" ry="380" fill="url(#g)" opacity=".58"/><path d="M580 900L1100 330l500 430v140z" fill="#101623" opacity=".85"/></svg>').toString('base64')}`;
 const brightBackdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="#f7d96b"/><circle cx="1180" cy="280" r="360" fill="#f6f8ff"/><path d="M500 900L1100 260l500 500v140z" fill="#5b8cff"/></svg>').toString('base64')}`;
-const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264' };
+const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 30_000, bit_depth: 8, audio: [{ codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48_000, bitrate: 128_000 }] };
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
 
 async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue } | undefined) {
@@ -393,6 +393,8 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   page.on('pageerror', (error) => errors.push(error.message));
   await mock(page, (path) => {
     if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [] } };
+    if (path.includes('/catalog/items/')) return { json: { ...film, id: path.split('/').at(-1) ?? film.id } };
     if (path.endsWith('/playback/plans')) return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,', heartbeat_url: '/api/v1/playback/sessions/session-1/heartbeat', seek_url: '/api/v1/playback/sessions/session-1/seek', stop_url: '/api/v1/playback/sessions/session-1/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
     if (path.endsWith('/heartbeat')) return { json: { expires_at: 9999999999 } };
     if (path.endsWith('/stop')) return { json: { stopped: true } };
@@ -415,6 +417,7 @@ test('mocked playback planning and capacity error states', async ({ page }, test
 
   await mock(page, (path) => {
     if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.includes('/catalog/items/')) return { json: { ...film, id: path.split('/').at(-1) ?? film.id } };
     if (path.endsWith('/playback/plans')) return { status: 503, json: { error: { code: 'playback_capacity' } } };
     return undefined;
   });
@@ -437,6 +440,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   const handler = (path: string) => {
     if (path.endsWith('/setup/status')) return { json: ready };
     if (path.endsWith('/catalog/view')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [] } };
+    if (path.includes('/catalog/items/')) return { json: { ...film, id: path.split('/').at(-1) ?? film.id } };
     if (path.endsWith('/playback/plans')) {
       plans += 1;
       return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: `session-${plans}`, media_url: 'data:video/mp4;base64,', heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/api/v1/playback/sessions/session-${plans}/seek`, stop_url: `/api/v1/playback/sessions/session-${plans}/stop`, resume_ms: plans > 1 ? 12_000 : 0, stream_offset_ms: 0, expires_at: 9999999999 } };
@@ -481,6 +485,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   await mock(secondClient, handler);
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
+  await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
   const resumedAt = await secondClient.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
     media.dispatchEvent(new Event('loadedmetadata'));
@@ -502,6 +507,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   expired = false;
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
+  await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
   interrupted = true;
   const plansBeforeInterruption = plans;
   await secondClient.locator('video').dispatchEvent('pause');
