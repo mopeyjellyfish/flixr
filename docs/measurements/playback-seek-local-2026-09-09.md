@@ -87,9 +87,10 @@ tests continue to pass.
 A 100 ms `ps` sampler around the second candidate transcode run observed a peak
 of **126.4% CPU** and **176,688 KiB RSS** for the FFmpeg process. This is an
 observed single-generation peak on this host, not an enforced CPU or memory
-ceiling. Playlist retention remains 60 seconds: transcodes use 30 two-second
-entries, while remuxes keep 15 four-second entries so long-GOP sources do not
-expand the retained window.
+ceiling. Transcodes use 30 two-second playlist entries, while remuxes keep the
+baseline 15-entry geometry. Remux segments still follow source keyframes and
+may exceed four seconds for longer GOPs; this change avoids doubling that
+source-dependent retained duration.
 
 ## Reproduce
 
