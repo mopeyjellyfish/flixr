@@ -689,8 +689,21 @@ func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
-		t.Fatalf("transcode rotated fixture: %v\n%s", err, output)
+	var stderr bytes.Buffer
+	process, err := (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatalf("start rotated fixture transcode: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("transcode rotated fixture: %v\n%s", err, stderr.String())
+		}
+	case <-ctx.Done():
+		_ = process.Kill()
+		t.Fatalf("transcode rotated fixture: %v\n%s", ctx.Err(), stderr.String())
 	}
 	rendered := probeAV(t, filepath.Join(outputDir, "index.m3u8"))
 	if rendered.Video.Width != 1080 || rendered.Video.Height != 1920 {
