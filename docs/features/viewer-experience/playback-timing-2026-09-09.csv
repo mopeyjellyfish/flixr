@@ -1,0 +1,37 @@
+version,cache_state,actual_kind,pair,plan_response_ms,first_media_headers_ms,first_presented_frame_ms,seek_http_response_ms,seek_presented_frame_ms,seek_status,seek_target_ms,seek_displayed_slider_ms,browser_errors
+v0.12.4,cold,direct,1,21.7,25,188.5,,78.0,presented,10000,10000,
+v0.12.4,cold,direct,2,25.3,30.3,189.1,,104.2,presented,10000,10000,
+v0.12.4,cold,direct,3,326,330,467.1,,79.2,presented,10000,10000,
+v0.12.4,warm,direct,1,324.7,330.2,351.9,,112.3,presented,10000,10000,
+v0.12.4,warm,direct,2,323.5,328.1,352.6,,109.5,presented,10000,10000,
+v0.12.4,warm,direct,3,328.3,333.9,352.6,,109.1,presented,10000,10000,
+v0.12.4,cold,remux,1,3805.3,3835.7,3985.6,3387.7,3599.4,presented,10178,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.12.4,cold,remux,2,3803,3837.5,3999.5,3365.6,3564.2,presented,10186,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.12.4,cold,remux,3,3810.4,3846.1,4018.0,3363.4,3566.4,presented,10444,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.12.4,warm,remux,1,3508.4,3543.4,3569.5,525.2,581.9,presented,10415,10000,
+v0.12.4,warm,remux,2,3808.6,3844.2,3868.9,530,562.5,presented,10416,10000,
+v0.12.4,warm,remux,3,3505.8,3539.9,3568.5,8,,timeout,,,console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)
+v0.12.4,cold,transcode,1,5199.4,5233.2,5416.3,4987.7,5047.1,presented,10453,10000,
+v0.12.4,cold,transcode,2,5203.8,5231.5,5417.2,5031,5098.9,presented,10192,10000,
+v0.12.4,cold,transcode,3,4914.8,4948.7,5121.3,5020.3,5062.8,presented,10448,10000,
+v0.12.4,warm,transcode,1,4929.4,4962.8,5003.5,5.4,,timeout,,,console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)
+v0.12.4,warm,transcode,2,5193.1,5226.5,5270.7,129.8,183.2,presented,10419,10000,
+v0.12.4,warm,transcode,3,4901.9,4936,4971.6,4.3,,timeout,,,console: Failed to load resource: the server responded with a status of 503 (Service Unavailable)
+v0.14.0,cold,direct,1,330.7,336.1,499.0,,80.5,presented,10000,10000,
+v0.14.0,cold,direct,2,27,31.3,172.5,,110.2,presented,10000,10000,
+v0.14.0,cold,direct,3,329.1,333.8,484.4,,91.5,presented,10000,10000,
+v0.14.0,warm,direct,1,325.7,331.3,351.3,,113.9,presented,10000,10000,
+v0.14.0,warm,direct,2,26,30.7,38.4,,92,presented,10000,10000,
+v0.14.0,warm,direct,3,24.6,28.5,42.7,,103.7,presented,10000,10000,
+v0.14.0,cold,remux,1,3817.5,3847.8,4015.7,3397.4,3562.7,presented,10445,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.14.0,cold,remux,2,3501.4,3530.2,3691.3,3405.4,3582.7,presented,10185,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.14.0,cold,remux,3,3801.3,3824.8,3983.4,1905.1,1935.9,presented,10075,10000,
+v0.14.0,warm,remux,1,3798.8,3832.1,3867.1,3529.3,3710.9,presented,10426,10000,console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden) | console: Failed to load resource: the server responded with a status of 403 (Forbidden)
+v0.14.0,warm,remux,2,3503.3,3538.3,3570.4,25,63.7,presented,10423,10000,
+v0.14.0,warm,remux,3,3805,3839.5,3869.0,502.2,563.5,presented,10162,10000,
+v0.14.0,cold,transcode,1,5208.7,5236.4,5420.2,4998.7,5041.6,presented,10455,10000,
+v0.14.0,cold,transcode,2,5232.1,5265.8,5432.7,5007,5044.6,presented,10185,10000,
+v0.14.0,cold,transcode,3,5237.5,5272.2,5449.4,5021.3,5071.1,presented,10190,10000,
+v0.14.0,warm,transcode,1,4904.4,4932.1,4970.8,5167.1,5211.2,presented,10414,10000,
+v0.14.0,warm,transcode,2,5190.3,5219.5,5269.5,125.7,171.5,presented,10416,10000,
+v0.14.0,warm,transcode,3,4902.1,4934.2,4972.5,5138.2,5199.4,presented,10161,10000,
