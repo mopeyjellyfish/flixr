@@ -1,9 +1,11 @@
 import { LoadingButton, useAsyncAction } from '../../vendor/interior/loading-button';
 import { ProgressBar } from '../../vendor/interior/progress-bar';
-import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useScrollSpy } from '../../vendor/interior/scroll-spy';
+import { HoldButton } from '../../modules/ui/HoldButton';
+import { HouseholdPanel } from './Household';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type ProfileAccessPolicy, type Readiness, type Scan, type ScanJob, type ScanPolicy, type TMDBSettings } from '../../core/api';
+import { ApiError, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type ScanJob, type ScanPolicy, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -32,10 +34,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
   const [screens, setScreens] = useState<ScreenPresence[]>([]);
-  const [name, setName] = useState('');
-  const [pin, setPin] = useState('');
   const [notice, setNotice] = useState('');
-  const [profilesVersion, setProfilesVersion] = useState(0);
   const [ownerRequired, setOwnerRequired] = useState(false);
   const [locked, setLocked] = useState<Set<string>>(new Set());
 
@@ -246,18 +245,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to confirm library cleanup. Refresh scan status and try again.');
     }
   };
-  const create = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      await api.createProfile(name, pin);
-      setName('');
-      setPin('');
-      setNotice('Profile created.');
-      setProfilesVersion((value) => value + 1);
-    } catch (error) {
-      setNotice(error instanceof ApiError ? error.message : 'Unable to create profile.');
-    }
-  };
+  const spy = useScrollSpy({ sections: ownerSections, offset: 32 });
 
   if (ownerRequired) return <main className="owner"><OwnerHeader onBrowse={onBrowse} onLogout={onLogout} /><section className="auth-panel"><h1>Owner sign in required</h1><p>Your owner session has expired or this device has not signed in.</p><a className="button-link primary" href="/login">Sign in to administer Flixr</a></section></main>;
 
@@ -265,9 +253,9 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     <main className="owner">
       <OwnerHeader onBrowse={onBrowse} onLogout={onLogout} />
       <div className="owner-intro"><p className="eyebrow">YOUR SERVER</p><h1>Server settings</h1><p>Manage your libraries, household, and playback from this device.</p></div>
-      {notice && <p className="owner-notice" role="status">{notice}</p>}
+      <OwnerNotice message={notice} onDismiss={() => setNotice('')} />
       <div className="owner-layout">
-        <nav className="owner-nav" aria-label="Server settings"><a href="#libraries">Libraries</a><a href="#household">Household</a><a href="#playback">Playback & screens</a><a href="#metadata">Metadata</a><a href="#backups">Backups</a><a href="#configuration">Configuration</a><a href="#support">Support</a></nav>
+        <nav className="owner-nav" aria-label="Server settings">{ownerSections.map((section) => <a key={section.id} {...spy.getLinkProps(section.id)}>{section.label}</a>)}</nav>
         <div className="owner-sections">
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
@@ -276,8 +264,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <ScanSchedules libraries={libraries} policies={scanPolicies} jobs={scanJobs} locked={locked.has('background.scan_schedule')} onSave={saveScanPolicy} onRun={queueLibraryScan} onCancel={cancelScanJob} onRetry={retryScanJob} />
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
-            <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
-            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} libraries={libraries} /><SessionManager /></div>
+            <h2 id="household-title">Household</h2><p>Who can watch, and what they can see. Each profile has its own list, viewing progress, and optional PIN.</p>
+            <HouseholdPanel libraries={libraries} onNotice={setNotice} />
           </section>
           <section id="playback" className="owner-section" aria-labelledby="playback-title">
             <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
@@ -372,13 +360,28 @@ function MetadataEditor({ item, onSaved }: { item: MetadataTarget; onSaved: (ite
   return <details open={open} onToggle={(event) => { const next = (event.currentTarget as HTMLDetailsElement).open; setOpen(next); if (next && !open) void load(); }}><summary>Edit metadata</summary>{notice && <p role="status">{notice}</p>}{open && <div>{metadataInputs.map(([field, label]) => <label key={field}>{label}{field === 'synopsis' ? <textarea value={value(field).value} onChange={(event) => change(field, { value: event.target.value })} /> : <input value={value(field).value} onChange={(event) => change(field, { value: event.target.value })} /> }<span><input type="checkbox" checked={value(field).locked} onChange={(event) => change(field, { locked: event.target.checked })} /> Lock this field</span></label>)}<div className="actions"><button type="button" onClick={() => void previewChanges()}>Preview changes</button><button type="button" onClick={() => void save()}>Save metadata</button><button type="button" disabled={!item.provider_id} onClick={() => void previewRefresh()}>Preview provider refresh</button><button type="button" disabled={!item.provider_id} onClick={() => void refresh()}>Refresh unlocked fields</button></div>{preview.length > 0 && <ul aria-label="Metadata refresh preview">{preview.map((field) => <li key={field.field}>{field.field}: {field.value || 'empty'} · {field.source}{field.locked ? ' · locked' : ''}</li>)}</ul>}</div>}</details>;
 }
 
+const ownerSections = [
+  { id: 'libraries', label: 'Libraries' }, { id: 'household', label: 'Household' }, { id: 'playback', label: 'Playback & screens' },
+  { id: 'metadata', label: 'Metadata' }, { id: 'backups', label: 'Backups' }, { id: 'configuration', label: 'Configuration' }, { id: 'support', label: 'Support' },
+];
+
+function OwnerNotice({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(onDismiss, 8000);
+    return () => window.clearTimeout(timer);
+  }, [message, onDismiss]);
+  // The live region always exists so screen readers announce each update.
+  return <div className={`owner-toast ${message ? 'is-visible' : ''}`} role="status" aria-live="polite">{message && <><span>{message}</span><button type="button" className="owner-toast-dismiss" onClick={onDismiss} aria-label="Dismiss notice">×</button></>}</div>;
+}
+
 function OwnerHeader({ onBrowse, onLogout }: OwnerProps) {
   return (
-    <header>
+    <header className="owner-header">
       <Wordmark />
-      <span>Owner operations</span>
-      <button onClick={onBrowse}>Household home</button>
-      <button onClick={() => void api.logout().finally(onLogout)}>Log out</button>
+      <span className="eyebrow">OWNER</span>
+      <button className="quiet-button" onClick={onBrowse}>Who’s watching</button>
+      <button className="quiet-button" onClick={() => void api.logout().finally(onLogout)}>Log out</button>
     </header>
   );
 }
@@ -458,153 +461,34 @@ function TMDBForm({ settings, token, onTokenChange, onSave, onRemove, locked }: 
       {locked && <p>Managed by the server environment.</p>}<label>TMDB API Read Access Token<input disabled={locked} type="password" value={token} onChange={(event) => onTokenChange(event.target.value)} autoComplete="new-password" /></label>
       <div className="actions">
         <button className="primary" disabled={locked}>Save TMDB credential</button>
-				{overrideConfigured && <button disabled={locked} type="button" onClick={() => void onRemove()}>Remove credential</button>}
+				{overrideConfigured && <HoldButton className="danger" disabled={locked} onConfirm={() => void onRemove()} confirmedLabel="Removing…">Remove credential</HoldButton>}
       </div>
 		</PendingForm></details></section>
   );
 }
 
+const GIB = 1024 ** 3;
+const toGiB = (bytes: number) => Math.round((bytes / GIB) * 100) / 100;
+const fromGiB = (value: string) => Math.max(1, Math.round(Number(value) * GIB));
+
 function PlaybackPanel({ settings, status, onChange, onSubmit, locked }: { settings: PlaybackSettings; status?: PlaybackStatus; onChange: (settings: PlaybackSettings) => void; onSubmit: (event: FormEvent) => void; locked: Set<string> }) {
+  const active = status?.generations?.length ?? 0;
   return <PendingForm onSubmit={onSubmit}>
     <h2>Playback resources</h2>
-    <p>{status?.generations?.length ? `${status.generations.length} compatibility generation${status.generations.length === 1 ? '' : 's'} active.` : 'No compatibility generations are active.'}</p>
-    {locked.size > 0 && <p>Environment-managed fields are read-only.</p>}<label>Segment directory<input disabled={locked.has('playback.segment_dir')} value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
-    <label>Per-generation bytes<input disabled={locked.has('playback.generation_bytes')} type="number" min="1" value={settings.generation_bytes} onChange={(event) => onChange({ ...settings, generation_bytes: Number(event.target.value) })} /></label>
-    <label>Global bytes<input disabled={locked.has('playback.global_bytes')} type="number" min="1" value={settings.global_bytes} onChange={(event) => onChange({ ...settings, global_bytes: Number(event.target.value) })} /></label>
-    <label>Concurrent generations<input disabled={locked.has('playback.max_generations')} type="number" min="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Number(event.target.value) })} /></label>
+    <p className="muted">{active ? `${active} compatibility generation${active === 1 ? '' : 's'} active. Limits apply once they finish.` : 'No compatibility generations are active.'}</p>
+    {locked.size > 0 && <p className="field-hint">Environment-managed fields are read-only.</p>}
+    <label>Segment directory<input disabled={locked.has('playback.segment_dir')} value={settings.segment_dir} onChange={(event) => onChange({ ...settings, segment_dir: event.target.value })} /></label>
+    <div className="field-row">
+      <label>Per-generation cache (GiB)<input disabled={locked.has('playback.generation_bytes')} type="number" min="0.01" step="0.01" inputMode="decimal" value={toGiB(settings.generation_bytes)} onChange={(event) => onChange({ ...settings, generation_bytes: fromGiB(event.target.value) })} /></label>
+      <label>Total cache (GiB)<input disabled={locked.has('playback.global_bytes')} type="number" min="0.01" step="0.01" inputMode="decimal" value={toGiB(settings.global_bytes)} onChange={(event) => onChange({ ...settings, global_bytes: fromGiB(event.target.value) })} /></label>
+      <label>Concurrent generations<input disabled={locked.has('playback.max_generations')} type="number" min="1" step="1" value={settings.max_generations} onChange={(event) => onChange({ ...settings, max_generations: Math.max(1, Math.round(Number(event.target.value))) })} /></label>
+    </div>
     <button className="primary">Save playback limits</button>
   </PendingForm>;
 }
 
 function ConnectedScreens({ screens }: { screens: ScreenPresence[] }) {
   return <section><h2>Connected screens</h2>{screens.length ? <ul>{screens.map((screen) => <li key={screen.id}>{screen.name} · {screen.state}</li>)}</ul> : <p>No Flixr screens are connected.</p>}</section>;
-}
-
-function ProfileForm({ name, pin, onNameChange, onPinChange, onSubmit }: { name: string; pin: string; onNameChange: (value: string) => void; onPinChange: (value: string) => void; onSubmit: (event: FormEvent) => void }) {
-  return (
-    <PendingForm onSubmit={onSubmit}>
-      <h2>Household profiles</h2>
-      <label>Name<input required value={name} onChange={(event) => onNameChange(event.target.value)} /></label>
-      <label>PIN (optional)<input type="password" value={pin} onChange={(event) => onPinChange(event.target.value)} /></label>
-      <button className="primary">Create profile</button>
-    </PendingForm>
-  );
-}
-
-export function ProfileManager({ version = 0, libraries = [] }: { version?: number; libraries?: Library[] }) {
-  const [profiles, setProfiles] = useState<{ id: string; name: string; protected: boolean }[]>([]);
-  const [notice, setNotice] = useState('');
-  const load = () => api.profiles().then((value) => setProfiles(value.profiles)).catch(() => setNotice('Profiles are unavailable.'));
-  useEffect(() => { void load(); }, [version]);
-
-  return (
-    <section>
-      <h2>Manage profiles</h2>
-      {notice && <p role="status">{notice}</p>}
-      {profiles.map((profile) => <ProfileRow key={profile.id} profile={profile} libraries={libraries} onSaved={load} onNotice={setNotice} />)}
-    </section>
-  );
-}
-
-function ProfileRow({ profile, libraries, onSaved, onNotice }: { profile: { id: string; name: string; protected: boolean }; libraries: Library[]; onSaved: () => void; onNotice: (value: string) => void }) {
-  const [name, setName] = useState(profile.name);
-  const [pin, setPin] = useState('');
-  const [deleting, setDeleting] = useState(false);
-  const save = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      await api.updateProfile(profile.id, { name, ...(pin ? { pin } : {}) });
-      setPin('');
-      onNotice('Profile updated.');
-      onSaved();
-    } catch (error) {
-      onNotice(error instanceof ApiError ? error.message : 'Unable to update profile.');
-    }
-  };
-
-  return (
-    <div className="owner-profile-row">
-    <PendingForm onSubmit={save}>
-      <strong><Avatar name={profile.name} />{profile.name} {profile.protected ? '· PIN protected' : '· no PIN'}</strong>
-      <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>New PIN<input type="password" value={pin} onChange={(event) => setPin(event.target.value)} /></label>
-      <div className="actions">
-        <button>Save</button>
-        <button type="button" disabled={deleting} onClick={() => {
-          if (!window.confirm(`Delete ${profile.name}? This permanently removes this profile's viewing history and My List.`)) return;
-          setDeleting(true);
-          void api.deleteProfile(profile.id).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to delete profile.')).finally(() => setDeleting(false));
-        }}>{deleting ? 'Deleting…' : 'Delete profile'}</button>
-        {profile.protected && <button type="button" onClick={() => void api.updateProfile(profile.id, { unprotect: true }).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to remove PIN.'))}>Remove PIN</button>}
-      </div>
-    </PendingForm>
-    <AccessPolicyForm profile={profile} libraries={libraries} onNotice={onNotice} />
-    </div>
-  );
-}
-
-const ratingOptions: Record<'GB' | 'US', string[]> = {
-  GB: ['U', 'PG', '12', '12A', '15', '18', 'R18'],
-  US: ['G', 'TV-Y', 'TV-Y7', 'TV-G', 'PG', 'TV-PG', 'PG-13', 'TV-14', 'R', 'TV-MA', 'NC-17'],
-};
-
-function AccessPolicyForm({ profile, libraries, onNotice }: { profile: { id: string; name: string }; libraries: Library[]; onNotice: (value: string) => void }) {
-  const [policy, setPolicy] = useState<ProfileAccessPolicy>();
-  const [selectedLibraries, setSelectedLibraries] = useState(false);
-  const [allowTags, setAllowTags] = useState('');
-  const [denyTags, setDenyTags] = useState('');
-  useEffect(() => {
-    let active = true;
-    void api.profileAccessPolicy(profile.id).then((loaded) => {
-      if (!active) return;
-      setPolicy(loaded);
-      setSelectedLibraries(loaded.library_ids.length > 0);
-      setAllowTags(loaded.allow_tags.join(', '));
-      setDenyTags(loaded.deny_tags.join(', '));
-    }).catch((error) => { if (active) onNotice(error instanceof ApiError ? error.message : 'Content access is unavailable.'); });
-    return () => { active = false; };
-  }, [profile.id, onNotice]);
-  if (!policy) return <p>Loading content access…</p>;
-  const tags = (value: string) => [...new Set(value.split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
-  const save = async () => {
-    try {
-      const updated = await api.saveProfileAccessPolicy(profile.id, {
-        library_ids: selectedLibraries ? policy.library_ids : [],
-        rating_region: policy.rating_region,
-        max_rating: policy.rating_region ? policy.max_rating : '',
-        unrated_policy: policy.unrated_policy,
-        allow_tags: tags(allowTags),
-        deny_tags: tags(denyTags),
-      });
-      setPolicy(updated);
-      onNotice('Content access updated. Devices using this profile must choose it again.');
-    } catch (error) {
-      onNotice(error instanceof ApiError ? error.message : 'Unable to save content access.');
-    }
-  };
-  const toggleLibrary = (id: string, checked: boolean) => setPolicy((current) => current ? { ...current, library_ids: checked ? [...current.library_ids, id] : current.library_ids.filter((value) => value !== id) } : current);
-  return <fieldset aria-label={`Content access for ${profile.name}`}>
-    <legend>Content access</legend>
-    <p>Library, rating, and tag rules apply to browsing, artwork, playback, and local screens.</p>
-    <label><input type="radio" name={`libraries-${profile.id}`} checked={!selectedLibraries} onChange={() => setSelectedLibraries(false)} /> All libraries, including new ones</label>
-    <label><input type="radio" name={`libraries-${profile.id}`} checked={selectedLibraries} onChange={() => setSelectedLibraries(true)} /> Only selected libraries</label>
-    {libraries.map((library) => <label key={library.id}><input type="checkbox" disabled={!selectedLibraries} checked={policy.library_ids.includes(library.id)} onChange={(event) => toggleLibrary(library.id, event.target.checked)} />{library.name}</label>)}
-    {selectedLibraries && policy.library_ids.length === 0 && <p role="alert">Choose at least one library.</p>}
-    <label>Rating region<select value={policy.rating_region} onChange={(event) => { const region = event.target.value as ProfileAccessPolicy['rating_region']; setPolicy({ ...policy, rating_region: region, max_rating: region ? ratingOptions[region][0] : '' }); }}><option value="">No rating limit</option><option value="GB">United Kingdom</option><option value="US">United States</option></select></label>
-    {policy.rating_region && <><label>Maximum rating<select value={policy.max_rating} onChange={(event) => setPolicy({ ...policy, max_rating: event.target.value })}>{ratingOptions[policy.rating_region].map((rating) => <option key={rating}>{rating}</option>)}</select></label><label>Unrated titles<select value={policy.unrated_policy} onChange={(event) => setPolicy({ ...policy, unrated_policy: event.target.value as ProfileAccessPolicy['unrated_policy'] })}><option value="allow">Allow</option><option value="deny">Block</option></select></label><p>Unknown ratings are blocked when a rating limit is active.</p></>}
-    <label>Allowed tags<input value={allowTags} placeholder="family, animation" onChange={(event) => setAllowTags(event.target.value)} /></label>
-    <label>Blocked tags<input value={denyTags} placeholder="scary" onChange={(event) => setDenyTags(event.target.value)} /></label>
-    <p>Blocked tags always win. Allowed tags never override a library or rating limit.</p>
-    <button type="button" disabled={selectedLibraries && policy.library_ids.length === 0} onClick={() => void save()}>Save content access</button>
-  </fieldset>;
-}
-
-function SessionManager() {
-  const [sessions, setSessions] = useState<ActiveSession[]>([]);
-  const [notice, setNotice] = useState('');
-  const load = () => api.activeSessions().then((value) => setSessions(value.sessions ?? [])).catch(() => setNotice('Sessions are unavailable.'));
-  useEffect(() => { void load(); }, []);
-  return <section><h2>Active sessions</h2>{notice && <p role="status">{notice}</p>}{sessions.length ? <ul>{sessions.map((session) => <li key={session.id}>{session.subject} · expires {new Date(session.expires_at * 1000).toLocaleString()} <button onClick={() => void api.revokeSession(session.id).then(load).catch(() => setNotice('Unable to revoke session.'))}>Revoke</button></li>)}</ul> : <p>No active sessions.</p>}</section>;
 }
 
 function PendingForm({ onSubmit, children, className }: { onSubmit: (event: FormEvent) => unknown; children: ReactNode; className?: string }) {

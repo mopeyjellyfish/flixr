@@ -394,6 +394,8 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
 			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrInvalidPIN) {
+			fail(w, 400, "invalid_pin_format")
 		} else {
 			fail(w, 500, "profile_failed")
 		}
@@ -422,6 +424,8 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		if errors.Is(e, household.ErrHashSaturated) {
 			fail(w, 429, "credential_busy")
+		} else if errors.Is(e, household.ErrInvalidPIN) {
+			fail(w, 400, "invalid_pin_format")
 		} else if errors.Is(e, household.ErrProfileNotFound) {
 			fail(w, 404, "profile_not_found")
 		} else {

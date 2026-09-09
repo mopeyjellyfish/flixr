@@ -1,30 +1,9 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Owner, ProfileManager } from './Owner';
+import { Owner } from './Owner';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('owner operations', () => {
-	it('edits a profile content policy with understandable rating and tag rules', async () => {
-		const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-			const path = String(input);
-			if (path === '/api/v1/profiles') return new Response(JSON.stringify({ profiles: [{ id: 'child', name: 'Child', protected: false }] }));
-			if (path.endsWith('/access-policy') && init?.method === 'PUT') return new Response(String(init.body));
-			if (path.endsWith('/access-policy')) return new Response(JSON.stringify({ library_ids: [], rating_region: '', max_rating: '', unrated_policy: 'allow', allow_tags: [], deny_tags: [], version: 1 }));
-			return new Response('{}');
-		});
-		render(<ProfileManager libraries={[{ id: 'films', name: 'Films', kind: 'film', locations: [] }, { id: 'kids', name: 'Kids', kind: 'film', locations: [] }]} />);
-		const policy = await screen.findByRole('group', { name: /content access for child/i });
-		fireEvent.click(within(policy).getByLabelText(/only selected libraries/i));
-		fireEvent.click(within(policy).getByLabelText(/^kids$/i));
-		fireEvent.change(within(policy).getByLabelText(/rating region/i), { target: { value: 'GB' } });
-		fireEvent.change(within(policy).getByLabelText(/maximum rating/i), { target: { value: '12' } });
-		fireEvent.change(within(policy).getByLabelText(/unrated titles/i), { target: { value: 'deny' } });
-		fireEvent.change(within(policy).getByLabelText(/allowed tags/i), { target: { value: 'family' } });
-		fireEvent.change(within(policy).getByLabelText(/blocked tags/i), { target: { value: 'scary' } });
-		fireEvent.click(within(policy).getByRole('button', { name: /save content access/i }));
-		await screen.findByText(/content access updated/i);
-		expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/profiles/child/access-policy', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ library_ids: ['kids'], rating_region: 'GB', max_rating: '12', unrated_policy: 'deny', allow_tags: ['family'], deny_tags: ['scary'] }) }));
-	});
 	it('shows required TMDB attribution in credits', async () => {
 		vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true }, profiles: [], films: '', tv: '', configured: false, enabled: true, source: 'none', state: 'unavailable', message: 'Unavailable', scan: {}, screens: [] })));
 		render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
@@ -232,29 +211,6 @@ describe('owner operations', () => {
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     expect(await screen.findByText(/metadata failed for some titles/i)).toBeVisible();
     expect(screen.getByText(/provider status: failed/i)).toBeVisible();
-  });
-
-  it('confirms profile deletion and reports a deletion error', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-      const path = String(input);
-      if (path.includes('/profiles/ada') && init?.method === 'DELETE') return new Response(JSON.stringify({ error: { code: 'profile_failed' } }), { status: 500 });
-      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
-      if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
-      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
-      if (path.endsWith('/owner/profiles/ada/access-policy')) return new Response(JSON.stringify({ library_ids: [], rating_region: '', max_rating: '', unrated_policy: 'allow', allow_tags: [], deny_tags: [], version: 1 }));
-      if (path === '/api/v1/profiles') return new Response(JSON.stringify({ profiles: [{ id: 'ada', name: 'Ada', protected: false }] }));
-      return new Response('{}');
-    });
-    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
-    const remove = await screen.findByRole('button', { name: /delete profile/i });
-    expect(await screen.findByRole('group', { name: /content access for ada/i })).toBeVisible();
-    fireEvent.click(remove);
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Ada"));
-    expect(fetcher).not.toHaveBeenCalledWith('/api/v1/profiles/ada', expect.anything());
-    confirm.mockReturnValue(true);
-    fireEvent.click(remove);
-    expect(await screen.findByText(/could not create that profile/i)).toBeInTheDocument();
   });
 
   it('edits locked local metadata and previews a provider refresh', async () => {

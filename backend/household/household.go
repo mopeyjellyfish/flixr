@@ -32,7 +32,22 @@ var (
 	ErrRecovery                  = errors.New("owner recovery unavailable")
 	ErrSessionNotFound           = errors.New("session not found")
 	ErrInvalidSubtitlePreference = errors.New("invalid subtitle preference")
+	ErrInvalidPIN                = errors.New("pin must be 4 to 6 digits")
 )
+
+// validPIN reports whether a profile PIN is 4 to 6 ASCII digits. An empty PIN
+// means "no PIN" and is handled by the callers.
+func validPIN(pin string) bool {
+	if len(pin) < 4 || len(pin) > 6 {
+		return false
+	}
+	for _, c := range pin {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 type SubtitleMode string
 
@@ -403,6 +418,9 @@ func (m *Manager) DeleteProfileAndRevokeSessions(id string) ([]string, error) {
 	return revoked, nil
 }
 func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
+	if pin != "" && !validPIN(pin) {
+		return Profile{}, ErrInvalidPIN
+	}
 	id, err := random()
 	if err != nil {
 		return Profile{}, err
@@ -448,6 +466,9 @@ func (m *Manager) UpdateProfile(id, name, pin string, unprotect bool) (Profile, 
 // UpdateProfileAndRevokeSessions reports bearer identities revoked by a
 // committed credential change. Name-only edits return no identities.
 func (m *Manager) UpdateProfileAndRevokeSessions(id, name, pin string, unprotect bool) (Profile, []string, error) {
+	if !unprotect && pin != "" && !validPIN(pin) {
+		return Profile{}, nil, ErrInvalidPIN
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, ok := m.profiles[id]
