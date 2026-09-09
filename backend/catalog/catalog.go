@@ -1002,9 +1002,21 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	for _, f := range files {
 		g.Go(func() error {
 			// A stable path, size and mtime never opens, hashes, or probes the file again.
-			if old, ok := previousByPath[scanKey{f.locationID, f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" && len(f.sidecars) == 0 && len(f.subtitleSidecars) == 0 && !hasExternalAudio(old.Audio) && !hasExternalSubtitles(old.Subtitles) {
+			if old, ok := previousByPath[scanKey{f.locationID, f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" {
+				if len(f.sidecars) == 0 && len(f.subtitleSidecars) == 0 && !hasExternalAudio(old.Audio) && !hasExternalSubtitles(old.Subtitles) {
+					select {
+					case results <- scanResult{item: old, file: f, skipped: true}:
+						return nil
+					case <-groupCtx.Done():
+						return groupCtx.Err()
+					}
+				}
+				x, err := c.refreshSidecars(groupCtx, f, old)
+				if err != nil && groupCtx.Err() != nil {
+					return groupCtx.Err()
+				}
 				select {
-				case results <- scanResult{item: old, file: f, skipped: true}:
+				case results <- scanResult{item: x, file: f, err: err, skipped: true}:
 					return nil
 				case <-groupCtx.Done():
 					return groupCtx.Err()
@@ -1106,6 +1118,25 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		return ErrRemovalReviewRequired
 	}
 	return nil
+}
+
+func (c *Catalog) refreshSidecars(ctx context.Context, file scanFile, old Item) (Item, error) {
+	root, err := os.OpenRoot(file.root)
+	if err != nil {
+		return Item{}, err
+	}
+	defer root.Close()
+	properties := old.MediaProperties
+	properties.Audio = embeddedAudio(properties.Audio)
+	properties.Subtitles = embeddedSubtitles(properties.Subtitles)
+	if err := c.appendAudioSidecars(ctx, root, file, &properties); err != nil {
+		return Item{}, err
+	}
+	if err := c.appendSubtitleSidecars(ctx, root, file, &properties); err != nil {
+		return Item{}, err
+	}
+	old.MediaProperties = properties
+	return old, nil
 }
 
 func digestFile(ctx context.Context, file *os.File) (string, error) {

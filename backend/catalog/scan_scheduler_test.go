@@ -78,6 +78,41 @@ func TestSchedulerPollsLibraryAndSkipsUnchangedMedia(t *testing.T) {
 	}
 }
 
+func TestIncrementalScanDoesNotReprobeUnchangedMediaWithSidecars(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"film.mp4", "film.eng.aac"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	calls := map[string]int{}
+	c, err := OpenWithProber(db, ProberFunc(func(_ context.Context, file *os.File) (MediaProperties, error) {
+		calls[filepath.Base(file.Name())]++
+		if filepath.Ext(file.Name()) == ".aac" {
+			return MediaProperties{Audio: []AudioTrack{{Index: 0, Codec: "aac"}}}, nil
+		}
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	status := c.ScanStatus()
+	if calls["film.mp4"] != 1 || calls["film.eng.aac"] != 2 || status.Scanned != 0 || status.Skipped != 1 {
+		t.Fatalf("calls=%#v status=%#v", calls, status)
+	}
+}
+
 func TestSchedulerMarksRunningJobInterruptedOnRestart(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	if err != nil {
