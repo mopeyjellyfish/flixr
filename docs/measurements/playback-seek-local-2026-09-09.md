@@ -50,8 +50,27 @@ then decodes the requested cyan fragment and the following magenta fragment.
 
 Direct files and retained HLS generations do not create a new FFmpeg process and
 their code paths are unchanged. The existing household trace measured a retained
-seek request at 46 ms, but those paths were not rerun against the candidate
-because this worktree was intentionally kept away from the household service.
+seek request at 46 ms. The candidate container's retained seek returned in 7 ms
+and presented the requested frame in 55 ms. Direct candidate timing was not
+repeated; the existing v0.14.0 same-host qualification measured presented direct
+seek frames in 78–114 ms, and the changed command is used only for HLS paths.
+
+## Exact-head container observation
+
+The official `Dockerfile` built candidate head
+`8610f2b1605a4e6d41e445cc7c6271bf1dc096d0` as local image
+`flixr:issue-196-8610f2b`, manifest-list digest
+`sha256:1e6b3c0d0479c83db5f7bf18e9a7581f7eb588139788461f9561b2ff2643879a`.
+The repository image smoke passed its non-root user, read-only root filesystem,
+FFmpeg encode/probe, clean setup status, and clean-shutdown checks.
+
+Chromium then completed setup and a real scan against that image using an
+isolated writable config/cache, read-only copied HEVC Main 10 fixture, loopback
+port, dropped capabilities, and `no-new-privileges`. An out-of-window seek to
+24.017 seconds returned in 269 ms, presented the requested frame in 311 ms, and
+continued playback. A following retained seek to 24.5 seconds returned in 7 ms,
+presented the requested frame in 55 ms, reused the 24-second generation offset,
+and continued playback. No household service or source file was accessed.
 
 ## Resource boundary
 
