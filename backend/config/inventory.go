@@ -33,6 +33,11 @@ func Inventory(dataDir string) []SettingDefinition {
 		{"background.scan_on_start", "Background work", "server", "false", "FLIXR_SCAN_ON_START", "", "environment", "restart", "boolean", false, true},
 		{"background.scan_workers", "Background work", "server", "4", "FLIXR_SCAN_WORKERS", "", "environment", "restart", "integer 1–32", false, true},
 		{"background.scan_schedule", "Background work", "server", "", "FLIXR_SCAN_SCHEDULE", "", "database", "immediate", "off, every:<duration>, or daily:<HH:MM>@<timezone>", false, true},
+		{"backup.destination", "Backups", "server", "", "FLIXR_BACKUP_DESTINATION", "", "database", "immediate", "existing absolute Flixr-owned directory outside data and media", false, false},
+		{"backup.schedule", "Backups", "server", "", "FLIXR_BACKUP_SCHEDULE", "", "database", "immediate", "off, every:<duration>, or daily:<HH:MM>@<timezone>", false, false},
+		{"backup.retain_count", "Backups", "server", "7", "FLIXR_BACKUP_RETAIN_COUNT", "", "database", "immediate", "integer 1–100", false, true},
+		{"backup.retain_age", "Backups", "server", "720h", "FLIXR_BACKUP_RETAIN_AGE", "", "database", "immediate", "duration of at least 24h", false, true},
+		{"backup.budget_bytes", "Backups", "server", "10737418240", "FLIXR_BACKUP_BUDGET_BYTES", "", "database", "immediate", "at least 1048576 bytes", false, true},
 		{"playback.segment_dir", "Playback", "server", defaults.SegmentDir, "FLIXR_SEGMENT_DIR", "", "sidecar and database", "restart", "absolute, Flixr-owned directory", false, false},
 		{"playback.generation_bytes", "Playback", "server", strconv.FormatInt(defaults.GenerationBytes, 10), "FLIXR_GENERATION_BYTES", "", "database", "immediate", "positive; no more than global bytes", false, true},
 		{"playback.global_bytes", "Playback", "server", strconv.FormatInt(defaults.GlobalBytes, 10), "FLIXR_GLOBAL_BYTES", "", "database", "immediate", "at least generation bytes", false, false},
@@ -72,6 +77,21 @@ func (b Bootstrap) NonSecretValues() map[string]string {
 	}
 	if b.ScanSchedule != "" {
 		values["background.scan_schedule"] = b.ScanSchedule
+	}
+	if b.BackupDestination != "" {
+		values["backup.destination"] = b.BackupDestination
+	}
+	if b.BackupSchedule != "" {
+		values["backup.schedule"] = b.BackupSchedule
+	}
+	if b.BackupRetainCount > 0 {
+		values["backup.retain_count"] = strconv.Itoa(b.BackupRetainCount)
+	}
+	if b.BackupRetainAge > 0 {
+		values["backup.retain_age"] = b.BackupRetainAge.String()
+	}
+	if b.BackupBudgetBytes > 0 {
+		values["backup.budget_bytes"] = strconv.FormatInt(b.BackupBudgetBytes, 10)
 	}
 	if b.FilmsRoot != nil {
 		values["library.films_root"] = canonicalInventoryRoot(*b.FilmsRoot)

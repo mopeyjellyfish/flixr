@@ -16,6 +16,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/mopeyjellyfish/flixr/backend/backup"
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/config"
 	"github.com/mopeyjellyfish/flixr/backend/household"
@@ -38,6 +39,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "recover-owner" {
 		if err := recoverOwner(os.Args[2:], os.Stdout); err != nil {
 			slog.Error("recover owner", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "restore-backup" {
+		if err := restoreBackup(os.Args[2:], os.Stdout); err != nil {
+			slog.Error("restore backup", "err", err)
 			os.Exit(1)
 		}
 		return
@@ -193,7 +201,26 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		}
 	}
 	screenManager := screens.New(time.Minute)
-	application := web.NewServerWithConfigurationValues(h, c, p, screenManager, config.EnvironmentLocks(), cfg.NonSecretValues(), web.Build{Version: version, Revision: revision}).Handler()
+	mediaRoots, err := configuredMediaRoots(c)
+	if err != nil {
+		return fmt.Errorf("load media roots for backup confinement: %w", err)
+	}
+	backupManager, err := backup.NewManager(db, backup.Source{DB: db, DataDir: cfg.DataDir, MediaRoots: mediaRoots, MediaRootProvider: func() ([]string, error) { return configuredMediaRoots(c) }, SegmentDir: segmentDir, AppVersion: version})
+	if err != nil {
+		return fmt.Errorf("open backup manager: %w", err)
+	}
+	if err := applyBackupEnvironment(backupManager, cfg.Environment); err != nil {
+		return fmt.Errorf("apply backup environment: %w", err)
+	}
+	backupManager.Start(ctx)
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = backupManager.Shutdown(shutdown)
+	}()
+	webServer := web.NewServerWithConfigurationValues(h, c, p, screenManager, config.EnvironmentLocks(), cfg.NonSecretValues(), web.Build{Version: version, Revision: revision})
+	webServer.AttachBackupManager(backupManager)
+	application := webServer.Handler()
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: application, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	inputOnly := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "/api/v1/playback/input/"
@@ -236,6 +263,49 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		return fmt.Errorf("bounded shutdown: %w", err)
 	}
 	return nil
+}
+
+func configuredMediaRoots(c *catalog.Catalog) ([]string, error) {
+	libraries, err := c.Libraries()
+	if err != nil {
+		return nil, err
+	}
+	var roots []string
+	for _, library := range libraries {
+		for _, location := range library.Locations {
+			if location.RootPath != "" {
+				roots = append(roots, location.RootPath)
+			}
+		}
+	}
+	return roots, nil
+}
+
+func applyBackupEnvironment(manager *backup.Manager, environment config.Environment) error {
+	if environment.BackupDestination == "" && environment.BackupSchedule == "" && environment.BackupRetainCount == 0 && environment.BackupRetainAge == 0 && environment.BackupBudgetBytes == 0 {
+		return nil
+	}
+	policy, err := manager.Policy()
+	if err != nil {
+		return err
+	}
+	if environment.BackupDestination != "" {
+		policy.Destination = environment.BackupDestination
+	}
+	if environment.BackupRetainCount > 0 {
+		policy.RetainCount = environment.BackupRetainCount
+	}
+	if environment.BackupRetainAge > 0 {
+		policy.RetainAgeSeconds = int64(environment.BackupRetainAge / time.Second)
+	}
+	if environment.BackupBudgetBytes > 0 {
+		policy.BudgetBytes = environment.BackupBudgetBytes
+	}
+	policy, err = backup.ApplySchedule(policy, environment.BackupSchedule)
+	if err != nil {
+		return err
+	}
+	return manager.SetEnvironmentOverride(policy, config.EnvironmentLocks())
 }
 
 func configureMetadata(c *catalog.Catalog, environment config.Environment) error {

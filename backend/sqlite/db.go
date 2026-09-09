@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -12,15 +13,16 @@ import (
 	"sort"
 
 	"github.com/spf13/afero"
-	_ "modernc.org/sqlite"
+	modernsqlite "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
 var migrations embed.FS
 
 const (
-	writerConnections = 1
-	readerConnections = 4
+	writerConnections   = 1
+	readerConnections   = 4
+	LatestSchemaVersion = 29
 )
 
 // DB routes mutations through one connection and reads through a separate bounded pool.
@@ -97,6 +99,55 @@ func (d *DB) Reader() *sql.DB         { return d.reader }
 func (d *DB) WriterMaxOpenConns() int { return writerConnections }
 func (d *DB) ReaderMaxOpenConns() int { return readerConnections }
 func (d *DB) DataDir() string         { return d.dir }
+
+// OnlineBackup writes a transactionally consistent SQLite snapshot without
+// copying the live database or its WAL files.
+func (d *DB) OnlineBackup(ctx context.Context, destination string) error {
+	conn, err := d.writer.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open sqlite backup connection: %w", err)
+	}
+	defer conn.Close()
+	type backuper interface {
+		NewBackup(string) (*modernsqlite.Backup, error)
+	}
+	if err := conn.Raw(func(driverConn any) error {
+		provider, ok := driverConn.(backuper)
+		if !ok {
+			return errors.New("sqlite driver does not support online backup")
+		}
+		backup, err := provider.NewBackup(destination)
+		if err != nil {
+			return fmt.Errorf("start sqlite backup: %w", err)
+		}
+		for {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+			more, err := backup.Step(128)
+			if err != nil {
+				return errors.Join(fmt.Errorf("copy sqlite backup pages: %w", err), backup.Finish())
+			}
+			if !more {
+				if err := backup.Finish(); err != nil {
+					return fmt.Errorf("finish sqlite backup: %w", err)
+				}
+				return nil
+			}
+		}
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *DB) SchemaVersion() (int, error) {
+	var version int
+	if err := d.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
+}
 
 func migrate(db *sql.DB) error {
 	entries, err := fs.ReadDir(migrations, "migrations")

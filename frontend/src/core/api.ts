@@ -46,6 +46,8 @@ export type EpisodeSequence =
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
+export type BackupPolicy = { enabled: boolean; destination: string; schedule_kind: 'interval' | 'daily'; interval_seconds: number; local_time: string; timezone: string; retain_count: number; retain_age_seconds: number; budget_bytes: number; next_run_at?: number; last_verified_at?: number; last_verified_file?: string; last_status: 'never' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; last_message?: string };
+export type BackupJob = { id: string; trigger: 'manual' | 'schedule'; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; queued_at: number; started_at?: number; finished_at?: number; archive_name?: string; size_bytes?: number; message?: string };
 export type TMDBSettings = { provider: 'tmdb'; enabled: boolean; configured: boolean; source: 'none' | 'application' | 'owner' | 'environment' | 'disabled'; state: 'unavailable' | 'configured' | 'running' | 'failed' | 'disabled' | 'rate_limited'; message: string };
 export type MetadataCandidate = { provider: string; id: string; title: string; year?: number; language?: string; region?: string; confidence: number };
 export type MetadataField = { field: 'title' | 'synopsis' | 'year' | 'poster' | 'backdrop' | 'tags' | 'content_rating'; value: string; source: 'provider' | 'owner' | 'local'; locked: boolean };
@@ -111,6 +113,7 @@ export function messageFor(code: string): string {
     credential_busy: 'Flixr is busy securing credentials. Please wait and try again.',
     login_rate_limited: 'Too many sign-in attempts. Please wait and try again.',
     ffprobe_unavailable: 'ffprobe is unavailable. Install it, then recheck readiness.', owner_required: 'Owner access is required.',
+    backups_unavailable: 'Backups are unavailable.', invalid_backup_policy: 'Review the backup destination, schedule, and retention limits.', backup_busy: 'A backup is already queued or running.', backup_job_not_found: 'That backup job is no longer active.',
     profile_required: 'Choose a profile to continue.', invalid_request: 'Check the entered information and try again.',
     already_claimed: 'This Flixr has already been claimed.', profile_not_found: 'That profile no longer exists.',
     invalid_pagination: 'The requested catalog page is not available.', catalog_not_found: 'That title is no longer available.',

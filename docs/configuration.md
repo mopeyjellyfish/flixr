@@ -15,6 +15,8 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 | Personal TMDB override | application default when present | server / database | `FLIXR_TMDB_TOKEN`, `_FILE` | no |
 | Scan on start, workers | `false`, `4` | server / environment | `FLIXR_SCAN_ON_START`, `FLIXR_SCAN_WORKERS` | yes |
 | Scan schedule override | unset | server / database | `FLIXR_SCAN_SCHEDULE` | no |
+| Backup folder and schedule | unset / off | server / database | `FLIXR_BACKUP_DESTINATION`, `FLIXR_BACKUP_SCHEDULE` | no |
+| Backup retention | 7 copies / 30 days / 10 GiB | server / database | `FLIXR_BACKUP_RETAIN_COUNT`, `FLIXR_BACKUP_RETAIN_AGE`, `FLIXR_BACKUP_BUDGET_BYTES` | no |
 | Segment directory | `<data-dir>/segments` | server / sidecar and database | `FLIXR_SEGMENT_DIR` | yes |
 | Generation/global bytes, generation count | 256 MiB, 512 MiB, 2 | server / database | `FLIXR_GENERATION_BYTES`, `FLIXR_GLOBAL_BYTES`, `FLIXR_MAX_GENERATIONS` | no |
 | Lease TTL, heartbeat, segment window, process grace | 45s, 15s, 60s, 2s | server / environment | `FLIXR_LEASE_TTL`, `FLIXR_HEARTBEAT_INTERVAL`, `FLIXR_SEGMENT_WINDOW`, `FLIXR_PROCESS_GRACE` | yes |
@@ -65,6 +67,38 @@ completion independently of the retained job history. FlixR embeds the IANA time
 zone database so daily schedules also work in minimal containers.
 
 The owner Configuration panel provides a searchable Basic view, an Advanced view, portable non-secret export, and import preview. Imports use the same validated library or playback setter as the owner form and accept exactly one scope per request, so each applied change is atomic at that scope. Mixed scopes, network and access settings require explicit review. Exports omit all secret values; previews reject environment-managed values.
+
+## Verified backups and offline restore
+
+Configure an existing absolute backup folder in **Server settings → Backups**.
+The folder must be outside the data, media, and playback-cache trees. Flixr claims
+an empty folder with its own marker and never rotates unrelated files. Each backup
+uses SQLite's online snapshot API and includes the database plus only the original
+downloaded artwork referenced by that snapshot. Media, playback segments, derived
+artwork, lock files, partials, and environment secrets are excluded.
+
+Flixr checks every entry checksum, the database integrity and foreign keys, and the
+schema version before publishing the archive. Retention runs only after a new verified
+archive exists and always keeps at least the newest verified copy. The owner page shows
+the last verified time, next due time, failures, and interrupted or cancelled jobs.
+Environment schedules accept `off`, `every:24h` (minimum one hour), or
+`daily:03:00@Europe/London`.
+
+Restore only while Flixr is stopped:
+
+```sh
+flixr restore-backup --data-dir /absolute/path/to/flixr-data \
+  --archive /absolute/path/to/flixr-backup-….flixr-backup
+```
+
+The command locks the target, rejects corrupt or newer-format archives before changing
+live files, stages and migrates older compatible data locally, remaps disposable playback
+paths, and journals publication. Re-running the command after interruption recovers a
+deterministic prior state. Replacing an existing installation first retains a separately
+verified safety backup. After restore, start Flixr and confirm owner login, profiles,
+history, artwork, and library availability. Media mounts and environment settings must
+be supplied separately on the restored host. Maintainers can run the fully disposable
+recovery exercise with `scripts/backup-recovery-drill.sh`.
 
 ## Metadata edits and refresh
 

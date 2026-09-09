@@ -70,6 +70,7 @@ For native builds, the demo and checks, see [development](development.md).
 |---|---|---|
 | `/config` | SQLite database, accounts, settings, local artwork and lock files | Persistent, writable; back up this volume |
 | `/cache/segments` | Bounded, disposable FFmpeg playback generations | Writable cache volume or suitably sized tmpfs; never point at media |
+| `/backups` | Verified Flixr backup archives | Dedicated writable volume or host bind; never nest under config, cache, or media |
 | `/media` | Original films and TV files | Read-only host bind mounts |
 | `/run/secrets/*` | Optional password and metadata credential files | Read-only Compose secrets |
 | `/tmp` | Temporary process files | Disposable tmpfs |
@@ -158,6 +159,9 @@ signs that profile out; changing or removing its PIN also signs its active sessi
 | `FLIXR_SCAN_ON_START` | `false`; start a background scan on boot |
 | `FLIXR_SCAN_WORKERS` | `4`, range 1–32; startup scan worker count |
 | `FLIXR_SCAN_SCHEDULE` | Optional all-library override: `off`, `every:6h`, or `daily:03:30@Europe/London`; schedule timing becomes read-only while exclusions remain editable |
+| `FLIXR_BACKUP_DESTINATION` | Existing absolute container path on a dedicated writable backup mount, outside `/config`, `/cache`, and `/media` |
+| `FLIXR_BACKUP_SCHEDULE` | Optional backup override: `off`, `every:24h`, or `daily:03:00@Europe/London` |
+| `FLIXR_BACKUP_RETAIN_COUNT`, `FLIXR_BACKUP_RETAIN_AGE`, `FLIXR_BACKUP_BUDGET_BYTES` | Optional retention overrides; defaults are 7, `720h`, and 10737418240 |
 | `FLIXR_GENERATION_BYTES` | Saved value or `268435456` (256 MiB) |
 | `FLIXR_GLOBAL_BYTES` | Saved value or `536870912` (512 MiB) |
 | `FLIXR_MAX_GENERATIONS` | Saved value or `2`; must fit the reserved global byte budget |

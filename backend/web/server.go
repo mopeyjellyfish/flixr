@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mopeyjellyfish/flixr/backend/backup"
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/diagnostics"
 	"github.com/mopeyjellyfish/flixr/backend/household"
@@ -49,6 +50,7 @@ type Server struct {
 	version, revision string
 	settingsLocks     map[string]bool
 	settingsValues    map[string]string
+	backups           *backup.Manager
 }
 
 func (s *Server) lockPlaybackProgress(profileID, catalogID string) func() {
@@ -115,7 +117,8 @@ func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playba
 	s.routes()
 	return s
 }
-func (s *Server) Handler() http.Handler { return s.observe(s.mux) }
+func (s *Server) Handler() http.Handler                       { return s.observe(s.mux) }
+func (s *Server) AttachBackupManager(manager *backup.Manager) { s.backups = manager }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/setup/status", s.status)
 	s.mux.HandleFunc("POST /api/v1/setup/claim", s.claim)
@@ -131,6 +134,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/owner/profiles/{id}/access-policy", s.profileAccessPolicy)
 	s.mux.HandleFunc("GET /api/v1/owner/sessions", s.sessions)
 	s.mux.HandleFunc("DELETE /api/v1/owner/sessions/{id}", s.revokeSession)
+	s.mux.HandleFunc("GET /api/v1/owner/backups", s.backupStatus)
+	s.mux.HandleFunc("PUT /api/v1/owner/backups/policy", s.backupPolicy)
+	s.mux.HandleFunc("POST /api/v1/owner/backups/jobs", s.backupRun)
+	s.mux.HandleFunc("DELETE /api/v1/owner/backups/jobs/{id}", s.backupCancel)
 	s.mux.HandleFunc("POST /api/v1/profiles/{id}/select", s.selectProfile)
 	s.mux.HandleFunc("GET /api/v1/catalog/home", s.home)
 	s.mux.HandleFunc("GET /api/v1/history", s.history)

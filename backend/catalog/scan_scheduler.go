@@ -12,6 +12,7 @@ import (
 	"time"
 
 	// Keep IANA schedule zones available in minimal container images.
+	"github.com/mopeyjellyfish/flixr/backend/schedule"
 	_ "time/tzdata"
 )
 
@@ -375,58 +376,11 @@ func nullableSchedule(value int64) any {
 }
 
 func nextScheduledAt(now time.Time, policy ScanPolicy) time.Time {
-	if policy.ScheduleKind == "interval" {
-		d := time.Duration(policy.IntervalSeconds) * time.Second
-		if d < time.Minute {
-			d = time.Minute
-		}
-		next := time.Unix(policy.NextRunAt, 0)
-		if policy.NextRunAt == 0 {
-			return now.Add(d)
-		}
-		for !next.After(now) {
-			missed := now.Sub(next)/d + 1
-			next = next.Add(missed * d)
-		}
-		return next
+	prior := time.Time{}
+	if policy.NextRunAt != 0 {
+		prior = time.Unix(policy.NextRunAt, 0)
 	}
-	location, err := time.LoadLocation(policy.Timezone)
-	if err != nil {
-		location = time.UTC
-	}
-	parsed, err := time.Parse("15:04", policy.LocalTime)
-	if err != nil {
-		parsed = time.Date(0, 1, 1, 3, 0, 0, 0, time.UTC)
-	}
-	localNow := now.In(location)
-	for dayOffset := 0; dayOffset < 3; dayOffset++ {
-		date := localNow.AddDate(0, 0, dayOffset)
-		var exact time.Time
-		var fallback time.Time
-		start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, location).Add(-3 * time.Hour)
-		for candidate := start; candidate.Before(start.Add(32 * time.Hour)); candidate = candidate.Add(time.Minute) {
-			wall := candidate.In(location)
-			if wall.Year() != date.Year() || wall.YearDay() != date.YearDay() {
-				continue
-			}
-			minutes := wall.Hour()*60 + wall.Minute()
-			target := parsed.Hour()*60 + parsed.Minute()
-			if minutes >= target && fallback.IsZero() {
-				fallback = candidate
-			}
-			if minutes == target && exact.IsZero() {
-				exact = candidate
-			}
-		}
-		scheduled := exact
-		if scheduled.IsZero() {
-			scheduled = fallback
-		}
-		if !scheduled.IsZero() && scheduled.After(now) {
-			return scheduled
-		}
-	}
-	return now.Add(24 * time.Hour)
+	return schedule.Next(now, policy.ScheduleKind, time.Duration(policy.IntervalSeconds)*time.Second, prior, policy.LocalTime, policy.Timezone, time.Minute)
 }
 
 func (c *Catalog) QueueLibraryScan(libraryID, trigger string) (ScanJob, error) {

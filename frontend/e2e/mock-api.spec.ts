@@ -30,6 +30,7 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/scan/jobs' ? { json: { jobs: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/backups' ? { json: { policy: { enabled: false, destination: '', schedule_kind: 'interval', interval_seconds: 86400, local_time: '03:00', timezone: 'UTC', retain_count: 7, retain_age_seconds: 2592000, budget_bytes: 10737418240, last_status: 'never' }, jobs: [] } } : undefined)
       ?? (request.method() === 'GET' && /^\/api\/v1\/owner\/libraries\/[^/]+\/scan-policy$/.test(url.pathname) ? scanPolicyResponse(url.pathname.split('/').at(-2) ?? '') : undefined)
       ?? (request.method() === 'GET' && url.pathname.startsWith('/api/v1/ratings/') ? { json: { rating: null } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
@@ -37,6 +38,25 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
     return route.fulfill({ status: response.status ?? 200, json: response.json });
   });
 }
+
+test('mocked owner configures and runs a verified backup', async ({ page }, testInfo) => {
+  await mock(page, (path, method, _query, body) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.endsWith('/owner/roots')) return { json: { films: '', tv: '' } };
+    if (path.endsWith('/settings/tmdb')) return { json: { configured: false } };
+    if (path.endsWith('/owner/metadata/unmatched')) return { json: { items: [] } };
+    if (path.endsWith('/owner/identity/repairs')) return { json: { conflicts: [], merges: [] } };
+    if (path.endsWith('/owner/settings')) return { json: { settings: [] } };
+    if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/cache/segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 } };
+    if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/cache/segments', generation_bytes: 1, global_bytes: 1, max_generations: 1 }, generations: [] } };
+    if (path.endsWith('/scan/status')) return { json: { scan: {} } };
+    if (path.endsWith('/profiles')) return { json: { profiles: [] } };
+    if (path.endsWith('/owner/backups/policy') && method === 'PUT') return { json: { policy: body! } };
+    if (path.endsWith('/owner/backups/jobs') && method === 'POST') return { status: 202, json: { job: { id: 'backup-1', trigger: 'manual', status: 'queued', queued_at: 1 } } };
+    return undefined;
+  });
+  await open(page, '/owner'); await page.getByLabel('Backup folder').fill('/backups/flixr'); await page.getByRole('button', { name: /save backup policy/i }).click(); await expect(page.getByText('Backup policy saved.')).toBeVisible(); await page.getByRole('button', { name: /back up now/i }).click(); await expect(page.getByText(/manual backup/i)).toBeVisible(); await check(page, []); await page.locator('#backups').screenshot({ path: testInfo.outputPath('owner-backups.png') });
+});
 async function open(page: Page, path: string) {
   const status = page.waitForResponse((response) => response.url().includes('/api/v1/setup/status'));
   await page.goto('/');

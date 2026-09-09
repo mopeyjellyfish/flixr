@@ -25,6 +25,7 @@ services:
     volumes:
       - flixr-data:/config
       - flixr-cache:/cache
+      - flixr-backups:/backups
       - type: bind
         source: ${FLIXR_MEDIA_DIR:-./media}
         target: /media
@@ -41,3 +42,4 @@ services:
 volumes:
   flixr-data:
   flixr-cache:
+  flixr-backups:
