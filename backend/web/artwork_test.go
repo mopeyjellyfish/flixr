@@ -74,7 +74,7 @@ func TestProfileServesCachedArtwork(t *testing.T) {
 	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
 	w := httptest.NewRecorder()
 	web.NewServer(h, c).Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/png" || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Cache-Control") != "private, max-age=0, must-revalidate" {
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "image/png" || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("artwork response=%d %q %q %q", w.Code, w.Header().Get("Content-Type"), w.Header().Get("Cache-Control"), w.Body.String())
 	}
 	if decoded, format, err := image.Decode(bytes.NewReader(w.Body.Bytes())); err != nil || format != "png" || decoded.Bounds() != image.Rect(0, 0, 2, 2) {

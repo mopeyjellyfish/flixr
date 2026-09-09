@@ -18,6 +18,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   if (!token || !filmsRoot || !tvRoot) throw new Error('FLIXR_SETUP_TOKEN, FLIXR_FILMS_ROOT, and FLIXR_TV_ROOT are required for production acceptance.');
   const errors: string[] = [];
   const externalRequests: string[] = [];
+  let intentionalAccessDenials = false;
   const origin = new URL(testInfo.project.use.baseURL!).origin;
   await page.context().route('**/*', (route) => {
     if (new URL(route.request().url()).origin === origin) return route.continue();
@@ -25,7 +26,11 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
     return route.abort();
   });
   page.on('pageerror', (error) => errors.push(error.message));
-  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return;
+    if (intentionalAccessDenials && /^Failed to load resource: the server responded with a status of (403|404)/.test(message.text())) return;
+    errors.push(message.text());
+  });
 
   await page.goto('/setup');
   await expect(page.locator('[data-app-content]')).not.toHaveAttribute('inert');
@@ -68,7 +73,10 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.getByLabel(/^name$/i).fill('Production viewer');
   await page.getByRole('button', { name: /create profile/i }).click();
   await expect(page).toHaveURL(/\/home$/);
-  await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible({ timeout: 30_000 });
+  const blueCard = page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i });
+  await expect(blueCard).toBeVisible({ timeout: 30_000 });
+  const blueID = await blueCard.getAttribute('data-catalog-id');
+  expect(blueID).toBeTruthy();
   await page.getByRole('button', { name: /switch profile/i }).click();
   await page.getByRole('button', { name: /production viewer/i }).click();
   await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /film blue horizon 2026/i })).toBeVisible();
@@ -327,8 +335,46 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await filmsSchedule.getByRole('button',{name:/run now for films/i}).click();
   const queuedResponse=await queuedScan;expect(queuedResponse.ok()).toBeTruthy();const queuedBody=await queuedResponse.json() as {job:{id:string}};
   await expect.poll(async()=>ownerPage.evaluate(async(id)=>{const response=await fetch(`/api/v1/owner/scan/jobs/${id}`);const body=await response.json() as {job:{status:string}};return body.job.status;},queuedBody.job.id),{timeout:30_000}).toBe('succeeded');
-  await expect(ownerPage.getByText(/2 unchanged/i).first()).toBeVisible();
+  const latestFilmsScan = ownerPage.getByRole('region', { name: 'Scheduled scans' }).locator('article').filter({ hasText: 'Films · succeeded' }).first();
+  await expect(latestFilmsScan).toContainText(/manual · \d+ scanned · \d+ unchanged · 0 failed · 2 total/i);
   await ownerPage.screenshot({path:testInfo.outputPath('production-scheduled-scan.png'),fullPage:true});
+  const profilePolicy = ownerPage.getByRole('group', { name: /content access for production viewer/i });
+  await expect(profilePolicy).toBeVisible();
+  await profilePolicy.getByLabel(/only selected libraries/i).check();
+  await profilePolicy.getByLabel(/^tv$/i).check();
+  const savedPolicy = ownerPage.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/access-policy'));
+  await profilePolicy.getByRole('button', { name: /save content access/i }).click();
+  expect((await savedPolicy).ok()).toBeTruthy();
+  await expect(ownerPage.getByText(/content access updated/i)).toBeVisible();
+  intentionalAccessDenials = true;
+  expect(await page.evaluate(async () => (await fetch('/api/v1/catalog/home')).status)).toBe(403);
+  await page.goto('/profiles');
+  await page.getByRole('button', { name: /production viewer/i }).click();
+  await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /series signal/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: /film blue horizon 2026/i })).toHaveCount(0);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/profiles$/);
+  await page.goForward();
+  await expect(page.getByRole('region', { name: 'New' }).getByRole('button', { name: /series signal/i })).toBeVisible();
+  await expect(page.getByRole('button', { name: /film blue horizon 2026/i })).toHaveCount(0);
+  const accessMatrix = await page.evaluate(async (hiddenID) => {
+    const [home, search, item, playback] = await Promise.all([
+      fetch('/api/v1/catalog/home').then(async (response) => ({ status: response.status, body: await response.json() })),
+      fetch('/api/v1/catalog/search?q=Blue').then(async (response) => ({ status: response.status, body: await response.json() })),
+      fetch(`/api/v1/catalog/items/${hiddenID}`).then(async (response) => ({ status: response.status, body: await response.json() })),
+      fetch('/api/v1/playback/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ catalog_id: hiddenID, capabilities: { containers: ['mp4'], video_codecs: ['h264'], audio_codecs: ['aac'], supports_direct: true } }) }).then(async (response) => ({ status: response.status, body: await response.json() })),
+    ]);
+    return { home, search, item, playback };
+  }, blueID!);
+  expect(accessMatrix.home).toMatchObject({ status: 200, body: { total: 1 } });
+  expect(accessMatrix.search).toMatchObject({ status: 200, body: { total: 0, items: [] } });
+  expect(accessMatrix.item).toMatchObject({ status: 404, body: { error: { code: 'catalog_not_found' } } });
+  expect(accessMatrix.playback).toMatchObject({ status: 403, body: { error: { code: 'content_access_denied' } } });
+  intentionalAccessDenials = false;
+  await profilePolicy.getByLabel(/all libraries, including new ones/i).check();
+  const resetPolicy = ownerPage.waitForResponse((response) => response.request().method() === 'PUT' && response.url().endsWith('/access-policy'));
+  await profilePolicy.getByRole('button', { name: /save content access/i }).click();
+  expect((await resetPolicy).ok()).toBeTruthy();
   await ownerContext.close();
   expect(errors.filter((message) => !message.includes('ERR_INTERNET_DISCONNECTED') && !message.includes('503'))).toEqual([]);
   expect(externalRequests).toEqual([]);

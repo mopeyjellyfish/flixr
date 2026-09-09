@@ -4,6 +4,7 @@ export type SetupStep = 'choice' | 'libraries' | 'profile' | 'complete';
 export type SetupCheck = { id: 'data' | 'cache' | 'films' | 'tv' | 'ffprobe' | 'ffmpeg'; label: string; state: 'ready' | 'not_configured' | 'missing' | 'not_directory' | 'unreadable' | 'unwritable' | 'unavailable'; path?: string; message: string; action?: string };
 export type OwnerSetup = { step: SetupStep; checks: SetupCheck[] };
 export type Profile = { id: string; name: string; protected: boolean; avatar?: string };
+export type ProfileAccessPolicy = { library_ids: string[]; rating_region: '' | 'GB' | 'US'; max_rating: string; unrated_policy: 'allow' | 'deny'; allow_tags: string[]; deny_tags: string[]; version: number };
 export type ActiveSession = { id: string; subject: string; expires_at: number };
 export type CatalogItem = {
   genres?: string[];
@@ -73,6 +74,7 @@ export type ApiErrorCode =
   | 'playback_capability_unknown'
   | 'catalog_not_found' | 'catalog_artwork_not_found' | 'catalog_query_failed'
   | 'bad_origin' | 'logout_failed' | 'profile_failed' | 'progress_failed'
+  | 'content_access_denied' | 'invalid_profile_policy' | 'profile_policy_failed'
   | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'scan_status_failed' | 'removal_review_changed' | 'library_cleanup_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
@@ -115,6 +117,9 @@ export function messageFor(code: string): string {
     catalog_artwork_not_found: 'Artwork is not available for this title.', catalog_query_failed: 'The catalog could not be read.',
     bad_origin: 'This request was blocked because it came from another site.', logout_failed: 'Flixr could not sign out.',
     profile_failed: 'Flixr could not create that profile.', progress_failed: 'Flixr could not save playback progress.',
+    content_access_denied: 'This title is not available for the selected profile.',
+    invalid_profile_policy: 'Check the library, rating, and tag rules, then try again.',
+    profile_policy_failed: 'Flixr could not save this profile’s content access.',
     invalid_roots: 'Those library roots are not valid.', scan_active: 'A scan is already in progress.',
     invalid_library: 'That library name or media type is not valid.', library_not_found: 'That library no longer exists.',
     library_has_locations: 'Remove this library’s folders before deleting it.', invalid_library_location: 'That library folder is not valid.',

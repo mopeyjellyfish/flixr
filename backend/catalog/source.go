@@ -141,6 +141,33 @@ func (c *Catalog) OpenSource(id, key string) (*os.File, error) {
 	c.mu.RLock()
 	x, ok := c.playbackSource(id)
 	c.mu.RUnlock()
+	if ok && key != "" {
+		root, rootErr := c.sourceRoot(x)
+		if rootErr == nil {
+			x.sourceRoot = root
+		}
+		if rootErr != nil || x.SourceKey() != key {
+			candidates, err := c.physicalSources(id)
+			if err != nil {
+				return nil, os.ErrNotExist
+			}
+			ok = false
+			for _, candidate := range candidates {
+				if candidate.SourceKey() == key {
+					x, ok = candidate.Item, true
+					break
+				}
+			}
+		}
+	}
+	return c.openSourceItemChecked(x, ok, key)
+}
+
+func (c *Catalog) openSourceItem(x Item) (*os.File, error) {
+	return c.openSourceItemChecked(x, true, x.SourceKey())
+}
+
+func (c *Catalog) openSourceItemChecked(x Item, ok bool, key string) (*os.File, error) {
 	root, err := c.sourceRoot(x)
 	if err != nil {
 		return nil, os.ErrNotExist

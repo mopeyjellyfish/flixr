@@ -21,6 +21,11 @@ func (s *Server) viewer(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
 		return
 	}
+	model, err = s.filterViewer(r, model)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
 	write(w, http.StatusOK, model)
 }
 
@@ -34,6 +39,9 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
+	if !s.publicContent(w, r, kind, id) {
+		return
+	}
 	if err := s.catalog.SetListed(profile.ID, kind, id, r.Method == http.MethodPut); err != nil {
 		if errors.Is(err, catalog.ErrCatalogNotFound) {
 			fail(w, http.StatusNotFound, "catalog_not_found")
@@ -55,6 +63,9 @@ func (s *Server) continueWatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
+	if !s.publicContent(w, r, kind, id) {
+		return
+	}
 	dismissed := r.Method == http.MethodDelete
 	if err := s.catalog.SetContinueWatchingDismissed(profile.ID, kind, id, dismissed); err != nil {
 		if errors.Is(err, catalog.ErrCatalogNotFound) {
@@ -86,6 +97,22 @@ func (s *Server) watched(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	allowedIDs := ids[:0]
+	for _, id := range ids {
+		allowed, accessErr := s.itemAllowed(r, id)
+		if accessErr != nil {
+			fail(w, http.StatusInternalServerError, "catalog_query_failed")
+			return
+		}
+		if allowed {
+			allowedIDs = append(allowedIDs, id)
+		}
+	}
+	ids = allowedIDs
+	if len(ids) == 0 {
+		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
