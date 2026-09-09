@@ -12,11 +12,13 @@ import (
 )
 
 const (
-	hlsSegmentDuration = 2 * time.Second
-	// FFmpeg may read four media seconds at up to 8x while preparing a
-	// generation, then returns to the sustained 1x input rate.
+	hlsRemuxSegmentDuration     = 4 * time.Second
+	hlsTranscodeSegmentDuration = 2 * time.Second
+	// FFmpeg may read four media seconds without pacing while preparing a
+	// generation. FFmpeg 8 limits catch-up after a stall to 4x, and every
+	// generation returns to the sustained 1x input rate after the allowance.
 	hlsInitialReadBurst = 4 * time.Second
-	hlsCatchupReadRate  = 8
+	hlsCatchupReadRate  = 4
 )
 
 func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex int, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
@@ -32,7 +34,11 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 	if segmentWindow <= 0 {
 		return "", nil, fmt.Errorf("segment window must be positive")
 	}
-	listSize := int(math.Ceil(float64(segmentWindow) / float64(hlsSegmentDuration)))
+	segmentDuration := hlsRemuxSegmentDuration
+	if plan.Kind == Transcode {
+		segmentDuration = hlsTranscodeSegmentDuration
+	}
+	listSize := int(math.Ceil(float64(segmentWindow) / float64(segmentDuration)))
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-y"}
 	if start > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
@@ -66,14 +72,14 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 		args = append(args,
 			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),
 			"-b:v", strconv.FormatInt(compatibilityVideoBitrate, 10), "-maxrate", strconv.FormatInt(compatibilityVideoBitrate, 10), "-bufsize", strconv.FormatInt(compatibilityVideoBitrate*2, 10),
-			"-force_key_frames", "expr:gte(t,n_forced*"+strconv.FormatFloat(hlsSegmentDuration.Seconds(), 'f', -1, 64)+")", "-sc_threshold", "0",
+			"-force_key_frames", "expr:gte(t,n_forced*"+strconv.FormatFloat(segmentDuration.Seconds(), 'f', -1, 64)+")", "-sc_threshold", "0",
 			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(compatibilityAudioBitrate, 10),
 		)
 	}
 	args = append(args,
 		"-f", "hls",
 		"-hls_segment_type", "fmp4",
-		"-hls_time", strconv.FormatFloat(hlsSegmentDuration.Seconds(), 'f', -1, 64),
+		"-hls_time", strconv.FormatFloat(segmentDuration.Seconds(), 'f', -1, 64),
 		"-hls_list_size", strconv.Itoa(listSize),
 		"-hls_delete_threshold", "2",
 		"-hls_flags", "delete_segments+independent_segments+temp_file",

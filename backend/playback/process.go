@@ -2,10 +2,12 @@ package playback
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // Process is the narrow process lifetime owned by a playback generation.
@@ -36,8 +38,7 @@ func (p execProcess) Wait() error                   { return p.cmd.Wait() }
 func (OSExecutor) Start(name string, args []string, stderr io.Writer) (Process, error) {
 	if name == "ffmpeg" {
 		ffmpegReadrateCatchupSupport.Do(func() {
-			output, err := exec.Command(name, "-hide_banner", "-h", "full").CombinedOutput()
-			ffmpegReadrateCatchupSupport.supported = err == nil && bytes.Contains(output, []byte("-readrate_catchup"))
+			ffmpegReadrateCatchupSupport.supported = detectFFmpegReadrateCatchup(name, time.Second)
 		})
 		// FFmpeg before 8 catches up an initial read burst without a separate
 		// rate option. Newer releases default catch-up to 1.05x, so they need
@@ -52,6 +53,13 @@ func (OSExecutor) Start(name string, args []string, stderr io.Writer) (Process, 
 		return nil, err
 	}
 	return execProcess{cmd: cmd}, nil
+}
+
+func detectFFmpegReadrateCatchup(name string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, name, "-hide_banner", "-h", "full").CombinedOutput()
+	return err == nil && bytes.Contains(output, []byte("-readrate_catchup"))
 }
 
 func ffmpegArgsForCatchupSupport(args []string, supported bool) []string {
