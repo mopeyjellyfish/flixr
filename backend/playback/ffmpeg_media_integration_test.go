@@ -702,8 +702,14 @@ func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
 			t.Fatalf("transcode rotated fixture: %v\n%s", err, stderr.String())
 		}
 	case <-ctx.Done():
+		timeoutErr := ctx.Err()
 		_ = process.Kill()
-		t.Fatalf("transcode rotated fixture: %v\n%s", ctx.Err(), stderr.String())
+		select {
+		case <-done:
+			t.Fatalf("transcode rotated fixture: %v\n%s", timeoutErr, stderr.String())
+		case <-time.After(time.Second):
+			t.Fatalf("transcode rotated fixture: %v; process did not exit after kill", timeoutErr)
+		}
 	}
 	rendered := probeAV(t, filepath.Join(outputDir, "index.m3u8"))
 	if rendered.Video.Width != 1080 || rendered.Video.Height != 1920 {
