@@ -53,8 +53,15 @@ The image currently requires GHCR access. If the pull is denied, use the
 ### 3. Open the setup screen
 
 Visit **http://localhost:8787**, or **http://YOUR-SERVER-IP:8787** from another device.
-Copy the one-time setup token from the logs, create your owner account, choose
-library folders and add a profile.
+Copy the one-time setup token from the logs and create your owner account. Choose
+**Start fresh**; existing-server import is reserved in the wizard for a later
+release. Setup saves each completed step, so closing the browser or restarting
+the container resumes without recreating the owner, libraries, or profile.
+
+Before saving libraries, use **Recheck folders and tools**. It verifies the
+container's data and playback-cache volumes, the media folders you entered, and
+the bundled FFmpeg tools. Errors show the exact container path and the Compose
+mount or permission to correct. These paths appear only after owner sign-in.
 
 Use paths inside the container: if your media folder contains `films/` and `tv/`,
 enter **`/media/films`** and **`/media/tv`** in setup.

@@ -4,14 +4,66 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 image="${1:?usage: compose-smoke.sh IMAGE}"
 name="flixr-compose-check-$$"
+fresh_name="$name-fresh"
 fixture="$(mktemp -d)"
 cleanup() {
+  docker compose -p "$fresh_name" -f compose.release.yml -f "$fixture/fresh-override.yml" down -v >/dev/null 2>&1 || true
   docker compose -p "$name" -f compose.release.yml -f "$fixture/override.yml" down -v >/dev/null 2>&1 || true
   rm -rf "$fixture"
 }
 trap cleanup EXIT
 mkdir -p "$fixture/media/films" "$fixture/media/tv"
 chmod 755 "$fixture" "$fixture/media" "$fixture/media/films" "$fixture/media/tv"
+# Complete the ordinary setup contract against untouched Compose volumes first.
+cat > "$fixture/fresh-override.yml" <<YAML
+services:
+  flixr:
+    image: $image
+    pull_policy: never
+YAML
+export FLIXR_MEDIA_DIR="$fixture/media" FLIXR_ENV_FILE="$fixture/fresh.env" FLIXR_PORT=0
+fresh_compose=(docker compose -p "$fresh_name" -f compose.release.yml -f "$fixture/fresh-override.yml")
+"${fresh_compose[@]}" up -d --wait >/dev/null
+fresh_port="$("${fresh_compose[@]}" port flixr 8787 | sed 's/.*://')"
+setup_token="$("${fresh_compose[@]}" logs flixr 2>&1 | sed -n 's/.*Flixr setup token: //p' | tail -1)"
+test -n "$setup_token"
+python3 - "$fresh_port" "$setup_token" <<'PY'
+import sys,json,urllib.request,http.cookiejar
+base='http://127.0.0.1:'+sys.argv[1]
+client=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+def request(path,data=None,method=None):
+    body=None if data is None else json.dumps(data).encode()
+    req=urllib.request.Request(base+'/api/v1'+path,body,{'Content-Type':'application/json','Origin':base},method=method)
+    return json.load(client.open(req))
+request('/setup/claim',{'token':sys.argv[2],'password':'fresh-compose-password'})
+assert request('/owner/setup',{'step':'libraries'},'PATCH')['step'] == 'libraries'
+setup=request('/owner/setup?films=%2Fmedia%2Ffilms&tv=%2Fmedia%2Ftv')
+checks={check['id']:check for check in setup['checks']}
+for key in ['data','cache','films','tv','ffprobe','ffmpeg']:
+    assert checks[key]['state'] == 'ready', checks[key]
+assert checks['data']['path'] == '/config'
+assert checks['cache']['path'] == '/cache/segments'
+assert checks['films']['path'] == '/media/films'
+assert checks['tv']['path'] == '/media/tv'
+assert request('/owner/setup',{'step':'profile'},'PATCH')['step'] == 'profile'
+PY
+"${fresh_compose[@]}" up -d --force-recreate --wait >/dev/null
+fresh_port="$("${fresh_compose[@]}" port flixr 8787 | sed 's/.*://')"
+python3 - "$fresh_port" <<'PY'
+import sys,json,urllib.request,http.cookiejar
+base='http://127.0.0.1:'+sys.argv[1]
+client=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+def request(path,data=None):
+    body=None if data is None else json.dumps(data).encode()
+    req=urllib.request.Request(base+'/api/v1'+path,body,{'Content-Type':'application/json','Origin':base})
+    return json.load(client.open(req))
+request('/owner/login',{'password':'fresh-compose-password'})
+assert request('/owner/setup')['step'] == 'profile'
+assert request('/owner/roots') == {'films':'','tv':''}
+assert request('/profiles')['profiles'] == []
+PY
+"${fresh_compose[@]}" down -v >/dev/null
+
 printf '%s\n' 'compose-test-password' > "$fixture/password"
 chmod 644 "$fixture/password"
 cat > "$fixture/settings.env" <<'ENV'
@@ -76,4 +128,4 @@ with urllib.request.urlopen(req, context=ssl.create_default_context(cafile=sys.a
     cookie=response.headers['Set-Cookie']
     assert response.status == 200 and all(flag in cookie for flag in ['Secure','HttpOnly','SameSite=Strict'])
 PYTHON
-echo 'Compose env_file, secrets, provisioning, persistence and trusted HTTPS checks passed.'
+echo 'Fresh resumable setup, Compose env_file, secrets, provisioning, persistence and trusted HTTPS checks passed.'

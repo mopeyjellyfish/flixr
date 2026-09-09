@@ -38,6 +38,9 @@ type Server struct {
 	screens           *screens.Manager
 	mux               *http.ServeMux
 	lookPath          func(string) (string, error)
+	toolProbe         func(context.Context, string) bool
+	pathProbe         func(string, bool) setupPathState
+	readinessTimeout  time.Duration
 	readyMu           sync.RWMutex
 	progressLocksMu   sync.Mutex
 	progressLocks     map[string]*progressLock
@@ -107,7 +110,7 @@ func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playba
 	if locks == nil {
 		locks = map[string]bool{}
 	}
-	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}, progressLocks: map[string]*progressLock{}}
+	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, toolProbe: probeSetupTool, pathProbe: probeSetupPath, readinessTimeout: 2 * time.Second, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}, progressLocks: map[string]*progressLock{}}
 	s.checkReadiness()
 	s.routes()
 	return s
@@ -116,6 +119,8 @@ func (s *Server) Handler() http.Handler { return s.observe(s.mux) }
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/setup/status", s.status)
 	s.mux.HandleFunc("POST /api/v1/setup/claim", s.claim)
+	s.mux.HandleFunc("GET /api/v1/owner/setup", s.ownerSetup)
+	s.mux.HandleFunc("PATCH /api/v1/owner/setup", s.ownerSetup)
 	s.mux.HandleFunc("POST /api/v1/owner/login", s.login)
 	s.mux.HandleFunc("POST /api/v1/logout", s.logout)
 	s.mux.HandleFunc("POST /api/v1/profiles", s.createProfile)
@@ -238,10 +243,10 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	write(w, 200, map[string]any{"claimed": s.house.Claimed(), "readiness": ready, "metadata": s.metadataStatus(), "demo": s.catalog.Demo(), "demo_source": s.catalog.DemoSource()})
 }
 func (s *Server) checkReadiness() {
-	_, p := s.lookPath("ffprobe")
-	_, f := s.lookPath("ffmpeg")
+	_, probeErr := s.lookPath("ffprobe")
+	_, ffmpegErr := s.lookPath("ffmpeg")
 	s.readyMu.Lock()
-	s.readiness = Readiness{p == nil, f == nil}
+	s.readiness = Readiness{probeErr == nil, ffmpegErr == nil}
 	s.readyMu.Unlock()
 }
 func (s *Server) recheckReadiness(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +289,7 @@ func (s *Server) claim(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	_ = s.catalog.SetSetupProgress(catalog.SetupProgressChoice)
 	s.cookie(w, r, x)
 	write(w, 201, map[string]bool{"claimed": true})
 }
@@ -383,6 +389,7 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	_ = s.catalog.SetSetupProgress(catalog.SetupProgressComplete)
 	write(w, 201, p)
 }
 func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
@@ -662,6 +669,9 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		}
 		fail(w, 400, "invalid_roots")
 		return
+	}
+	if step, err := s.catalog.SetupProgress(); err == nil && step != catalog.SetupProgressComplete {
+		_ = s.catalog.SetSetupProgress(catalog.SetupProgressProfile)
 	}
 	write(w, 200, map[string]bool{"saved": true})
 }

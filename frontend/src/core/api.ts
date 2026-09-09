@@ -1,5 +1,8 @@
 export type Readiness = { ffprobe: boolean; ffmpeg: boolean };
 export type SetupStatus = { claimed: boolean; readiness: Readiness; metadata: TMDBSettings; demo?: boolean; demo_source?: string };
+export type SetupStep = 'choice' | 'libraries' | 'profile' | 'complete';
+export type SetupCheck = { id: 'data' | 'cache' | 'films' | 'tv' | 'ffprobe' | 'ffmpeg'; label: string; state: 'ready' | 'not_configured' | 'missing' | 'not_directory' | 'unreadable' | 'unwritable' | 'unavailable'; path?: string; message: string; action?: string };
+export type OwnerSetup = { step: SetupStep; checks: SetupCheck[] };
 export type Profile = { id: string; name: string; protected: boolean; avatar?: string };
 export type ActiveSession = { id: string; subject: string; expires_at: number };
 export type CatalogItem = {

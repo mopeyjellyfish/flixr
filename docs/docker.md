@@ -26,6 +26,17 @@ are omitted. Use `/media/films` and `/media/tv` for a host folder with those chi
 Only one root per media kind is currently supported; several disks can be mounted
 under subdirectories of that root.
 
+The wizard saves its current step after the owner is claimed. A browser close or
+container restart returns to the saved choice, libraries, or profile step without
+creating duplicates. **Recheck folders and tools** tests `/config`, the resolved
+playback cache, the entered read-only media paths, and FFmpeg/ffprobe inside the
+container. A missing path usually means the host folder was mounted somewhere
+other than the container path you entered. An unreadable path needs read and
+directory-traversal permission for the container user; `/config` and the playback
+cache also need write permission. Correct the Compose mount or host permissions,
+then recheck. The detailed paths and actions require an owner session and are not
+returned by the public setup status endpoint.
+
 Set `FLIXR_VERSION=v0.1.0` (replace with an available release) to pin a release.
 `latest` follows successful releases. For reproducible deployments, use the image's
 registry digest in the Compose `image` field.
