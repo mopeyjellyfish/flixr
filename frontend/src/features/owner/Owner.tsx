@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type ScanJob, type ScanPolicy, type TMDBSettings } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type ProfileAccessPolicy, type Readiness, type Scan, type ScanJob, type ScanPolicy, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -276,7 +276,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
-            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} /><SessionManager /></div>
+            <div className="owner-columns"><ProfileForm name={name} pin={pin} onNameChange={setName} onPinChange={setPin} onSubmit={create} /><ProfileManager version={profilesVersion} libraries={libraries} /><SessionManager /></div>
           </section>
           <section id="playback" className="owner-section" aria-labelledby="playback-title">
             <h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p>
@@ -489,7 +489,7 @@ function ProfileForm({ name, pin, onNameChange, onPinChange, onSubmit }: { name:
   );
 }
 
-export function ProfileManager({ version = 0 }: { version?: number }) {
+export function ProfileManager({ version = 0, libraries = [] }: { version?: number; libraries?: Library[] }) {
   const [profiles, setProfiles] = useState<{ id: string; name: string; protected: boolean }[]>([]);
   const [notice, setNotice] = useState('');
   const load = () => api.profiles().then((value) => setProfiles(value.profiles)).catch(() => setNotice('Profiles are unavailable.'));
@@ -499,12 +499,12 @@ export function ProfileManager({ version = 0 }: { version?: number }) {
     <section>
       <h2>Manage profiles</h2>
       {notice && <p role="status">{notice}</p>}
-      {profiles.map((profile) => <ProfileRow key={profile.id} profile={profile} onSaved={load} onNotice={setNotice} />)}
+      {profiles.map((profile) => <ProfileRow key={profile.id} profile={profile} libraries={libraries} onSaved={load} onNotice={setNotice} />)}
     </section>
   );
 }
 
-function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; name: string; protected: boolean }; onSaved: () => void; onNotice: (value: string) => void }) {
+function ProfileRow({ profile, libraries, onSaved, onNotice }: { profile: { id: string; name: string; protected: boolean }; libraries: Library[]; onSaved: () => void; onNotice: (value: string) => void }) {
   const [name, setName] = useState(profile.name);
   const [pin, setPin] = useState('');
   const [deleting, setDeleting] = useState(false);
@@ -521,7 +521,8 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
   };
 
   return (
-    <PendingForm className="owner-profile-row" onSubmit={save}>
+    <div className="owner-profile-row">
+    <PendingForm onSubmit={save}>
       <strong><Avatar name={profile.name} />{profile.name} {profile.protected ? '· PIN protected' : '· no PIN'}</strong>
       <label>Profile name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>New PIN<input type="password" value={pin} onChange={(event) => setPin(event.target.value)} /></label>
@@ -535,7 +536,65 @@ function ProfileRow({ profile, onSaved, onNotice }: { profile: { id: string; nam
         {profile.protected && <button type="button" onClick={() => void api.updateProfile(profile.id, { unprotect: true }).then(onSaved).catch((error) => onNotice(error instanceof ApiError ? error.message : 'Unable to remove PIN.'))}>Remove PIN</button>}
       </div>
     </PendingForm>
+    <AccessPolicyForm profile={profile} libraries={libraries} onNotice={onNotice} />
+    </div>
   );
+}
+
+const ratingOptions: Record<'GB' | 'US', string[]> = {
+  GB: ['U', 'PG', '12', '12A', '15', '18', 'R18'],
+  US: ['G', 'TV-Y', 'TV-Y7', 'TV-G', 'PG', 'TV-PG', 'PG-13', 'TV-14', 'R', 'TV-MA', 'NC-17'],
+};
+
+function AccessPolicyForm({ profile, libraries, onNotice }: { profile: { id: string; name: string }; libraries: Library[]; onNotice: (value: string) => void }) {
+  const [policy, setPolicy] = useState<ProfileAccessPolicy>();
+  const [selectedLibraries, setSelectedLibraries] = useState(false);
+  const [allowTags, setAllowTags] = useState('');
+  const [denyTags, setDenyTags] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api.profileAccessPolicy(profile.id).then((loaded) => {
+      if (!active) return;
+      setPolicy(loaded);
+      setSelectedLibraries(loaded.library_ids.length > 0);
+      setAllowTags(loaded.allow_tags.join(', '));
+      setDenyTags(loaded.deny_tags.join(', '));
+    }).catch((error) => { if (active) onNotice(error instanceof ApiError ? error.message : 'Content access is unavailable.'); });
+    return () => { active = false; };
+  }, [profile.id, onNotice]);
+  if (!policy) return <p>Loading content access…</p>;
+  const tags = (value: string) => [...new Set(value.split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+  const save = async () => {
+    try {
+      const updated = await api.saveProfileAccessPolicy(profile.id, {
+        library_ids: selectedLibraries ? policy.library_ids : [],
+        rating_region: policy.rating_region,
+        max_rating: policy.rating_region ? policy.max_rating : '',
+        unrated_policy: policy.unrated_policy,
+        allow_tags: tags(allowTags),
+        deny_tags: tags(denyTags),
+      });
+      setPolicy(updated);
+      onNotice('Content access updated. Devices using this profile must choose it again.');
+    } catch (error) {
+      onNotice(error instanceof ApiError ? error.message : 'Unable to save content access.');
+    }
+  };
+  const toggleLibrary = (id: string, checked: boolean) => setPolicy((current) => current ? { ...current, library_ids: checked ? [...current.library_ids, id] : current.library_ids.filter((value) => value !== id) } : current);
+  return <fieldset aria-label={`Content access for ${profile.name}`}>
+    <legend>Content access</legend>
+    <p>Library, rating, and tag rules apply to browsing, artwork, playback, and local screens.</p>
+    <label><input type="radio" name={`libraries-${profile.id}`} checked={!selectedLibraries} onChange={() => setSelectedLibraries(false)} /> All libraries, including new ones</label>
+    <label><input type="radio" name={`libraries-${profile.id}`} checked={selectedLibraries} onChange={() => setSelectedLibraries(true)} /> Only selected libraries</label>
+    {libraries.map((library) => <label key={library.id}><input type="checkbox" disabled={!selectedLibraries} checked={policy.library_ids.includes(library.id)} onChange={(event) => toggleLibrary(library.id, event.target.checked)} />{library.name}</label>)}
+    {selectedLibraries && policy.library_ids.length === 0 && <p role="alert">Choose at least one library.</p>}
+    <label>Rating region<select value={policy.rating_region} onChange={(event) => { const region = event.target.value as ProfileAccessPolicy['rating_region']; setPolicy({ ...policy, rating_region: region, max_rating: region ? ratingOptions[region][0] : '' }); }}><option value="">No rating limit</option><option value="GB">United Kingdom</option><option value="US">United States</option></select></label>
+    {policy.rating_region && <><label>Maximum rating<select value={policy.max_rating} onChange={(event) => setPolicy({ ...policy, max_rating: event.target.value })}>{ratingOptions[policy.rating_region].map((rating) => <option key={rating}>{rating}</option>)}</select></label><label>Unrated titles<select value={policy.unrated_policy} onChange={(event) => setPolicy({ ...policy, unrated_policy: event.target.value as ProfileAccessPolicy['unrated_policy'] })}><option value="allow">Allow</option><option value="deny">Block</option></select></label><p>Unknown ratings are blocked when a rating limit is active.</p></>}
+    <label>Allowed tags<input value={allowTags} placeholder="family, animation" onChange={(event) => setAllowTags(event.target.value)} /></label>
+    <label>Blocked tags<input value={denyTags} placeholder="scary" onChange={(event) => setDenyTags(event.target.value)} /></label>
+    <p>Blocked tags always win. Allowed tags never override a library or rating limit.</p>
+    <button type="button" disabled={selectedLibraries && policy.library_ids.length === 0} onClick={() => void save()}>Save content access</button>
+  </fieldset>;
 }
 
 function SessionManager() {

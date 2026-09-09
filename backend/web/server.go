@@ -127,6 +127,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
 	s.mux.HandleFunc("PATCH /api/v1/profiles/{id}", s.updateProfile)
 	s.mux.HandleFunc("DELETE /api/v1/profiles/{id}", s.deleteProfile)
+	s.mux.HandleFunc("GET /api/v1/owner/profiles/{id}/access-policy", s.profileAccessPolicy)
+	s.mux.HandleFunc("PUT /api/v1/owner/profiles/{id}/access-policy", s.profileAccessPolicy)
 	s.mux.HandleFunc("GET /api/v1/owner/sessions", s.sessions)
 	s.mux.HandleFunc("DELETE /api/v1/owner/sessions/{id}", s.revokeSession)
 	s.mux.HandleFunc("POST /api/v1/profiles/{id}/select", s.selectProfile)
@@ -353,6 +355,7 @@ func (s *Server) owner(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 func (s *Server) profile(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if !s.sameOrigin(w, r) {
 		return false
 	}
@@ -530,11 +533,16 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_pagination")
 		return
 	}
-	items, total, err := s.catalog.Browse("", o, l)
+	items, _, err := s.catalog.Browse("", 0, 0)
+	if err == nil {
+		items, err = s.filterBrowse(r, items)
+	}
 	if err != nil {
 		fail(w, 500, "catalog_query_failed")
 		return
 	}
+	total := len(items)
+	items = browsePage(items, o, l)
 	write(w, 200, map[string]any{"items": items, "total": total, "next": nextPage(o, l, total)})
 }
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
@@ -546,15 +554,33 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_pagination")
 		return
 	}
-	items, total, err := s.catalog.Browse(r.URL.Query().Get("q"), o, l)
+	items, _, err := s.catalog.Browse(r.URL.Query().Get("q"), 0, 0)
+	if err == nil {
+		items, err = s.filterBrowse(r, items)
+	}
 	if err != nil {
 		fail(w, 500, "catalog_query_failed")
 		return
 	}
+	total := len(items)
+	items = browsePage(items, o, l)
 	write(w, 200, map[string]any{"items": items, "total": total, "next": nextPage(o, l, total)})
+}
+func browsePage(items []catalog.Item, offset, limit int) []catalog.Item {
+	if offset >= len(items) {
+		return []catalog.Item{}
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[offset:end]
 }
 func (s *Server) film(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
+		return
+	}
+	if !s.publicContent(w, r, "film", r.PathValue("id")) {
 		return
 	}
 	v, ok := s.catalog.Item(r.PathValue("id"))
@@ -568,15 +594,42 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return
 	}
+	if !s.publicContent(w, r, "series", r.PathValue("id")) {
+		return
+	}
 	v, ok := s.catalog.Series(r.PathValue("id"))
 	if !ok {
 		fail(w, 404, "catalog_not_found")
 		return
 	}
+	for seasonIndex := range v.Seasons {
+		episodes := v.Seasons[seasonIndex].Episodes[:0]
+		for _, episode := range v.Seasons[seasonIndex].Episodes {
+			allowed, err := s.itemAllowed(r, episode.ID)
+			if err != nil {
+				fail(w, http.StatusInternalServerError, "catalog_query_failed")
+				return
+			}
+			if allowed {
+				episodes = append(episodes, episode)
+			}
+		}
+		v.Seasons[seasonIndex].Episodes = episodes
+	}
+	seasons := v.Seasons[:0]
+	for _, season := range v.Seasons {
+		if len(season.Episodes) > 0 {
+			seasons = append(seasons, season)
+		}
+	}
+	v.Seasons = seasons
 	write(w, http.StatusOK, v)
 }
 func (s *Server) item(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
+		return
+	}
+	if !s.publicItem(w, r, r.PathValue("id")) {
 		return
 	}
 	v, ok := s.catalog.Item(r.PathValue("id"))
@@ -590,8 +643,21 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
 		return
 	}
+	id := r.PathValue("id")
+	allowed, err := s.itemAllowed(r, id)
+	if err == nil && !allowed {
+		allowed, err = s.contentAllowed(r, "series", id)
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	if !allowed {
+		fail(w, http.StatusNotFound, "catalog_artwork_not_found")
+		return
+	}
 	width, _ := strconv.Atoi(r.URL.Query().Get("w"))
-	data, contentType, err := s.catalog.ArtworkSized(r.Context(), r.PathValue("id"), r.PathValue("kind"), width)
+	data, contentType, err := s.catalog.ArtworkSized(r.Context(), id, r.PathValue("kind"), width)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
@@ -601,14 +667,16 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Artwork is refreshed at a stable catalog URL, so a browser must revalidate it.
-	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
 
 func (s *Server) progress(w http.ResponseWriter, r *http.Request) {
 	if !s.profile(w, r) {
+		return
+	}
+	if !s.publicItem(w, r, r.PathValue("id")) {
 		return
 	}
 	if r.Method == http.MethodGet {

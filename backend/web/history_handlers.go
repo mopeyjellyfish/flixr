@@ -28,10 +28,38 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	page, err := s.house.History(p.ID, limit, r.URL.Query().Get("before"))
-	if err != nil {
+	if limit == 0 {
+		limit = 25
+	}
+	if limit < 1 || limit > 100 {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
+	}
+	cursor := r.URL.Query().Get("before")
+	page := household.HistoryPage{Events: []household.ViewingEvent{}}
+	for len(page.Events) < limit {
+		candidate, err := s.house.History(p.ID, 1, cursor)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if len(candidate.Events) == 0 {
+			break
+		}
+		cursor = candidate.Next
+		allowed, err := s.itemAllowed(r, candidate.Events[0].CatalogID)
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "catalog_query_failed")
+			return
+		}
+		if allowed {
+			page.Events = append(page.Events, candidate.Events[0])
+			page.Next = cursor
+		}
+		if cursor == "" {
+			page.Next = ""
+			break
+		}
 	}
 	write(w, http.StatusOK, page)
 }
@@ -41,6 +69,9 @@ func (s *Server) rating(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := s.house.Profile(s.session(r))
 	id := r.PathValue("id")
+	if !s.publicItem(w, r, id) {
+		return
+	}
 	if r.Method == http.MethodGet {
 		rating, ok, err := s.house.Rating(p.ID, id)
 		if err != nil {
@@ -115,6 +146,9 @@ func (s *Server) importHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := s.house.Profile(s.session(r))
 	for _, event := range body.Events {
+		if !s.publicItem(w, r, event.CatalogID) {
+			return
+		}
 		event.Provenance = household.ProvenanceImport
 		if err := s.house.RecordViewingEvent(p.ID, event); err != nil {
 			fail(w, http.StatusBadRequest, "invalid_request")

@@ -16,6 +16,7 @@ import (
 
 	"database/sql"
 
+	"github.com/mopeyjellyfish/flixr/backend/access"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 	"golang.org/x/crypto/argon2"
 )
@@ -76,6 +77,7 @@ type profile struct {
 	lockedUntil   time.Time
 	audioLanguage string
 	subtitle      SubtitlePreference
+	policy        access.Policy
 }
 
 func random() (string, error) {
@@ -124,6 +126,17 @@ func Open(db *sqlite.DB) (*Manager, error) {
 		p.subtitle.PreferSDH = preferSDH != 0
 		p.Protected = len(p.hash) > 0
 		p.lockedUntil = time.Unix(locked, 0)
+		if m.db != nil {
+			var libraries, region, rating, unrated, allowTags, denyTags string
+			var version int64
+			if err := m.db.QueryRow(`SELECT library_ids_json,rating_region,max_rating,unrated_policy,allow_tags_json,deny_tags_json,version FROM profile_access_policies WHERE profile_id=?`, p.ID).Scan(&libraries, &region, &rating, &unrated, &allowTags, &denyTags, &version); err != nil {
+				return nil, fmt.Errorf("load profile access policy: %w", err)
+			}
+			p.policy, err = scanPolicy(libraries, region, rating, unrated, allowTags, denyTags, version)
+			if err != nil {
+				return nil, err
+			}
+		}
 		m.profiles[p.ID] = p
 	}
 	return m, rows.Err()
@@ -394,7 +407,9 @@ func (m *Manager) CreateProfile(name, pin string) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
-	p := profile{Profile: Profile{ID: id, Name: name, Protected: pin != ""}}
+	policy := access.Unrestricted()
+	policy.Version = 1
+	p := profile{Profile: Profile{ID: id, Name: name, Protected: pin != ""}, policy: policy}
 	if pin != "" {
 		p.salt, err = salt()
 		if err != nil {

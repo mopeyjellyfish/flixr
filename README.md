@@ -74,6 +74,7 @@ FlixR's saved data.
 
 - [Docker configuration, volumes, updates and backups](docs/docker.md)
 - [Build from source, run the demo and contribute](docs/development.md)
+- [Configure per-profile library, rating and tag access](docs/profile-access.md)
 - [Contributing](CONTRIBUTING.md), [support](SUPPORT.md), and [security reporting](SECURITY.md)
 - [Release process and versioning](docs/releases.md)
 - [Roadmap](https://github.com/mopeyjellyfish/flixr/issues/104)

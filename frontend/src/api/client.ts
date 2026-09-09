@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type ProfileAccessPolicy, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -26,6 +26,8 @@ export const api = {
   createProfile: (name: string, pin: string) => request<Profile>('/profiles', { method: 'POST', body: JSON.stringify({ name, pin }) }),
   updateProfile: (id: string, data: { name?: string; pin?: string; unprotect?: boolean }) => request<Profile>(`/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteProfile: (id: string) => request<{ deleted: boolean }>(`/profiles/${id}`, { method: 'DELETE' }),
+  profileAccessPolicy: (id: string) => request<ProfileAccessPolicy>(`/owner/profiles/${encodeURIComponent(id)}/access-policy`),
+  saveProfileAccessPolicy: (id: string, policy: Omit<ProfileAccessPolicy, 'version'>) => request<ProfileAccessPolicy>(`/owner/profiles/${encodeURIComponent(id)}/access-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
   activeSessions: () => request<{ sessions: ActiveSession[] }>('/owner/sessions'),
   revokeSession: (id: string) => request<{ revoked: boolean }>(`/owner/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   selectProfile: (id: string, pin = '') => request(`/profiles/${id}/select`, { method: 'POST', body: JSON.stringify({ pin }) }),

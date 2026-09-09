@@ -27,6 +27,16 @@ type EpisodeSequence struct {
 // numeric order. The private sequence context keeps advancement within the
 // current root and edition/version directory.
 func (c *Catalog) EpisodeAfter(profileID, currentID string, includeSpecials bool) (EpisodeSequence, error) {
+	return c.episodeAfter(profileID, currentID, includeSpecials, nil)
+}
+
+// EpisodeAfterAllowed applies profile visibility before calculating sequence
+// state, so a hidden episode cannot appear in Next Up or affect its counts.
+func (c *Catalog) EpisodeAfterAllowed(profileID, currentID string, includeSpecials bool, allowed func(Item) (bool, error)) (EpisodeSequence, error) {
+	return c.episodeAfter(profileID, currentID, includeSpecials, allowed)
+}
+
+func (c *Catalog) episodeAfter(profileID, currentID string, includeSpecials bool, allowed func(Item) (bool, error)) (EpisodeSequence, error) {
 	c.mu.RLock()
 	current, ok := c.items[currentID]
 	items := make([]Item, 0, len(c.items))
@@ -58,6 +68,15 @@ func (c *Catalog) EpisodeAfter(profileID, currentID string, includeSpecials bool
 		}
 		if item.Season < 0 || (item.Season == 0 && !includeSpecials) || compareEpisode(item, current) <= 0 {
 			continue
+		}
+		if allowed != nil {
+			visible, err := allowed(item)
+			if err != nil {
+				return EpisodeSequence{}, err
+			}
+			if !visible {
+				continue
+			}
 		}
 		hasLaterEpisode = true
 		if episodeSequenceContext(item) != contextKey {

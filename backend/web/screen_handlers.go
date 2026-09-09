@@ -159,6 +159,13 @@ func (s *Server) screenControl(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusPolicyViolation, "unsupported protocol")
 			return
 		}
+		if message.Type == "play" {
+			allowed, accessErr := s.itemAllowed(r, message.CatalogID)
+			if accessErr != nil || !allowed {
+				_ = conn.Close(websocket.StatusPolicyViolation, "content access denied")
+				return
+			}
+		}
 		_, err = s.screens.Control(authority, profileID, screens.Command{Type: message.Type, CatalogID: message.CatalogID, PositionMS: message.PositionMS}, time.Now())
 		if err != nil {
 			_ = conn.Close(websocket.StatusPolicyViolation, "screen authority ended")

@@ -75,7 +75,44 @@ func TestScreenWebSocketRequiresProfileAndSameOrigin(t *testing.T) {
 	require.NotErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestScreenControlRejectsPlayForContentOutsideProfilePolicy(t *testing.T) {
+	house := newHousehold(t)
+	manager := screens.New(time.Minute)
+	server := httptest.NewServer(web.NewServerWithScreens(house, catalog.New(), playback.NewDirectManager(), manager).Handler())
+	defer server.Close()
+
+	client, profileCookie := screenProfileClientWithPolicy(t, server.URL, house, `{"library_ids":["kids"],"unrated_policy":"allow","allow_tags":[],"deny_tags":[]}`)
+	advertise := postJSON(t, client, server.URL+"/api/v1/screens/presence", `{"name":"Living room"}`)
+	require.Equal(t, http.StatusCreated, advertise.StatusCode)
+	var presence struct {
+		Screen screens.Screen `json:"screen"`
+		Ticket string         `json:"ticket"`
+	}
+	require.NoError(t, json.NewDecoder(advertise.Body).Decode(&presence))
+	ctx := t.Context()
+	receiver, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/v1/screens/receiver?ticket="+presence.Ticket, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{profileCookie}, "Origin": []string{server.URL}}})
+	require.NoError(t, err)
+	defer receiver.CloseNow()
+	authorized := postJSON(t, client, server.URL+"/api/v1/screens/"+presence.Screen.ID+"/sessions", `{}`)
+	require.Equal(t, http.StatusCreated, authorized.StatusCode)
+	var session screens.Session
+	require.NoError(t, json.NewDecoder(authorized.Body).Decode(&session))
+	control, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/v1/screens/control?token="+session.Token, &websocket.DialOptions{HTTPHeader: http.Header{"Cookie": []string{profileCookie}, "Origin": []string{server.URL}}})
+	require.NoError(t, err)
+	defer control.CloseNow()
+	require.NoError(t, control.Write(ctx, websocket.MessageText, []byte(`{"version":1,"type":"play","catalog_id":"adult-film","position_ms":42}`)))
+	deadline, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, _, err = control.Read(deadline)
+	require.Error(t, err)
+	assert.Equal(t, websocket.StatusPolicyViolation, websocket.CloseStatus(err))
+}
+
 func screenProfileClient(t *testing.T, base string, house interface{ SetupToken() string }) (*http.Client, string) {
+	return screenProfileClientWithPolicy(t, base, house, "")
+}
+
+func screenProfileClientWithPolicy(t *testing.T, base string, house interface{ SetupToken() string }, policy string) (*http.Client, string) {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
@@ -86,6 +123,15 @@ func screenProfileClient(t *testing.T, base string, house interface{ SetupToken(
 		ID string `json:"id"`
 	}
 	require.NoError(t, json.NewDecoder(created.Body).Decode(&profile))
+	if policy != "" {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, base+"/api/v1/owner/profiles/"+profile.ID+"/access-policy", bytes.NewBufferString(policy))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		updated, err := client.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, updated.StatusCode)
+		updated.Body.Close()
+	}
 	selected := postJSON(t, client, base+"/api/v1/profiles/"+profile.ID+"/select", `{"pin":""}`)
 	require.Equal(t, http.StatusOK, selected.StatusCode)
 	cookies := client.Jar.Cookies(selected.Request.URL)
