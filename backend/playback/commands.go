@@ -11,7 +11,13 @@ import (
 	"time"
 )
 
-const hlsSegmentDuration = 4 * time.Second
+const (
+	hlsSegmentDuration = 2 * time.Second
+	// FFmpeg may read four media seconds at up to 8x while preparing a
+	// generation, then returns to the sustained 1x input rate.
+	hlsInitialReadBurst = 4 * time.Second
+	hlsCatchupReadRate  = 8
+)
 
 func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex int, outputDir string, start, segmentWindow time.Duration) (string, []string, error) {
 	if _, err := validatedLoopbackURL(inputURL); err != nil {
@@ -31,7 +37,7 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 	if start > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
 	}
-	args = append(args, "-re", "-i", inputURL)
+	args = append(args, ffmpegPacedInput(inputURL)...)
 	audioInput := 0
 	if audioInputURL != "" {
 		if _, err := validatedLoopbackURL(audioInputURL); err != nil {
@@ -40,7 +46,7 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 		if start > 0 {
 			args = append(args, "-ss", strconv.FormatFloat(start.Seconds(), 'f', 3, 64))
 		}
-		args = append(args, "-re", "-i", audioInputURL)
+		args = append(args, ffmpegPacedInput(audioInputURL)...)
 		audioInput = 1
 	}
 	audioMap := fmt.Sprintf("%d:a:0?", audioInput)
@@ -60,7 +66,7 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 		args = append(args,
 			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),
 			"-b:v", strconv.FormatInt(compatibilityVideoBitrate, 10), "-maxrate", strconv.FormatInt(compatibilityVideoBitrate, 10), "-bufsize", strconv.FormatInt(compatibilityVideoBitrate*2, 10),
-			"-force_key_frames", "expr:gte(t,n_forced*4)", "-sc_threshold", "0",
+			"-force_key_frames", "expr:gte(t,n_forced*"+strconv.FormatFloat(hlsSegmentDuration.Seconds(), 'f', -1, 64)+")", "-sc_threshold", "0",
 			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(compatibilityAudioBitrate, 10),
 		)
 	}
@@ -82,6 +88,15 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 		}
 	}
 	return "ffmpeg", args, nil
+}
+
+func ffmpegPacedInput(inputURL string) []string {
+	return []string{
+		"-readrate", "1",
+		"-readrate_initial_burst", strconv.FormatFloat(hlsInitialReadBurst.Seconds(), 'f', -1, 64),
+		"-readrate_catchup", strconv.Itoa(hlsCatchupReadRate),
+		"-i", inputURL,
+	}
 }
 
 func validatedLoopbackURL(value string) (*url.URL, error) {
