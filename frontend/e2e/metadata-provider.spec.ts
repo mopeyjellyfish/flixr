@@ -17,6 +17,8 @@ test('automatic normal-mode metadata survives reverse-proxy restart offline', as
   await page.getByLabel(/setup token/i).fill(config.setup_token);
   await page.getByLabel(/owner password/i).fill('metadata-acceptance-password');
   await page.getByRole('button', { name: /secure this server/i }).click();
+  await expect(page.getByRole('heading', { name: /how would you like to begin/i })).toBeVisible();
+  await page.getByRole('button', { name: /start fresh/i }).click();
   await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
 	await expect(page.getByText(/automatic TMDB access is available/i)).toBeVisible();
   await page.getByLabel(/films library/i).fill(config.films);
