@@ -78,6 +78,9 @@ func (d *DB) Exec(query string, args ...any) (sql.Result, error) {
 	return d.writer.Exec(query, args...)
 }
 func (d *DB) Begin() (*sql.Tx, error) { return d.writer.Begin() }
+func (d *DB) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return d.writer.BeginTx(ctx, nil)
+}
 func (d *DB) Query(query string, args ...any) (*sql.Rows, error) {
 	return d.reader.Query(query, args...)
 }

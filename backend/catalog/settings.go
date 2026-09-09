@@ -120,34 +120,72 @@ func (c *Catalog) metadataCredentialRevisionLocked() string {
 // MetadataRefreshDue reports whether an existing configured library needs one
 // bounded provider scan for a new credential or cache-renewal interval.
 func (c *Catalog) MetadataRefreshDue() bool {
+	return c.metadataRefreshDueFor(nil, true)
+}
+
+func (c *Catalog) metadataRefreshDueFor(requested map[string]bool, honorRetryWait bool) bool {
 	c.mu.RLock()
 	revision := c.metadataCredentialRevisionLocked()
-	hasRoot := c.film != "" || c.tv != ""
 	db := c.db
 	attempted, attemptedAt := c.metadataRefreshAttemptedRevision, c.metadataRefreshAttemptedAt
 	c.mu.RUnlock()
-	if revision == "" || !hasRoot || db == nil {
+	if revision == "" || db == nil {
 		return false
 	}
-	if revision == attempted && time.Since(attemptedAt) < metadataRefreshRetryWait {
+	if honorRetryWait && revision == attempted && time.Since(attemptedAt) < metadataRefreshRetryWait {
 		return false
 	}
-	var savedRevision, refreshedAt string
-	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_credential_revision'").Scan(&savedRevision); err != nil && err != sql.ErrNoRows {
-		return true
+	libraries, err := c.configuredLibraryIDs(requested)
+	if err != nil || len(libraries) == 0 {
+		return err != nil
 	}
-	if savedRevision != revision {
-		return true
+	for _, libraryID := range libraries {
+		var savedRevision, refreshedAt string
+		if err := db.QueryRow("SELECT value FROM settings WHERE key=?", metadataRevisionKey(libraryID)).Scan(&savedRevision); err != nil && err != sql.ErrNoRows {
+			return true
+		}
+		if savedRevision != revision {
+			return true
+		}
+		if err := db.QueryRow("SELECT value FROM settings WHERE key=?", metadataRefreshedAtKey(libraryID)).Scan(&refreshedAt); err != nil {
+			return true
+		}
+		unix, err := strconv.ParseInt(refreshedAt, 10, 64)
+		if err != nil || time.Since(time.Unix(unix, 0)) >= metadataRefreshMaxAge {
+			return true
+		}
 	}
-	if err := db.QueryRow("SELECT value FROM settings WHERE key='metadata_refreshed_at'").Scan(&refreshedAt); err != nil {
-		return true
-	}
-	unix, err := strconv.ParseInt(refreshedAt, 10, 64)
-	return err != nil || time.Since(time.Unix(unix, 0)) >= metadataRefreshMaxAge
+	return false
 }
 
-func (c *Catalog) recordMetadataRefresh(revision string) {
+func metadataRevisionKey(libraryID string) string    { return "metadata_credential_revision:" + libraryID }
+func metadataRefreshedAtKey(libraryID string) string { return "metadata_refreshed_at:" + libraryID }
+
+func (c *Catalog) configuredLibraryIDs(requested map[string]bool) ([]string, error) {
+	rows, err := c.db.Query(`SELECT DISTINCT l.id FROM libraries l JOIN library_locations x ON x.library_id=l.id WHERE x.root_path<>'' ORDER BY l.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if len(requested) == 0 || requested[id] {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+func (c *Catalog) recordMetadataRefresh(revision string, requested map[string]bool, scanID string) {
 	if c.db == nil {
+		return
+	}
+	libraries, err := c.configuredLibraryIDs(requested)
+	if err != nil {
 		return
 	}
 	tx, err := c.db.Begin()
@@ -155,10 +193,30 @@ func (c *Catalog) recordMetadataRefresh(revision string) {
 		return
 	}
 	defer tx.Rollback()
-	for key, value := range map[string]string{
-		"metadata_credential_revision": revision,
-		"metadata_refreshed_at":        strconv.FormatInt(time.Now().Unix(), 10),
-	} {
+	refreshedAt := strconv.FormatInt(time.Now().Unix(), 10)
+	for _, libraryID := range libraries {
+		var total, completed int
+		if err := tx.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN last_scan_id=? THEN 1 ELSE 0 END),0) FROM library_locations WHERE library_id=? AND root_path<>''`, scanID, libraryID).Scan(&total, &completed); err != nil || total == 0 || completed != total {
+			continue
+		}
+		for key, value := range map[string]string{metadataRevisionKey(libraryID): revision, metadataRefreshedAtKey(libraryID): refreshedAt} {
+			if _, err := tx.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value); err != nil {
+				return
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return
+	}
+	if c.metadataRefreshDueFor(nil, false) {
+		return
+	}
+	tx, err = c.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	for key, value := range map[string]string{"metadata_credential_revision": revision, "metadata_refreshed_at": refreshedAt} {
 		if _, err := tx.Exec("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, value); err != nil {
 			return
 		}

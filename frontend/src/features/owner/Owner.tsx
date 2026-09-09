@@ -3,7 +3,7 @@ import { ProgressBar } from '../../vendor/interior/progress-bar';
 import { Avatar } from '../../modules/ui/Feedback';
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type TMDBSettings } from '../../core/api';
+import { ApiError, type ActiveSession, type IdentityConflict, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type MetadataCandidate, type MetadataField, type MetadataTarget, type PlaybackSettings, type PlaybackStatus, type Readiness, type Scan, type ScanJob, type ScanPolicy, type TMDBSettings } from '../../core/api';
 import type { ScreenPresence } from '../../core/screens';
 import { Readiness as ReadinessPanel } from '../setup/Setup';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -19,6 +19,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [scan, setScan] = useState<Scan>();
   const [locations, setLocations] = useState<LibraryLocation[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
+  const [scanPolicies, setScanPolicies] = useState<Record<string, ScanPolicy>>({});
+  const [scanJobs, setScanJobs] = useState<ScanJob[]>([]);
   const [tmdbSettings, setTMDBSettings] = useState<TMDBSettings>();
   const [tmdbToken, setTMDBToken] = useState('');
   const [unmatched, setUnmatched] = useState<MetadataTarget[]>([]);
@@ -39,7 +41,8 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
     api.scanStatus().then((result) => { setScan(result.scan.status ? result.scan : undefined); setLocations(result.locations ?? []); }).catch(() => undefined);
-    api.libraries().then((result) => setLibraries(result.libraries ?? [])).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Libraries are unavailable.'); });
+    api.libraries().then(async (result) => { const loaded=result.libraries??[];setLibraries(loaded);const policies=await Promise.all(loaded.map((library)=>api.scanPolicy(library.id).then((value)=>value.policy)));setScanPolicies(Object.fromEntries(policies.map((policy)=>[policy.library_id,policy]))); }).catch((error) => { if (error instanceof ApiError && error.code === 'owner_required') setOwnerRequired(true); else setNotice('Libraries are unavailable.'); });
+    api.scanJobs().then((result)=>setScanJobs(result.jobs??[])).catch(()=>undefined);
     api.tmdbSettings().then(setTMDBSettings).catch(() => setNotice('TMDB settings are unavailable.'));
     api.unmatchedMetadata().then((result) => setUnmatched(result.items ?? [])).catch(() => undefined);
     loadIdentityRepairs();
@@ -77,8 +80,18 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     }).catch(() => undefined), 1500);
     return () => clearInterval(timer);
   }, [scan?.status]);
+  useEffect(()=>{
+    if (!scanJobs.some((job)=>job.status==='queued'||job.status==='running')) return;
+    const timer=window.setInterval(()=>api.scanJobs().then((result)=>setScanJobs(result.jobs??[])).catch(()=>undefined),1500);
+    return ()=>clearInterval(timer);
+  },[scanJobs]);
 
-  const refreshLibraries = async () => setLibraries((await api.libraries()).libraries ?? []);
+  const refreshLibraries = async () => {
+    const loaded = (await api.libraries()).libraries ?? [];
+    setLibraries(loaded);
+    const policies = await Promise.all(loaded.map((library) => api.scanPolicy(library.id).then((value) => value.policy)));
+    setScanPolicies(Object.fromEntries(policies.map((policy) => [policy.library_id, policy])));
+  };
   const createLibrary = async (name: string, kind: Library['kind']) => {
     try { await api.createLibrary(name, kind); await refreshLibraries(); setNotice(`Library ${name.trim()} created.`); }
     catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to create library.'); }
@@ -139,6 +152,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       try {
         const result = await api.scan();
         setScan(result.scan);
+        if(result.jobs)setScanJobs((current)=>[...result.jobs!,...current.filter((job)=>!result.jobs!.some((queued)=>queued.id===job.id))]);
         setTMDBSettings({ ...settings, state: 'running', message: 'Metadata enrichment is running with the library scan.' });
         setNotice('TMDB credential verified and saved. Metadata enrichment is running.');
       } catch (error) {
@@ -211,11 +225,15 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   };
   const startScan = async () => {
     try {
-      setScan((await api.scan()).scan);
+      const result=await api.scan();setScan(result.scan);if(result.jobs)setScanJobs((current)=>[...result.jobs!,...current.filter((job)=>!result.jobs!.some((queued)=>queued.id===job.id))]);
     } catch (error) {
       setNotice(error instanceof ApiError ? error.message : 'Unable to start scan.');
     }
   };
+  const saveScanPolicy=async(policy:ScanPolicy)=>{try{const result=await api.saveScanPolicy(policy.library_id,policy);setScanPolicies((current)=>({...current,[policy.library_id]:result.policy}));setNotice('Scan settings saved.');}catch(error){setNotice(error instanceof ApiError?error.message:'Unable to save scan settings.');}};
+  const queueLibraryScan=async(libraryID:string)=>{try{const result=await api.queueScan(libraryID);setScanJobs((current)=>[result.job,...current.filter((job)=>job.id!==result.job.id)]);setNotice('Library scan queued.');}catch(error){setNotice(error instanceof ApiError?error.message:'Unable to queue library scan.');}};
+  const cancelScanJob=async(id:string)=>{try{const result=await api.cancelScanJob(id);setScanJobs((current)=>current.map((job)=>job.id===id?result.job:job));}catch(error){setNotice(error instanceof ApiError?error.message:'Unable to cancel scan.');}};
+  const retryScanJob=async(job:ScanJob,files:ScanJob['files']=(job.files??[]).filter((file)=>file.retryable))=>{try{const result=await api.retryScanJob(job.id,files??[]);setScanJobs((current)=>[result.job,...current]);setNotice(files?.length===1?'File queued for retry.':'Failed files queued for retry.');}catch(error){setNotice(error instanceof ApiError?error.message:'Unable to retry files.');}};
   const confirmRemovals = async (location: LibraryLocation) => {
     if (!location.pending_scan_id || !window.confirm(`Confirm removal of ${location.missing} missing files from the ${location.root_kind === 'film' ? 'Films' : 'TV'} library? Their titles and viewing history remain recoverable.`)) return;
     try {
@@ -254,6 +272,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
             <LibraryManager libraries={libraries} locked={locked} onCreate={createLibrary} onRename={renameLibrary} onDelete={deleteLibrary} onAddLocation={addLocation} onChangeLocation={changeLocation} onConfirmPending={confirmPendingLocation} onCancelPending={cancelPendingLocation} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} />
+            <ScanSchedules libraries={libraries} policies={scanPolicies} jobs={scanJobs} locked={locked.has('background.scan_schedule')} onSave={saveScanPolicy} onRun={queueLibraryScan} onCancel={cancelScanJob} onRetry={retryScanJob} />
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -398,6 +417,32 @@ function ScanPanel({ scan, locations, onStart, onConfirm }: { scan?: Scan; locat
       <LoadingButton onAction={onStart} disabled={scan?.status === 'running'} pendingLabel="Starting…" successLabel="Start scan">{scan?.status === 'running' ? 'Scan in progress' : 'Start scan'}</LoadingButton>{scan?.status === 'running' && <ProgressBar value={null} label="Library scan" pendingLabel="Scanning your library…" />}
     </section>
   );
+}
+
+function ScanSchedules({ libraries, policies, jobs, locked, onSave, onRun, onCancel, onRetry }: { libraries: Library[]; policies: Record<string, ScanPolicy>; jobs: ScanJob[]; locked: boolean; onSave: (policy: ScanPolicy) => Promise<void>; onRun: (libraryID: string) => Promise<void>; onCancel: (id: string) => Promise<void>; onRetry: (job: ScanJob, files?: ScanJob['files']) => Promise<void> }) {
+  return <section className="owner-panel" aria-labelledby="scan-schedules-title">
+    <div className="section-heading"><div><p className="eyebrow">Background work</p><h2 id="scan-schedules-title">Scheduled scans</h2></div></div>
+    <p className="muted">Poll each library on its own schedule. Missed times coalesce into one run, and unchanged files are skipped without probing.</p>
+    {locked && <p className="muted">Schedule timing is managed by FLIXR_SCAN_SCHEDULE. Excluded paths remain editable.</p>}
+    <div className="stack">{libraries.map((library)=><ScanPolicyEditor key={library.id} library={library} policy={policies[library.id]} locked={locked} onSave={onSave} onRun={onRun}/>)}</div>
+    <h3>Scan activity</h3>
+    {jobs.length===0?<p className="muted">No scheduled or manual scan jobs yet.</p>:<div className="stack">{jobs.map((job)=>{
+      const active=job.status==='queued'||job.status==='running';const retryableFiles=(job.files??[]).filter((file)=>file.retryable);const retryable=retryableFiles.length>0||job.status==='failed'||job.status==='interrupted';
+      return <article className="setting-row" key={job.id}><div><strong>{libraries.find((library)=>library.id===job.library_id)?.name??'Library'} · {job.status}</strong><p className="muted">{job.trigger} · {job.scanned} scanned · {job.skipped} unchanged · {job.failed} failed{job.total!==undefined?` · ${job.total} total`:''}{job.started_at?` · ${formatElapsed(job.started_at,job.finished_at)} elapsed`:''}</p><p className="muted"><Timestamp label="Queued" value={job.queued_at} />{job.started_at&&<> · <Timestamp label="Started" value={job.started_at} /></>}{job.finished_at&&<> · <Timestamp label="Finished" value={job.finished_at} /></>}</p>{job.message&&<p role="alert">{job.message}</p>}{job.files?.map((file)=><div className="button-row" key={`${file.location_id}:${file.relative_path}`}><p className="muted">{file.relative_path}: {file.message??file.outcome}</p>{file.retryable&&<button type="button" className="secondary" aria-label={`Retry ${file.relative_path} from ${file.location_id}`} onClick={()=>void onRetry(job,[file])}>Retry file</button>}</div>)}{job.status==='running'&&<ProgressBar value={null} label="Library scan" pendingLabel="Scanning…" />}</div><div className="button-row">{active&&<button type="button" className="secondary" onClick={()=>void onCancel(job.id)}>Cancel</button>}{retryable&&<button type="button" className="secondary" onClick={()=>void onRetry(job,retryableFiles)}>Retry failed files</button>}</div></article>;
+    })}</div>}
+  </section>;
+}
+
+function formatElapsed(startedAt:number,finishedAt?:number){const seconds=Math.max(0,(finishedAt??Math.floor(Date.now()/1000))-startedAt);return seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`;}
+
+function Timestamp({label,value}:{label:string;value:number}){const date=new Date(value*1000);return <>{label&&`${label} `}<time dateTime={date.toISOString()}>{date.toLocaleString()}</time></>;}
+
+function ScanPolicyEditor({ library, policy, locked, onSave, onRun }: { library: Library; policy?: ScanPolicy; locked: boolean; onSave: (policy: ScanPolicy) => Promise<void>; onRun: (libraryID: string) => Promise<void> }) {
+  const [draft,setDraft]=useState<ScanPolicy>();
+  useEffect(()=>{if(policy)setDraft(policy)},[policy]);
+  if(!draft)return <div className="setting-row"><strong>{library.name}</strong><span className="muted">Loading schedule…</span></div>;
+  const next=draft.next_run_at?new Date(draft.next_run_at*1000).toLocaleString():'Not scheduled';
+  return <form className="setting-row" onSubmit={(event)=>{event.preventDefault();void onSave(draft)}}><div><strong>{library.name}</strong><label><input type="checkbox" checked={draft.enabled} disabled={locked} onChange={(event)=>setDraft({...draft,enabled:event.target.checked})}/> Enable scheduled scans</label><div className="button-row"><label>Frequency<select value={draft.schedule_kind} disabled={locked} onChange={(event)=>setDraft({...draft,schedule_kind:event.target.value as ScanPolicy['schedule_kind']})}><option value="interval">Interval</option><option value="daily">Daily</option></select></label>{draft.schedule_kind==='interval'?<label>Every (hours)<input type="number" min="1" max="8760" value={Math.max(1,Math.round(draft.interval_seconds/3600))} disabled={locked} onChange={(event)=>setDraft({...draft,interval_seconds:Number(event.target.value)*3600})}/></label>:<><label>Local time<input type="time" value={draft.local_time} disabled={locked} onChange={(event)=>setDraft({...draft,local_time:event.target.value})}/></label><label>Timezone<input value={draft.timezone} disabled={locked} onChange={(event)=>setDraft({...draft,timezone:event.target.value})}/></label></>}</div><label>Excluded paths<textarea value={draft.exclusions.join('\n')} placeholder={'Extras/**\n**/Samples/**'} onChange={(event)=>setDraft({...draft,exclusions:event.target.value.split('\n').map((value)=>value.trim()).filter(Boolean)})}/></label><p className="muted">Next run: {next}. Daily scans use the chosen timezone; daylight-saving gaps run at the first valid local minute.</p><p className="muted">Last successful scan: {draft.last_success_at?<Timestamp label="" value={draft.last_success_at}/>: 'Never'}.</p></div><div className="button-row"><button type="button" className="secondary" aria-label={`Run now for ${library.name}`} onClick={()=>void onRun(library.id)}>Run now</button><button type="submit" aria-label={`${locked?'Save exclusions':'Save schedule'} for ${library.name}`}>{locked?'Save exclusions':'Save schedule'}</button></div></form>;
 }
 
 function TMDBForm({ settings, token, onTokenChange, onSave, onRemove, locked }: { settings?: TMDBSettings; token: string; onTokenChange: (value: string) => void; onSave: (event: FormEvent) => void; onRemove: () => Promise<void>; locked: boolean }) {

@@ -4,6 +4,7 @@ package catalog_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,85 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
+
+func TestScheduledPollingFindsRealMediaWithoutFilesystemEvents(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Fatal("ffprobe is required for media integration")
+	}
+	source := filepath.Join("..", "testdata", "media", "films", "Blue Horizon 2026.mp4")
+	media, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "first.mp4"), media, 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := catalog.Open(db)
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := c.StartScanScheduler(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown(context.Background())
+	first, err := c.QueueLibraryScan("films", "schedule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first = waitRealScanJob(t, c, first.ID)
+	if first.Status != "succeeded" || first.Scanned != 1 {
+		t.Fatalf("first job = %#v", first)
+	}
+	second, err := c.QueueLibraryScan("films", "schedule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second = waitRealScanJob(t, c, second.ID)
+	if second.Scanned != 0 || second.Skipped != 1 {
+		t.Fatalf("unchanged job = %#v", second)
+	}
+	secondMedia, err := os.ReadFile(filepath.Join("..", "testdata", "media", "films", "Compatibility Check 2026.avi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "second.avi"), secondMedia, 0600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := c.QueueLibraryScan("films", "schedule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third = waitRealScanJob(t, c, third.ID)
+	items, err := c.List("", 0, 10)
+	if err != nil || third.Scanned != 1 || third.Skipped != 1 || len(items) != 2 {
+		t.Fatalf("polling job=%#v items=%d err=%v", third, len(items), err)
+	}
+}
+
+func waitRealScanJob(t *testing.T, c *catalog.Catalog, id string) catalog.ScanJob {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := c.ScanJob(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Status != "queued" && job.Status != "running" {
+			return job
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("scan job did not finish")
+	return catalog.ScanJob{}
+}
 
 func generateMedia(t *testing.T, args ...string) {
 	t.Helper()

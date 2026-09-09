@@ -160,6 +160,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/owner/library-location-changes/{id}", s.cancelLibraryLocationChange)
 	s.mux.HandleFunc("POST /api/v1/owner/scan", s.scan)
 	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
+	s.mux.HandleFunc("GET /api/v1/owner/scan/jobs", s.scanJobs)
+	s.mux.HandleFunc("POST /api/v1/owner/scan/jobs", s.scanJobs)
+	s.mux.HandleFunc("GET /api/v1/owner/scan/jobs/{id}", s.scanJob)
+	s.mux.HandleFunc("DELETE /api/v1/owner/scan/jobs/{id}", s.scanJob)
+	s.mux.HandleFunc("POST /api/v1/owner/scan/jobs/{id}/retry", s.retryScanJob)
+	s.mux.HandleFunc("GET /api/v1/owner/libraries/{id}/scan-policy", s.libraryScanPolicy)
+	s.mux.HandleFunc("PATCH /api/v1/owner/libraries/{id}/scan-policy", s.libraryScanPolicy)
 	s.mux.HandleFunc("POST /api/v1/owner/scan/removals/confirm", s.confirmScanRemovals)
 	s.mux.HandleFunc("GET /api/v1/owner/settings/tmdb", s.tmdbSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/tmdb", s.tmdbSettings)
@@ -662,11 +669,17 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	s.readyMu.RLock()
-	ffprobe := s.readiness.FFprobe
-	s.readyMu.RUnlock()
-	if !ffprobe {
+	if !s.ffprobeReady() {
 		fail(w, http.StatusServiceUnavailable, "ffprobe_unavailable")
+		return
+	}
+	if s.catalog.ScanSchedulerRunning() {
+		jobs, err := s.catalog.QueueAllLibraryScans("manual")
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "scan_failed")
+			return
+		}
+		write(w, http.StatusAccepted, map[string]any{"scan": s.catalog.ScanStatus(), "jobs": jobs})
 		return
 	}
 	if err := s.catalog.StartScan(context.Background(), 2); err != nil {
@@ -678,6 +691,12 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusAccepted, map[string]any{"scan": s.catalog.ScanStatus()})
+}
+
+func (s *Server) ffprobeReady() bool {
+	s.readyMu.RLock()
+	defer s.readyMu.RUnlock()
+	return s.readiness.FFprobe
 }
 
 func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {

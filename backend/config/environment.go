@@ -20,6 +20,7 @@ type Environment struct {
 	OwnerPassword, InitialProfile, SegmentDir string
 	ScanOnStart                               bool
 	ScanWorkers                               int
+	ScanSchedule                              string
 	Playback                                  map[string]string
 }
 
@@ -69,12 +70,41 @@ func loadEnvironment() (Environment, error) {
 			return e, errors.New("FLIXR_SCAN_WORKERS must be between 1 and 32")
 		}
 	}
+	if value := os.Getenv("FLIXR_SCAN_SCHEDULE"); value != "" {
+		if err := validateScanSchedule(value); err != nil {
+			return e, err
+		}
+		e.ScanSchedule = value
+	}
 	for _, key := range []string{"FLIXR_GENERATION_BYTES", "FLIXR_GLOBAL_BYTES", "FLIXR_MAX_GENERATIONS", "FLIXR_LEASE_TTL", "FLIXR_HEARTBEAT_INTERVAL", "FLIXR_SEGMENT_WINDOW", "FLIXR_PROCESS_GRACE"} {
 		if value, ok := os.LookupEnv(key); ok {
 			e.Playback[key] = value
 		}
 	}
 	return e, nil
+}
+
+func validateScanSchedule(value string) error {
+	if value == "off" {
+		return nil
+	}
+	if strings.HasPrefix(value, "every:") {
+		duration, err := time.ParseDuration(strings.TrimPrefix(value, "every:"))
+		if err == nil && duration >= time.Minute && duration <= 365*24*time.Hour {
+			return nil
+		}
+	}
+	if strings.HasPrefix(value, "daily:") {
+		parts := strings.SplitN(strings.TrimPrefix(value, "daily:"), "@", 2)
+		if len(parts) == 2 {
+			if _, err := time.Parse("15:04", parts[0]); err == nil {
+				if _, err = time.LoadLocation(parts[1]); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+	return errors.New("FLIXR_SCAN_SCHEDULE must be off, every:<duration>, or daily:<HH:MM>@<timezone>")
 }
 
 func secret(key string) (*string, error) {

@@ -38,4 +38,11 @@ func TestScanRefusesWhenFFprobeUnavailable(t *testing.T) {
 	if status := server.catalog.ScanStatus(); status.Status == "running" {
 		t.Fatal("ffprobe-unavailable request started a scan")
 	}
+	r = httptest.NewRequest(http.MethodPost, "/api/v1/owner/scan/jobs", bytes.NewBufferString(`{"library_id":"films"}`))
+	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
+	w = httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || w.Body.String() != "{\"error\":{\"code\":\"ffprobe_unavailable\"}}\n" {
+		t.Fatalf("per-library scan without ffprobe = %d %s", w.Code, w.Body.String())
+	}
 }

@@ -146,8 +146,19 @@ func (c *Catalog) CreateLibrary(name, kind string) (Library, error) {
 	if err != nil {
 		return Library{}, fmt.Errorf("generate library ID: %w", err)
 	}
-	if _, err := c.db.Exec(`INSERT INTO libraries(id,name,kind,created_at) VALUES(?,?,?,?)`, id, name, kind, time.Now().UnixMilli()); err != nil {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return Library{}, fmt.Errorf("begin library creation: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO libraries(id,name,kind,created_at) VALUES(?,?,?,?)`, id, name, kind, time.Now().UnixMilli()); err != nil {
 		return Library{}, fmt.Errorf("create library: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO library_scan_policies(library_id) VALUES(?)`, id); err != nil {
+		return Library{}, fmt.Errorf("create library scan policy: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Library{}, fmt.Errorf("commit library creation: %w", err)
 	}
 	return Library{ID: id, Name: name, Kind: kind, Locations: []LibraryLocation{}}, nil
 }

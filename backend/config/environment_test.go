@@ -68,3 +68,23 @@ func TestEnvironmentDistinguishesOmittedAndDisabledMetadata(t *testing.T) {
 		t.Fatalf("disabled metadata enabled = %v, %v", cfg.MetadataEnabled, err)
 	}
 }
+
+func TestEnvironmentValidatesScanScheduleOverride(t *testing.T) {
+	for _, valid := range []string{"off", "every:6h", "daily:03:30@Europe/London"} {
+		t.Run(valid, func(t *testing.T) {
+			t.Setenv("FLIXR_SCAN_SCHEDULE", valid)
+			cfg, err := config.Load()
+			if err != nil || cfg.ScanSchedule != valid {
+				t.Fatalf("schedule = %q, %v", cfg.ScanSchedule, err)
+			}
+		})
+	}
+	for _, invalid := range []string{"sometimes", "every:20s", "daily:25:00@UTC"} {
+		t.Run(invalid, func(t *testing.T) {
+			t.Setenv("FLIXR_SCAN_SCHEDULE", invalid)
+			if _, err := config.Load(); err == nil {
+				t.Fatal("invalid schedule accepted")
+			}
+		})
+	}
+}

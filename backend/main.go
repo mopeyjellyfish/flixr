@@ -171,13 +171,25 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 	if !h.Claimed() {
 		fmt.Printf("Flixr setup token: %s\n", h.SetupToken())
 	}
-	if cfg.ScanOnStart || c.MetadataRefreshDue() {
-		workers := cfg.ScanWorkers
-		if workers == 0 {
-			workers = 4
-		}
+	workers := cfg.ScanWorkers
+	if workers == 0 {
+		workers = 4
+	}
+	metadataRefresh := c.MetadataRefreshDue()
+	if err := c.ApplyScanScheduleOverride(cfg.ScanSchedule); err != nil {
+		return fmt.Errorf("apply scan schedule override: %w", err)
+	}
+	if metadataRefresh {
 		if err := c.StartScan(ctx, workers); err != nil {
 			return err
+		}
+	}
+	if err := c.StartScanScheduler(ctx, workers); err != nil {
+		return fmt.Errorf("start scan scheduler: %w", err)
+	}
+	if cfg.ScanOnStart && !metadataRefresh {
+		if _, err := c.QueueAllLibraryScans("startup"); err != nil {
+			return fmt.Errorf("queue startup scans: %w", err)
 		}
 	}
 	screenManager := screens.New(time.Minute)
