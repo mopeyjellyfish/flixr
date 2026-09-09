@@ -250,6 +250,7 @@ type Catalog struct {
 	db                               *sqlite.DB
 	fs                               afero.Fs
 	film, tv                         string
+	setupProgress                    string
 	items                            map[string]Item
 	series                           map[string]Series
 	prober                           Prober

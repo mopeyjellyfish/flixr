@@ -67,6 +67,8 @@ for (const viewport of viewports) {
     await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed, readiness: { ffprobe: false, ffmpeg: false } } };
       if (path.endsWith('/setup/claim')) { claimed = true; return { json: { claimed: true } }; }
+      if (path.endsWith('/owner/setup') && method === 'PATCH') return { json: { step: 'libraries' } };
+      if (path.endsWith('/owner/setup')) return { json: { step: 'libraries', checks: [] } };
       if (path.endsWith('/owner/roots')) return { json: { saved: true } };
       if (path.endsWith('/owner/scan')) { scanStarts += 1; return { json: { scan: { status: 'running', scanned: 0, unmatched: 0, failed: 0 } } }; }
       if (path.endsWith('/profiles') && method === 'POST') { profileCreates += 1; return { json: { id: 'first-run-viewer', name: 'First-run viewer', protected: false } }; }
@@ -84,6 +86,9 @@ for (const viewport of viewports) {
     await page.getByLabel(/setup token/i).fill('first-run-token');
     await page.getByLabel(/owner password/i).fill('safe owner password');
     await page.getByRole('button', { name: /secure this server/i }).click();
+    await expect(page.getByRole('heading', { name: /how would you like to begin/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /import an existing server/i })).toHaveAttribute('aria-disabled', 'true');
+    await page.getByRole('button', { name: /start fresh/i }).click();
     await expect(page.getByRole('heading', { name: /bring your libraries home/i })).toBeVisible();
     const personalCredential = page.getByLabel(/TMDB API Read Access Token/i);
     await expect(personalCredential).toBeHidden();

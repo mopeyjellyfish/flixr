@@ -28,6 +28,7 @@ describe('Flixr routes', () => {
       { path: '/api/v1/owner/login', method: 'POST', handle: () => ({ json: {} }) },
       { path: '/api/v1/profiles', handle: () => ({ json: { profiles: [] } }) },
       { path: '/api/v1/owner/roots', handle: () => ({ json: { films: '/media/films', tv: '' } }) },
+      { path: '/api/v1/owner/setup', handle: () => ({ json: { step: 'libraries', checks: [] } }) },
     ]));
     await renderApp();
     fireEvent.change(await screen.findByLabelText(/owner password/i), { target: { value: 'existing owner password' } });
@@ -55,19 +56,20 @@ describe('Flixr routes', () => {
     expect(window.location.pathname).toBe('/home');
   });
 
-  it('resumes interrupted setup with saved libraries and never asks to claim twice', async () => {
+  it('resumes the exact persisted setup step with saved libraries and never asks to claim twice', async () => {
     window.history.replaceState({}, '', '/setup');
     vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
       { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
       { path: '/api/v1/owner/roots', handle: () => ({ json: { films: '/media/films', tv: '/media/tv' } }) },
       { path: '/api/v1/profiles', handle: () => ({ json: { profiles: [] } }) },
+      { path: '/api/v1/owner/setup', handle: () => ({ json: { step: 'profile', checks: [] } }) },
     ]));
     await renderApp();
+    expect(await screen.findByRole('heading', { name: /first profile/i })).toBeVisible();
+    expect(screen.queryByLabelText(/setup token/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /back to libraries/i }));
     expect(await screen.findByLabelText(/films library/i)).toHaveValue('/media/films');
     expect(screen.getByLabelText(/tv library/i)).toHaveValue('/media/tv');
-    expect(screen.queryByLabelText(/setup token/i)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
-    expect(await screen.findByRole('heading', { name: /first profile/i })).toBeInTheDocument();
   });
 
   it('guides a claimed owner through libraries and a profile before entering home', async () => {
@@ -76,6 +78,8 @@ describe('Flixr routes', () => {
       const method = init?.method;
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: false, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/setup/claim')) return new Response(JSON.stringify({ claimed: true }), { status: 201 });
+      if (path.endsWith('/owner/setup') && method === 'PATCH') return new Response(JSON.stringify({ step: JSON.parse(String(init?.body)).step }));
+      if (path.includes('/owner/setup?')) return new Response(JSON.stringify({ step: 'libraries', checks: [] }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ saved: true }));
       if (path.includes('/owner/scan')) return new Response(JSON.stringify({ scan: { status: 'running', scanned: 0, failed: 0, unmatched: 0 } }));
       if (path.includes('/profiles/profile-1/select')) return new Response(JSON.stringify({ selected: true }));
@@ -89,6 +93,7 @@ describe('Flixr routes', () => {
     expect(screen.getByRole('heading', { name: /local cinema/i })).not.toHaveFocus();
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /start fresh/i }));
     const libraries = await screen.findByRole('heading', { name: /libraries/i });
     await waitFor(() => expect(libraries).toHaveFocus());
     expect(screen.queryByText(/owner operations/i)).not.toBeInTheDocument();
@@ -112,6 +117,8 @@ describe('Flixr routes', () => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: false, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/setup/claim')) return new Response(JSON.stringify({ claimed: true }), { status: 201 });
+      if (path.endsWith('/owner/setup') && init?.method === 'PATCH') return new Response(JSON.stringify({ step: JSON.parse(String(init.body)).step }));
+      if (path.includes('/owner/setup?')) return new Response(JSON.stringify({ step: 'libraries', checks: [] }));
       if (path.endsWith('/profiles') && init?.method === 'POST') { creates += 1; return new Response(JSON.stringify({ id: 'profile-1', name: 'Alex', protected: false }), { status: 201 }); }
       if (path.includes('/profiles/profile-1/select')) { selections += 1; return selections === 1 ? new Response(JSON.stringify({ error: { code: 'credential_busy' } }), { status: 429 }) : new Response(JSON.stringify({ selected: true })); }
       if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [] }));
@@ -121,6 +128,7 @@ describe('Flixr routes', () => {
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /start fresh/i }));
     fireEvent.click(await screen.findByRole('button', { name: /skip for now/i }));
     fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: 'Alex' } });
     const create = screen.getByRole('button', { name: /create profile/i });
@@ -135,10 +143,12 @@ describe('Flixr routes', () => {
   });
 
   it('keeps setup completable when an automatic ready scan cannot start', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: false, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/setup/claim')) return new Response(JSON.stringify({ claimed: true }), { status: 201 });
+      if (path.endsWith('/owner/setup') && init?.method === 'PATCH') return new Response(JSON.stringify({ step: JSON.parse(String(init.body)).step }));
+      if (path.includes('/owner/setup?')) return new Response(JSON.stringify({ step: 'libraries', checks: [] }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ saved: true }));
       if (path.includes('/owner/scan')) return new Response(JSON.stringify({ error: { code: 'scan_failed' } }), { status: 500 });
       if (path.endsWith('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
@@ -148,6 +158,7 @@ describe('Flixr routes', () => {
     fireEvent.change(await screen.findByLabelText(/setup token/i), { target: { value: 'token' } });
     fireEvent.change(screen.getByLabelText(/owner password/i), { target: { value: 'safe password' } });
     fireEvent.click(screen.getByRole('button', { name: /secure this server/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /start fresh/i }));
     fireEvent.change(await screen.findByLabelText(/films library/i), { target: { value: '/media/films' } });
     fireEvent.click(screen.getByRole('button', { name: /save libraries/i }));
     expect(await screen.findByRole('status')).toHaveTextContent(/could not start a scan/i);

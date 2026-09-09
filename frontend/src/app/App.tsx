@@ -4,7 +4,7 @@ import { MotionConfig } from 'motion/react';
 import { Splash } from '../modules/ui/Feedback';
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
-import type { OwnerRoots, SetupStatus } from '../core/api';
+import type { OwnerRoots, OwnerSetup, SetupStatus } from '../core/api';
 import { Setup, OwnerLogin } from '../features/setup/Setup';
 import { ProfileChooser } from '../features/profiles/Profiles';
 import { screenCoordinator } from '../modules/screenCoordinator/runtime';
@@ -36,6 +36,7 @@ export function App() {
   const finishBoot = useCallback(() => setBooting(false), []);
   const [status, setStatus] = useState<SetupStatus>();
   const [setupRoots, setSetupRoots] = useState<OwnerRoots>();
+  const [ownerSetup, setOwnerSetup] = useState<OwnerSetup>();
   const [route, setRoute] = useState<Route>(routeFor());
   const [path, setPath] = useState(() => `${window.location.pathname}${window.location.search}`);
   const [restoreFocusID, setRestoreFocusID] = useState<string>();
@@ -63,9 +64,10 @@ export function App() {
     const requested = routeFor();
     if (value.claimed && requested === 'setup') {
       try {
-        const [roots, { profiles }] = await Promise.all([api.ownerRoots(), api.profiles()]);
+        const [roots, { profiles }, setup] = await Promise.all([api.ownerRoots(), api.profiles(), api.ownerSetup()]);
         if (profiles.length === 0) {
           setSetupRoots(roots);
+          setOwnerSetup(setup);
           setStatus(value);
           setRoute('setup');
           return;
@@ -108,7 +110,7 @@ export function App() {
   if (route === 'failure') return <main className="auth-panel"><h1>Flixr is unavailable.</h1><p role="alert">The local server did not respond.</p><button onClick={() => void load()}>Try again</button></main>;
   if (route === 'loading' || !status) return <Splash />;
   if (route === 'gallery') return status.demo || import.meta.env.DEV ? <Suspense fallback={<Splash />}><InteriorGallery /></Suspense> : <main><h1>Development tools are unavailable.</h1><a href="/profiles">Back to profiles</a></main>;
-  if (route === 'setup') return <main className="setup-page"><Setup readiness={status.readiness} metadata={status.metadata} initialRoots={setupRoots} onCompleted={() => navigate('/home')} /></main>;
+  if (route === 'setup') return <main className="setup-page"><Setup readiness={status.readiness} metadata={status.metadata} initialRoots={setupRoots} initialStep={ownerSetup?.step} initialChecks={ownerSetup?.checks} onCompleted={() => navigate('/home')} /></main>;
   if (route === 'login') return <main><OwnerLogin onLogin={() => void ownerLoggedIn()} /></main>;
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
   if (route === 'history') return <Suspense fallback={<RouteFallback />}><History onBrowse={() => navigate('/home')} onExit={() => navigate('/profiles')} /></Suspense>;

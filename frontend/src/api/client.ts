@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -30,6 +30,14 @@ export const api = {
   revokeSession: (id: string) => request<{ revoked: boolean }>(`/owner/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   selectProfile: (id: string, pin = '') => request(`/profiles/${id}/select`, { method: 'POST', body: JSON.stringify({ pin }) }),
   ownerRoots: () => request<OwnerRoots>('/owner/roots'),
+  ownerSetup: (films?: string, tv?: string) => {
+    const query = new URLSearchParams();
+    if (films !== undefined) query.set('films', films);
+    if (tv !== undefined) query.set('tv', tv);
+    const suffix = query.size > 0 ? `?${query}` : '';
+    return request<OwnerSetup>(`/owner/setup${suffix}`);
+  },
+  updateSetup: (step: SetupStep) => request<{ step: SetupStep }>('/owner/setup', { method: 'PATCH', body: JSON.stringify({ step }) }),
   roots: (films: string, tv: string) => request<{ saved: boolean }>('/owner/roots', { method: 'POST', body: JSON.stringify({ films, tv }) }),
   libraries: () => request<{ libraries: Library[] }>('/owner/libraries'),
   createLibrary: (name: string, kind: Library['kind']) => request<Library>('/owner/libraries', { method: 'POST', body: JSON.stringify({ name, kind }) }),
