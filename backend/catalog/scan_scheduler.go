@@ -572,7 +572,7 @@ func (c *Catalog) CancelScanJob(id string) error {
 		c.wakeScheduler()
 		return nil
 	}
-	result, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1,status='cancelled',finished_at=?,message='Cancelled before starting.' WHERE id=? AND status='queued'`, time.Now().Unix(), id)
+	result, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,finished_at=CASE WHEN status='queued' THEN ? ELSE finished_at END,message=CASE WHEN status='queued' THEN 'Cancelled before starting.' ELSE message END WHERE id=? AND status IN ('queued','running')`, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
@@ -788,6 +788,11 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	var cancelRequested int
 	_ = c.db.QueryRow(`SELECT cancel_requested FROM scan_jobs WHERE id=?`, job.ID).Scan(&cancelRequested)
 	if cancelRequested != 0 {
+		c.schedulerMu.Lock()
+		if c.activeJobID == job.ID {
+			c.activeJobOwnerCancelled = true
+		}
+		c.schedulerMu.Unlock()
 		cancel()
 	}
 	retry := map[string]bool{}

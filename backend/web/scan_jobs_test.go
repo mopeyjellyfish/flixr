@@ -1,4 +1,4 @@
-package web_test
+package web
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
-	"github.com/mopeyjellyfish/flixr/backend/web"
 )
 
 func TestOwnerManagesLibraryScanPolicyAndJobs(t *testing.T) {
@@ -32,7 +31,10 @@ func TestOwnerManagesLibraryScanPolicyAndJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := web.NewServer(h, c).Handler()
+	server := NewServer(h, c)
+	server.lookPath = func(string) (string, error) { return "/test/tool", nil }
+	server.checkReadiness()
+	handler := server.Handler()
 	request := func(method, path, body, token string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 		if token != "" {
@@ -83,7 +85,7 @@ func TestEnvironmentScheduleLockStillAllowsOwnerExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := web.NewServerWithConfiguration(h, c, playback.NewDirectManager(), map[string]bool{"background.scan_schedule": true}).Handler()
+	handler := NewServerWithConfiguration(h, c, playback.NewDirectManager(), map[string]bool{"background.scan_schedule": true}).Handler()
 	r := httptest.NewRequest(http.MethodPatch, "/api/v1/owner/libraries/films/scan-policy", bytes.NewBufferString(`{"enabled":false,"schedule_kind":"interval","interval_seconds":300,"local_time":"09:00","timezone":"UTC","exclusions":["Extras/**"]}`))
 	r.AddCookie(&http.Cookie{Name: "flixr_session", Value: owner})
 	w := httptest.NewRecorder()

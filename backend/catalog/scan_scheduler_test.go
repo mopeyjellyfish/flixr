@@ -216,6 +216,42 @@ func TestCancellingWhilePersistenceWaitsDoesNotPublishScan(t *testing.T) {
 	}
 }
 
+func TestCancelAfterClaimBeforeExecutionRegistration(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var probes atomic.Int32
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		probes.Add(1)
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatal(err)
+	}
+	queued, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.claimScanJob(time.Now())
+	if err != nil || claimed.ID != queued.ID {
+		t.Fatalf("claim = %#v, %v", claimed, err)
+	}
+	if err := c.CancelScanJob(claimed.ID); err != nil {
+		t.Fatalf("cancel in claim window: %v", err)
+	}
+	c.executeScanJob(t.Context(), claimed)
+	job, err := c.ScanJob(claimed.ID)
+	if err != nil || job.Status != "cancelled" || probes.Load() != 0 {
+		t.Fatalf("claim-window cancellation job=%#v probes=%d err=%v", job, probes.Load(), err)
+	}
+}
+
 func TestTerminalWriteFailureReleasesLibraryQueue(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
