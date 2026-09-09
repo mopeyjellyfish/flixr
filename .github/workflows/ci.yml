@@ -28,6 +28,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.27.1' }
+      - name: Exclude runner Chrome apt source
+        run: |
+          for source in /etc/apt/sources.list.d/google-chrome*; do
+            test -e "$source" || continue
+            sudo mv "$source" "$RUNNER_TEMP/$(basename "$source").disabled"
+          done
       - name: Install FFmpeg media dependencies
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: FLIXR_REQUIRE_MEDIA_INTEGRATION=1 go test -tags=media_integration ./...
@@ -80,6 +86,12 @@ jobs:
         with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.27.1', cache-dependency-path: backend/go.sum }
+      - name: Exclude runner Chrome apt source
+        run: |
+          for source in /etc/apt/sources.list.d/google-chrome*; do
+            test -e "$source" || continue
+            sudo mv "$source" "$RUNNER_TEMP/$(basename "$source").disabled"
+          done
       - run: npm ci
         working-directory: frontend
       - run: npx playwright install --with-deps chromium firefox webkit
