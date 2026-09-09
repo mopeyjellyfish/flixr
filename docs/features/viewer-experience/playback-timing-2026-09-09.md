@@ -19,8 +19,9 @@ compatibility startup: median first frames were about 3.6–4.0 seconds for remu
 observations are enough to expose failures and large variance, but not to claim a
 small release-to-release performance change.
 
-Each cell is the median in milliseconds followed by the observed range. Seek medians
-exclude timeouts. Direct playback has no seek HTTP request.
+Each cell is the median in milliseconds followed by the observed range. Seek-frame
+medians exclude timeouts; Seek HTTP includes every returned response. Direct playback
+has no seek HTTP request.
 
 | Version | Path | Cache | Plan HTTP | Media HTTP | First frame | Seek HTTP | Seek frame | Seek pass |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
