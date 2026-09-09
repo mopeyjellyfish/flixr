@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/config"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
@@ -56,6 +58,43 @@ func TestSettingsInventoryRedactsSecretsAndMarksEnvironmentLocks(t *testing.T) {
 	}
 	if got["library.films_root"].Mutable || !got["metadata.tmdb_token"].Secret || got["metadata.tmdb_token"].Value != "environment-managed" {
 		t.Fatalf("settings = %#v", got)
+	}
+}
+
+func TestPendingEnvironmentRootInventoryKeepsActiveAndTargetDistinct(t *testing.T) {
+	active, desired := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(active, "Film.mp4"), []byte("film"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	library, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil || library.SetRoots(active, "") != nil || library.Scan(t.Context(), 1) != nil {
+		t.Fatalf("initial library: %v", err)
+	}
+	if err := library.StageEnvironmentRoots(desired, ""); err != nil {
+		t.Fatal(err)
+	}
+	house, err := household.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithConfigurationValues(house, library, playback.NewDirectManager(), nil, map[string]bool{"library.films_root": true}, (config.Bootstrap{Environment: config.Environment{FilmsRoot: &desired}}).NonSecretValues())
+	var films effectiveSetting
+	for _, setting := range server.effectiveSettings() {
+		if setting.Key == "library.films_root" {
+			films = setting
+		}
+	}
+	canonicalActive, _ := filepath.EvalSymlinks(active)
+	canonicalDesired, _ := filepath.EvalSymlinks(desired)
+	if films.Value != canonicalActive || films.Source != "saved" || films.PendingValue != canonicalDesired || films.PendingSource != "environment" || films.Mutable {
+		t.Fatalf("pending environment inventory = %#v", films)
 	}
 }
 

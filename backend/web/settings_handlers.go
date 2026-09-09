@@ -12,9 +12,11 @@ import (
 
 type effectiveSetting struct {
 	config.SettingDefinition
-	Value   string `json:"value"`
-	Source  string `json:"source"`
-	Mutable bool   `json:"mutable"`
+	Value         string `json:"value"`
+	Source        string `json:"source"`
+	PendingValue  string `json:"pending_value,omitempty"`
+	PendingSource string `json:"pending_source,omitempty"`
+	Mutable       bool   `json:"mutable"`
 }
 
 func (s *Server) settingsInventory(w http.ResponseWriter, r *http.Request) {
@@ -37,8 +39,13 @@ func (s *Server) effectiveSettings() []effectiveSetting {
 	settings := make([]effectiveSetting, 0, len(config.Inventory("")))
 	for _, definition := range config.Inventory("") {
 		value := values[definition.Key]
-		if configured, ok := s.settingsValues[definition.Key]; ok {
-			value = configured
+		pendingValue, pendingSource := "", ""
+		configuredValue, configured := s.settingsValues[definition.Key]
+		pendingRoot := s.settingsLocks[definition.Key] && (definition.Key == "library.films_root" || definition.Key == "library.tv_root") && configured && configuredValue != value
+		if configured && !pendingRoot {
+			value = configuredValue
+		} else if pendingRoot {
+			pendingValue, pendingSource = configuredValue, "environment"
 		}
 		if value == "" {
 			value = definition.Default
@@ -47,7 +54,7 @@ func (s *Server) effectiveSettings() []effectiveSetting {
 		if definition.Persistence == "database" || definition.Persistence == "sidecar and database" {
 			source = "saved"
 		}
-		if s.settingsLocks[definition.Key] {
+		if s.settingsLocks[definition.Key] && !pendingRoot {
 			source = "environment"
 		}
 		if definition.Secret {
@@ -60,7 +67,7 @@ func (s *Server) effectiveSettings() []effectiveSetting {
 			}
 		}
 		mutable := !definition.Secret && writableOwnerSetting(definition.Key) && !s.settingsLocks[definition.Key]
-		settings = append(settings, effectiveSetting{SettingDefinition: definition, Value: value, Source: source, Mutable: mutable})
+		settings = append(settings, effectiveSetting{SettingDefinition: definition, Value: value, Source: source, PendingValue: pendingValue, PendingSource: pendingSource, Mutable: mutable})
 	}
 	return settings
 }

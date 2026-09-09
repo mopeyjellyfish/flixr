@@ -34,3 +34,14 @@ func TestBootstrapLocksOnlyExplicitEnvironmentValues(t *testing.T) {
 		t.Fatalf("locks = %#v", locks)
 	}
 }
+
+func TestBootstrapExposesNonSecretEnvironmentRootTargets(t *testing.T) {
+	films, tv := "/media/new-films", ""
+	values := (config.Bootstrap{Environment: config.Environment{FilmsRoot: &films, TVRoot: &tv}}).NonSecretValues()
+	if values["library.films_root"] != films {
+		t.Fatalf("films target = %q", values["library.films_root"])
+	}
+	if value, ok := values["library.tv_root"]; !ok || value != "" {
+		t.Fatalf("explicit empty TV target = %q, present=%v", value, ok)
+	}
+}
