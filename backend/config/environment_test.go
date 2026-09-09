@@ -42,6 +42,29 @@ func TestEnvironmentOverridesSavedPlaybackAndReadsSecretFile(t *testing.T) {
 	}
 }
 
+func TestLoadBackupEnvironment(t *testing.T) {
+	destination := t.TempDir()
+	t.Setenv("FLIXR_BACKUP_DESTINATION", destination)
+	t.Setenv("FLIXR_BACKUP_SCHEDULE", "daily:02:30@Europe/London")
+	t.Setenv("FLIXR_BACKUP_RETAIN_COUNT", "4")
+	t.Setenv("FLIXR_BACKUP_RETAIN_AGE", "168h")
+	t.Setenv("FLIXR_BACKUP_BUDGET_BYTES", "2147483648")
+	e, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.BackupDestination != destination || e.BackupSchedule != "daily:02:30@Europe/London" || e.BackupRetainCount != 4 || e.BackupRetainAge != 168*time.Hour || e.BackupBudgetBytes != 2147483648 {
+		t.Fatalf("backup environment = %+v", e)
+	}
+}
+
+func TestLoadBackupEnvironmentRejectsUnsafeValues(t *testing.T) {
+	t.Setenv("FLIXR_BACKUP_DESTINATION", "relative")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("relative destination accepted")
+	}
+}
+
 func TestEnvironmentRejectsInvalidResourceLimits(t *testing.T) {
 	for _, pair := range [][2]string{{"FLIXR_GLOBAL_BYTES", "0"}, {"FLIXR_MAX_GENERATIONS", "999"}, {"FLIXR_LEASE_TTL", "1s"}, {"FLIXR_SEGMENT_WINDOW", "invalid"}, {"FLIXR_SCAN_WORKERS", "0"}, {"FLIXR_SEGMENT_DIR", "relative"}, {"FLIXR_METADATA_ENABLED", "offline-ish"}} {
 		t.Run(pair[0], func(t *testing.T) {

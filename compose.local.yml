@@ -12,6 +12,7 @@ services:
       FLIXR_LISTEN_ADDR: 0.0.0.0:8787
     volumes:
       - flixr-data:/data
+      - flixr-backups:/backups
       - type: bind
         source: ${FLIXR_MEDIA_DIR:-./media}
         target: /media
@@ -27,3 +28,4 @@ services:
 
 volumes:
   flixr-data:
+  flixr-backups:

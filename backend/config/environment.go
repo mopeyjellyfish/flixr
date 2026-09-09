@@ -21,6 +21,10 @@ type Environment struct {
 	ScanOnStart                               bool
 	ScanWorkers                               int
 	ScanSchedule                              string
+	BackupDestination, BackupSchedule         string
+	BackupRetainCount                         int
+	BackupRetainAge                           time.Duration
+	BackupBudgetBytes                         int64
 	Playback                                  map[string]string
 }
 
@@ -76,12 +80,63 @@ func loadEnvironment() (Environment, error) {
 		}
 		e.ScanSchedule = value
 	}
+	e.BackupDestination = os.Getenv("FLIXR_BACKUP_DESTINATION")
+	if e.BackupDestination != "" && !filepath.IsAbs(e.BackupDestination) {
+		return e, errors.New("FLIXR_BACKUP_DESTINATION must be absolute")
+	}
+	if value := os.Getenv("FLIXR_BACKUP_SCHEDULE"); value != "" {
+		if err := validateBackupSchedule(value); err != nil {
+			return e, err
+		}
+		e.BackupSchedule = value
+	}
+	if value := os.Getenv("FLIXR_BACKUP_RETAIN_COUNT"); value != "" {
+		e.BackupRetainCount, err = strconv.Atoi(value)
+		if err != nil || e.BackupRetainCount < 1 || e.BackupRetainCount > 100 {
+			return e, errors.New("FLIXR_BACKUP_RETAIN_COUNT must be between 1 and 100")
+		}
+	}
+	if value := os.Getenv("FLIXR_BACKUP_RETAIN_AGE"); value != "" {
+		e.BackupRetainAge, err = time.ParseDuration(value)
+		if err != nil || e.BackupRetainAge < 24*time.Hour {
+			return e, errors.New("FLIXR_BACKUP_RETAIN_AGE must be at least 24h")
+		}
+	}
+	if value := os.Getenv("FLIXR_BACKUP_BUDGET_BYTES"); value != "" {
+		e.BackupBudgetBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || e.BackupBudgetBytes < 1048576 {
+			return e, errors.New("FLIXR_BACKUP_BUDGET_BYTES must be at least 1048576")
+		}
+	}
 	for _, key := range []string{"FLIXR_GENERATION_BYTES", "FLIXR_GLOBAL_BYTES", "FLIXR_MAX_GENERATIONS", "FLIXR_LEASE_TTL", "FLIXR_HEARTBEAT_INTERVAL", "FLIXR_SEGMENT_WINDOW", "FLIXR_PROCESS_GRACE"} {
 		if value, ok := os.LookupEnv(key); ok {
 			e.Playback[key] = value
 		}
 	}
 	return e, nil
+}
+
+func validateBackupSchedule(value string) error {
+	if value == "off" {
+		return nil
+	}
+	if strings.HasPrefix(value, "every:") {
+		duration, err := time.ParseDuration(strings.TrimPrefix(value, "every:"))
+		if err == nil && duration >= time.Hour && duration <= 365*24*time.Hour {
+			return nil
+		}
+	}
+	if strings.HasPrefix(value, "daily:") {
+		parts := strings.SplitN(strings.TrimPrefix(value, "daily:"), "@", 2)
+		if len(parts) == 2 {
+			if _, err := time.Parse("15:04", parts[0]); err == nil {
+				if _, err = time.LoadLocation(parts[1]); err == nil {
+					return nil
+				}
+			}
+		}
+	}
+	return errors.New("FLIXR_BACKUP_SCHEDULE must be off, every:<duration>, or daily:<HH:MM>@<timezone>")
 }
 
 func validateScanSchedule(value string) error {
