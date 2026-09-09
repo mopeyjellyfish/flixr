@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Player } from './Player';
+import { screenCoordinator } from '../screenCoordinator/runtime';
 
 const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: { fatal: boolean; type?: string }) => void), attached: 0, destroyed: 0, imported: 0, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
 vi.mock('hls.js', async () => {
@@ -1129,7 +1130,7 @@ it('uses the bundled HLS engine even when the browser also advertises native HLS
  finally { vi.unstubAllGlobals(); }
 });
 
-it('accumulates direct seek steps before the browser emits timeupdate', async () => {
+it('accumulates fifteen-second direct seek steps before the browser emits timeupdate', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     if (String(input).includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
     return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'direct-step', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
@@ -1138,9 +1139,303 @@ it('accumulates direct seek steps before the browser emits timeupdate', async ()
   const video=document.querySelector('video') as HTMLVideoElement;
   await waitFor(()=>expect(video).toHaveAttribute('src','/film.mp4'));
   fireEvent.loadedMetadata(video); fireEvent.playing(video);
-  const forward=screen.getByRole('button',{name:'Forward 10 seconds'});
+  const forward=screen.getByRole('button',{name:'Forward 15 seconds'});
   await act(async()=>{fireEvent.click(forward);});
-  expect(video.currentTime).toBe(10);
+  expect(video.currentTime).toBe(15);
   await act(async()=>{fireEvent.click(forward);});
-  expect(video.currentTime).toBe(20);
+  expect(video.currentTime).toBe(30);
+});
+
+it('shows and coalesces the latest seek intent while stale playback is paused', async () => {
+  const seekRequests: Array<{ position: number; resolve: (response: Response) => void }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) {
+      const position = JSON.parse(String(init?.body)).position_ms as number;
+      return new Promise<Response>((resolve) => { seekRequests.push({ position, resolve }); });
+    }
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let paused = false;
+  const pause = vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+
+  const forward = screen.getByRole('button', { name: 'Forward 15 seconds' });
+  fireEvent.click(forward);
+  await waitFor(() => expect(seekRequests).toHaveLength(1));
+  expect(pause).toHaveBeenCalled();
+  expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuetext', '0:15 of 2:00');
+  expect(screen.getByText('Seeking…')).toBeVisible();
+  fireEvent.click(forward);
+
+  await act(async () => { seekRequests[0].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(seekRequests).toHaveLength(2));
+  expect(seekRequests[1].position).toBe(30_000);
+  expect(hls.attached).toBe(1);
+
+  await act(async () => { seekRequests[1].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-3', media_url: '/stream-3.m3u8', resume_ms: 30_000, stream_offset_ms: 30_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  expect(screen.queryByText('Seeking…')).not.toBeInTheDocument();
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(0);
+  expect(play).toHaveBeenCalledOnce();
+});
+
+it('keeps the last usable replacement when the latest coalesced seek fails', async () => {
+  const seekRequests: Array<{ position: number; resolve: (response: Response) => void; reject: (error: Error) => void }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Promise<Response>((resolve, reject) => {
+      seekRequests.push({ position: JSON.parse(String(init?.body)).position_ms, resolve, reject });
+    });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(seekRequests).toHaveLength(1));
+  await act(async () => { seekRequests[0].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(seekRequests).toHaveLength(2));
+  await act(async () => { seekRequests[1].reject(new Error('replacement failed')); });
+
+  await waitFor(() => expect(hls.attached).toBe(2));
+  fireEvent.loadedMetadata(video);
+  fireEvent.canPlay(video);
+  expect(screen.queryByText('Seeking…')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Forward 15 seconds' })).toBeEnabled();
+  expect(play).toHaveBeenCalledOnce();
+});
+
+it('restores an acknowledged retained position when the latest coalesced seek fails', async () => {
+  const seekRequests: Array<{ position: number; resolve: (response: Response) => void; reject: (error: Error) => void }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Promise<Response>((resolve, reject) => {
+      seekRequests.push({ position: JSON.parse(String(init?.body)).position_ms, resolve, reject });
+    });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(seekRequests).toHaveLength(1));
+  await act(async () => { seekRequests[0].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 15_000, stream_offset_ms: 0, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(seekRequests).toHaveLength(2));
+  await act(async () => { seekRequests[1].reject(new Error('latest seek failed')); });
+
+  await waitFor(() => expect(video.currentTime).toBe(15));
+  expect(hls.attached).toBe(1);
+  expect(play).toHaveBeenCalledOnce();
+  expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuetext', '0:15 of 2:00');
+});
+
+it('recovers an expired latest seek without attaching the superseded session', async () => {
+  const seekRequests: Array<{ position: number; resolve: (response: Response) => void }> = [];
+  const planIntents: string[] = [];
+  let resolveRecovery: ((response: Response) => void) | undefined;
+  let planRequests = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) {
+      planRequests += 1;
+      planIntents.push(JSON.parse(String(init?.body)).continue_watching_intent);
+      const recovered = planRequests > 1;
+      if (recovered) return new Promise<Response>((resolve) => { resolveRecovery = resolve; });
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/seek')) return new Promise<Response>((resolve) => { seekRequests.push({ position: JSON.parse(String(init?.body)).position_ms, resolve }); });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(seekRequests).toHaveLength(1));
+  await act(async () => { seekRequests[0].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(seekRequests).toHaveLength(2));
+  await act(async () => { seekRequests[1].resolve(new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 })); });
+
+  await waitFor(() => expect(planRequests).toBe(2));
+  expect(play).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+  expect(screen.getByRole('button', { name: 'Play' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Play' }));
+  expect(screen.getByRole('button', { name: 'Pause' })).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuetext', '0:45 of 2:00');
+  await act(async () => { resolveRecovery?.(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-3', media_url: '/stream-3.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(seekRequests).toHaveLength(3));
+  expect(hls.attached).toBe(1);
+  expect(seekRequests[2].position).toBe(45_000);
+  await act(async () => { seekRequests[2].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-3', media_url: '/stream-3.m3u8', resume_ms: 45_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  await waitFor(() => expect(screen.queryByText('Seeking…')).not.toBeInTheDocument());
+  fireEvent.loadedMetadata(video);
+  expect(planIntents).toEqual(['user', 'recovery']);
+  expect(play).toHaveBeenCalledOnce();
+});
+
+it('does not replay the cleared source when expired-seek recovery fails', async () => {
+  let planRequests = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) {
+      planRequests += 1;
+      if (planRequests > 1) return new Response(JSON.stringify({ error: { code: 'playback_unsupported' } }), { status: 422 });
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/seek')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/not compatible/i);
+  expect(play).not.toHaveBeenCalled();
+  expect(screen.queryByText('Seeking…')).not.toBeInTheDocument();
+});
+
+it('honors pause and speed changes made while a replacement seek is pending', async () => {
+  let resolveSeek: ((response: Response) => void) | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Promise<Response>((resolve) => { resolveSeek = resolve; });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Playback speed' }), { target: { value: '1.5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  await waitFor(() => expect(resolveSeek).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+
+  await act(async () => { resolveSeek?.(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  video.playbackRate = 1;
+  fireEvent.loadedMetadata(video);
+  expect(video.playbackRate).toBe(1.5);
+  expect(screen.getByRole('combobox', { name: 'Playback speed' })).toHaveValue('1.5');
+  expect(play).not.toHaveBeenCalled();
+});
+
+it('honors a remote pause while a replacement seek is pending', async () => {
+  let resolveSeek: ((response: Response) => void) | undefined;
+  const listen = vi.spyOn(screenCoordinator, 'onCommand');
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Promise<Response>((resolve) => { resolveSeek = resolve; });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let paused = false;
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  const play = vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+  await waitFor(() => expect(resolveSeek).toBeTypeOf('function'));
+  act(() => { listen.mock.calls[0][0]({ version: 1, type: 'pause' }); });
+
+  await act(async () => { resolveSeek?.(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  fireEvent.loadedMetadata(video);
+  expect(screen.getByRole('button', { name: 'Play' })).toBeVisible();
+  expect(play).not.toHaveBeenCalled();
+});
+
+it('auto-hides pointer-focused controls but preserves keyboard-focused controls', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    if (String(input).includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const stage = document.querySelector('main.player') as HTMLElement;
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/film.mp4'));
+  fireEvent.playing(video);
+  const mute = screen.getByRole('button', { name: 'Mute' });
+  fireEvent.pointerDown(mute);
+  mute.focus();
+  fireEvent.pointerMove(stage);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(stage).toHaveClass('controls-hidden');
+
+  fireEvent.pointerMove(stage);
+  Object.defineProperty(video, 'paused', { configurable: true, value: false });
+  fireEvent.waiting(video);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(stage).not.toHaveClass('controls-hidden');
+
+  fireEvent.timeUpdate(video);
+  fireEvent.pointerMove(stage);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(stage).toHaveClass('controls-hidden');
+
+  fireEvent.pointerMove(stage);
+  fireEvent.pause(video);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(stage).not.toHaveClass('controls-hidden');
+
+  fireEvent.playing(video);
+  fireEvent.keyDown(stage, { key: 'Tab' });
+  mute.focus();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+  expect(stage).not.toHaveClass('controls-hidden');
 });
