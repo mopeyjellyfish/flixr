@@ -242,11 +242,13 @@ describe('owner operations', () => {
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
       if (path.includes('/owner/roots')) return new Response(JSON.stringify({ films: '', tv: '' }));
       if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
-      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [{ id: 'ada', name: 'Ada', protected: false }] }));
+      if (path.endsWith('/owner/profiles/ada/access-policy')) return new Response(JSON.stringify({ library_ids: [], rating_region: '', max_rating: '', unrated_policy: 'allow', allow_tags: [], deny_tags: [], version: 1 }));
+      if (path === '/api/v1/profiles') return new Response(JSON.stringify({ profiles: [{ id: 'ada', name: 'Ada', protected: false }] }));
       return new Response('{}');
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     const remove = await screen.findByRole('button', { name: /delete profile/i });
+    expect(await screen.findByRole('group', { name: /content access for ada/i })).toBeVisible();
     fireEvent.click(remove);
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Ada"));
     expect(fetcher).not.toHaveBeenCalledWith('/api/v1/profiles/ada', expect.anything());
