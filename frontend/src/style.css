@@ -150,6 +150,12 @@ a:focus-visible, summary:focus-visible { outline: 3px solid var(--text); outline
 .owner-section form { align-content: start; }
 .owner-section form button { justify-self: start; }
 .owner-section .actions { flex-wrap: wrap; justify-content: start; }
+.library-manager > section { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--hairline); }
+.library-manager .actions h3 { margin: 0; min-width: 10rem; font: 700 1.05rem Manrope, Arial, sans-serif; }
+.library-manager .actions > span, .library-location > span { color: var(--muted); }
+.library-location { display: grid; grid-template-columns: minmax(12rem, 1fr) auto auto auto; align-items: center; gap: 0.75rem; max-width: 52rem; padding: 0.65rem 0; }
+.library-location code { overflow-wrap: anywhere; }
+.library-manager form { margin-top: 0.75rem; }
 .owner-section details { margin-top: 2rem; }
 .owner-section summary { cursor: pointer; min-height: 44px; padding: 0.7rem 0; }
 .owner-notice { padding: 1rem; border-left: 3px solid var(--interaction); background: var(--surface); }
@@ -164,7 +170,7 @@ a:focus-visible, summary:focus-visible { outline: 3px solid var(--text); outline
 .setting-row { display: grid; gap: .2rem; padding: .8rem; border: 1px solid var(--hairline); border-radius: .55rem; }
 .setting-row span, .setting-row small { color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 1000px) { .owner-columns { grid-template-columns: 1fr; gap: 1rem; } }
-@media (max-width: 700px) { .owner-layout { grid-template-columns: 1fr; gap: 1.5rem; } .owner-nav { position: static; grid-template-columns: repeat(2, 1fr); } .owner-intro { margin: 2rem 0; } }
+@media (max-width: 700px) { .library-location { grid-template-columns: 1fr auto; } .library-location code { grid-column: 1 / -1; } .owner-layout { grid-template-columns: 1fr; gap: 1.5rem; } .owner-nav { position: static; grid-template-columns: repeat(2, 1fr); } .owner-intro { margin: 2rem 0; } }
 dialog { width: min(42rem, calc(100vw - 2rem)); max-width: min(42rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); margin: auto; overflow: auto; background: var(--surface); color: var(--text); border: 1px solid #35435a; border-radius: 1.25rem; padding: 1.5rem; box-shadow: 0 1.5rem 4rem #0008; }
 dialog::backdrop { background: #05070cdd; }
 .screen-readiness dialog h2 { margin-bottom: 1rem; }

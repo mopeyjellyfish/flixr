@@ -74,6 +74,11 @@ or set Compose `user: "1000:1000"` and grant that account access. Use `group_add
 for supplementary media-read groups. Flixr does not recursively chown your media.
 Keep SQLite on storage with reliable local file locking; network media mounts are fine.
 
+A named Films or TV library can include folders from several mounts. Add each
+container path in **Server settings → Libraries**; every folder is scanned and
+reports availability independently, so an offline disk does not suppress healthy
+disks in the same library.
+
 Separate mounts can replace the single `/media` mount:
 
 ```yaml
@@ -92,8 +97,8 @@ one scan loses at least 10 files and half of that root. Reconnect the share and 
 again to clear the review, or use **Server settings → Libraries → Confirm removal**
 to mark the captured files unavailable. Their title records, history, progress, lists,
 ratings, and owner metadata remain recoverable. Smaller ordinary removals are marked
-unavailable after a complete scan. Unreadable or missing roots and canceled scans do
-not publish catalog changes.
+unavailable after a complete scan. Unreadable or missing folders retain their prior sources while healthy folders
+still publish completed scan results. Canceled scans publish no catalog changes.
 
 ### External audio tracks
 
@@ -118,7 +123,9 @@ the variables. Merely mounting a `.env` file inside a container does not load it
 See [Docker's environment documentation](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/).
 
 Explicit environment settings apply at startup. Omitted roots/token retain saved
-settings; provided roots/token are imported into the saved configuration. Playback
+settings. Provided roots initialize empty locations; changes to populated roots are
+staged in Named libraries until the owner reviews and confirms the affected titles.
+Playback
 environment values overlay saved settings without persisting that overlay. UI changes
 can apply during the process lifetime; an explicit environment value wins again on
 restart. To hand management back to the UI, remove that variable and recreate the
@@ -132,7 +139,7 @@ signs that profile out; changing or removing its PIN also signs its active sessi
 | `FLIXR_DATA_DIR` | `/config` in Docker; `./flixr-data` natively |
 | `FLIXR_SEGMENT_DIR` | `/cache/segments` in Docker; saved setting or data-dir `segments` natively; absolute path |
 | `FLIXR_LISTEN_ADDR` | `0.0.0.0:8787` in Docker; `127.0.0.1:8787` natively |
-| `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | Saved roots; container paths. Explicit empty value clears that root |
+| `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | Saved roots; container paths. Changes and explicit removal of populated roots require owner confirmation in Named libraries |
 | `FLIXR_TMDB_TOKEN` / `FLIXR_TMDB_TOKEN_FILE` | Optional TMDB read-access token; empty direct value removes saved token |
 | `FLIXR_METADATA_ENABLED` | `true`; set `false` for explicit offline/disabled metadata without deleting credentials |
 | `FLIXR_OWNER_PASSWORD` / `FLIXR_OWNER_PASSWORD_FILE` | Optional first-start owner claim; never resets an existing owner |

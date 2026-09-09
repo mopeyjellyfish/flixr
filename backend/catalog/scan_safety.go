@@ -14,9 +14,9 @@ const (
 )
 
 type rootScan struct {
-	kind, path string
-	items      int
-	missing    int
+	locationID, kind, path string
+	items                  int
+	missing                int
 }
 
 type locationScanError struct {
@@ -35,22 +35,30 @@ type activeSource struct {
 var ErrRemovalReviewNotFound = errors.New("library removal review not found")
 
 type LibraryLocation struct {
-	RootKind      string `json:"root_kind"`
-	State         string `json:"state"`
-	ScanComplete  bool   `json:"scan_complete"`
-	Items         int    `json:"items"`
-	Missing       int    `json:"missing"`
-	PendingScanID string `json:"pending_scan_id,omitempty"`
-	LastScanID    string `json:"last_scan_id,omitempty"`
-	UpdatedAt     int64  `json:"updated_at"`
-	Message       string `json:"message,omitempty"`
+	ID                  string `json:"id"`
+	LibraryID           string `json:"library_id"`
+	LibraryName         string `json:"library_name,omitempty"`
+	RootPath            string `json:"path,omitempty"`
+	Revision            int64  `json:"revision,omitempty"`
+	RootKind            string `json:"root_kind"`
+	State               string `json:"state"`
+	ScanComplete        bool   `json:"scan_complete"`
+	Items               int    `json:"items"`
+	Missing             int    `json:"missing"`
+	PendingScanID       string `json:"pending_scan_id,omitempty"`
+	LastScanID          string `json:"last_scan_id,omitempty"`
+	UpdatedAt           int64  `json:"updated_at"`
+	Message             string `json:"message,omitempty"`
+	PendingChangeID     string `json:"pending_change_id,omitempty"`
+	PendingRootPath     string `json:"pending_path,omitempty"`
+	PendingChangeOrigin string `json:"pending_change_origin,omitempty"`
 }
 
 func (c *Catalog) LibraryLocations() ([]LibraryLocation, error) {
 	if c.db == nil {
 		return []LibraryLocation{}, nil
 	}
-	rows, err := c.db.Query(`SELECT root_kind,state,scan_complete,item_count,missing_count,pending_scan_id,last_scan_id,updated_at,message FROM library_locations ORDER BY root_kind`)
+	rows, err := c.db.Query(`SELECT x.id,x.library_id,l.name,l.kind,x.state,x.scan_complete,x.item_count,x.missing_count,x.pending_scan_id,x.last_scan_id,x.updated_at,x.message FROM library_locations x JOIN libraries l ON l.id=x.library_id ORDER BY l.created_at,l.id,x.id`)
 	if err != nil {
 		return nil, fmt.Errorf("load library locations: %w", err)
 	}
@@ -59,7 +67,7 @@ func (c *Catalog) LibraryLocations() ([]LibraryLocation, error) {
 	for rows.Next() {
 		var location LibraryLocation
 		var complete int
-		if err := rows.Scan(&location.RootKind, &location.State, &complete, &location.Items, &location.Missing, &location.PendingScanID, &location.LastScanID, &location.UpdatedAt, &location.Message); err != nil {
+		if err := rows.Scan(&location.ID, &location.LibraryID, &location.LibraryName, &location.RootKind, &location.State, &complete, &location.Items, &location.Missing, &location.PendingScanID, &location.LastScanID, &location.UpdatedAt, &location.Message); err != nil {
 			return nil, fmt.Errorf("read library location: %w", err)
 		}
 		location.ScanComplete = complete != 0
@@ -71,9 +79,14 @@ func (c *Catalog) LibraryLocations() ([]LibraryLocation, error) {
 	return locations, nil
 }
 
-func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) error {
-	if scanID == "" || (rootKind != "film" && rootKind != "episode") || c.db == nil {
+func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, locationID string) error {
+	if scanID == "" || locationID == "" || c.db == nil {
 		return ErrRemovalReviewNotFound
+	}
+	if locationID == "film" {
+		locationID = "films-root"
+	} else if locationID == "episode" {
+		locationID = "tv-root"
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -89,7 +102,7 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) 
 	}
 	defer tx.Rollback()
 	var pending, state string
-	if err := tx.QueryRowContext(ctx, `SELECT pending_scan_id,state FROM library_locations WHERE root_kind=?`, rootKind).Scan(&pending, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT pending_scan_id,state FROM library_locations WHERE id=?`, locationID).Scan(&pending, &state); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrRemovalReviewNotFound
 		}
@@ -98,7 +111,7 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) 
 	if state != "review_required" || pending != scanID {
 		return ErrRemovalReviewNotFound
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT physical_file_id,catalog_id FROM library_removal_candidates WHERE root_kind=? AND scan_id=? ORDER BY physical_file_id`, rootKind, scanID)
+	rows, err := tx.QueryContext(ctx, `SELECT physical_file_id,catalog_id FROM library_removal_candidates WHERE location_id=? AND scan_id=? ORDER BY physical_file_id`, locationID, scanID)
 	if err != nil {
 		return fmt.Errorf("load library cleanup candidates: %w", err)
 	}
@@ -110,7 +123,7 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) 
 			return fmt.Errorf("read library cleanup candidate: %w", err)
 		}
 		catalogIDs[catalogID] = true
-		if _, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET present=0,selected=0 WHERE id=? AND root_kind=?`, physicalID, rootKind); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE catalog_physical_files SET present=0,selected=0 WHERE id=? AND location_id=?`, physicalID, locationID); err != nil {
 			rows.Close()
 			return fmt.Errorf("confirm physical source removal: %w", err)
 		}
@@ -123,35 +136,30 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) 
 	if len(catalogIDs) == 0 {
 		return ErrRemovalReviewNotFound
 	}
+	switched := make(map[string]bool, len(catalogIDs))
+	ids := make([]string, 0, len(catalogIDs))
 	for catalogID := range catalogIDs {
-		if _, err := tx.ExecContext(ctx, `UPDATE catalog_items SET available=EXISTS(SELECT 1 FROM catalog_physical_files WHERE catalog_id=? AND present=1) WHERE id=?`, catalogID, catalogID); err != nil {
-			return fmt.Errorf("confirm catalog source removal: %w", err)
+		changed, err := reselectCatalogSource(ctx, tx, catalogID)
+		if err != nil {
+			return fmt.Errorf("select remaining catalog source: %w", err)
 		}
+		switched[catalogID] = changed
+		ids = append(ids, catalogID)
 	}
 	if err := applyIdentityMappings(tx); err != nil {
 		return fmt.Errorf("apply cleanup availability: %w", err)
 	}
-	playable := make(map[string]bool, len(catalogIDs))
-	for catalogID := range catalogIDs {
-		var available bool
-		if err := tx.QueryRowContext(ctx, `SELECT playable FROM catalog_items WHERE id=?`, catalogID).Scan(&available); err != nil {
-			return fmt.Errorf("read cleaned catalog item: %w", err)
-		}
-		playable[catalogID] = available
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM library_removal_candidates WHERE root_kind=? AND scan_id=?`, rootKind, scanID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM library_removal_candidates WHERE location_id=? AND scan_id=?`, locationID, scanID); err != nil {
 		return fmt.Errorf("clear library cleanup review: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE library_locations SET state='available',scan_complete=1,missing_count=0,pending_scan_id='',updated_at=?,message='' WHERE root_kind=?`, time.Now().Unix(), rootKind); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE library_locations SET state='available',scan_complete=1,missing_count=0,pending_scan_id='',updated_at=?,message='' WHERE id=?`, time.Now().Unix(), locationID); err != nil {
 		return fmt.Errorf("complete library cleanup review: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit library cleanup: %w", err)
 	}
-	for catalogID, available := range playable {
-		item := c.items[catalogID]
-		item.Playable = available
-		c.items[catalogID] = item
+	if err := c.refreshReselectedItems(ids, switched); err != nil {
+		return fmt.Errorf("refresh cleaned catalog source: %w", err)
 	}
 	c.refreshSeriesAvailability()
 	if c.status.ID == scanID && c.status.Status == "review_required" {
@@ -162,17 +170,17 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, rootKind string) 
 	return nil
 }
 
-func (c *Catalog) activeSources(rootKind string, previous map[scanKey]Item) ([]activeSource, error) {
+func (c *Catalog) activeSources(locationID string, previous map[scanKey]Item) ([]activeSource, error) {
 	if c.db == nil {
 		out := make([]activeSource, 0)
 		for key, item := range previous {
-			if key.kind == rootKind && item.Playable {
+			if key.locationID == locationID && item.Playable {
 				out = append(out, activeSource{catalogID: item.ID, relativePath: key.rel})
 			}
 		}
 		return out, nil
 	}
-	rows, err := c.db.Query(`SELECT id,catalog_id,relative_path FROM catalog_physical_files WHERE root_kind=? AND present=1 ORDER BY relative_path,id`, rootKind)
+	rows, err := c.db.Query(`SELECT id,catalog_id,relative_path FROM catalog_physical_files WHERE location_id=? AND present=1 ORDER BY relative_path,id`, locationID)
 	if err != nil {
 		return nil, fmt.Errorf("load active library sources: %w", err)
 	}
@@ -210,16 +218,16 @@ func (c *Catalog) recordRemovalReview(scanID string, root rootScan, sources []ac
 		return fmt.Errorf("begin library removal review: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM library_removal_candidates WHERE root_kind=?`, root.kind); err != nil {
+	if _, err := tx.Exec(`DELETE FROM library_removal_candidates WHERE location_id=?`, root.locationID); err != nil {
 		return fmt.Errorf("reset library removal review: %w", err)
 	}
 	for _, source := range sources {
-		if _, err := tx.Exec(`INSERT INTO library_removal_candidates(root_kind,scan_id,physical_file_id,catalog_id) VALUES(?,?,?,?)`, root.kind, scanID, source.physicalID, source.catalogID); err != nil {
+		if _, err := tx.Exec(`INSERT INTO library_removal_candidates(location_id,scan_id,physical_file_id,catalog_id) VALUES(?,?,?,?)`, root.locationID, scanID, source.physicalID, source.catalogID); err != nil {
 			return fmt.Errorf("save library removal candidate: %w", err)
 		}
 	}
 	message := fmt.Sprintf("Review %d missing files before confirming cleanup.", len(sources))
-	if _, err := tx.Exec(`INSERT INTO library_locations(root_kind,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,last_scan_id,updated_at,message) VALUES(?,?,'review_required',0,?,?,?,?,?,?) ON CONFLICT(root_kind) DO UPDATE SET root_path=excluded.root_path,state=excluded.state,scan_complete=0,item_count=excluded.item_count,missing_count=excluded.missing_count,pending_scan_id=excluded.pending_scan_id,last_scan_id=excluded.last_scan_id,updated_at=excluded.updated_at,message=excluded.message`, root.kind, root.path, root.items, len(sources), scanID, scanID, time.Now().Unix(), message); err != nil {
+	if _, err := tx.Exec(`UPDATE library_locations SET root_path=?,state='review_required',scan_complete=0,item_count=?,missing_count=?,pending_scan_id=?,last_scan_id=?,updated_at=?,message=? WHERE id=?`, root.path, root.items, len(sources), scanID, scanID, time.Now().Unix(), message, root.locationID); err != nil {
 		return fmt.Errorf("save library removal review: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -233,8 +241,8 @@ func (c *Catalog) recordUnavailableLocation(scanID string, root rootScan, cause 
 		return
 	}
 	message := cause.Error()
-	_, _ = c.db.Exec(`INSERT INTO library_locations(root_kind,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,last_scan_id,updated_at,message) VALUES(?,?,'unavailable',0,0,0,'',?,?,?) ON CONFLICT(root_kind) DO UPDATE SET root_path=excluded.root_path,state=excluded.state,scan_complete=0,pending_scan_id='',last_scan_id=excluded.last_scan_id,updated_at=excluded.updated_at,message=excluded.message`, root.kind, root.path, scanID, time.Now().Unix(), message)
-	_, _ = c.db.Exec(`DELETE FROM library_removal_candidates WHERE root_kind=?`, root.kind)
+	_, _ = c.db.Exec(`UPDATE library_locations SET state='unavailable',scan_complete=0,pending_scan_id='',last_scan_id=?,updated_at=?,message=? WHERE id=?`, scanID, time.Now().Unix(), message, root.locationID)
+	_, _ = c.db.Exec(`DELETE FROM library_removal_candidates WHERE location_id=?`, root.locationID)
 }
 
 type sqlExecutor interface {
@@ -243,10 +251,10 @@ type sqlExecutor interface {
 
 func recordCompleteLocationsTx(tx sqlExecutor, scanID string, roots []rootScan) error {
 	for _, root := range roots {
-		if _, err := tx.Exec(`DELETE FROM library_removal_candidates WHERE root_kind=?`, root.kind); err != nil {
+		if _, err := tx.Exec(`DELETE FROM library_removal_candidates WHERE location_id=?`, root.locationID); err != nil {
 			return fmt.Errorf("clear library removal review: %w", err)
 		}
-		if _, err := tx.Exec(`INSERT INTO library_locations(root_kind,root_path,state,scan_complete,item_count,missing_count,pending_scan_id,last_scan_id,updated_at,message) VALUES(?,?,'available',1,?,?,'',?,?, '') ON CONFLICT(root_kind) DO UPDATE SET root_path=excluded.root_path,state=excluded.state,scan_complete=1,item_count=excluded.item_count,missing_count=excluded.missing_count,pending_scan_id='',last_scan_id=excluded.last_scan_id,updated_at=excluded.updated_at,message=''`, root.kind, root.path, root.items, root.missing, scanID, time.Now().Unix()); err != nil {
+		if _, err := tx.Exec(`UPDATE library_locations SET root_path=?,state='available',scan_complete=1,item_count=?,missing_count=?,pending_scan_id='',last_scan_id=?,updated_at=?,message='' WHERE id=?`, root.path, root.items, root.missing, scanID, time.Now().Unix(), root.locationID); err != nil {
 			return fmt.Errorf("save library location: %w", err)
 		}
 	}

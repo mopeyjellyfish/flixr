@@ -10,6 +10,10 @@ const backdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http:/
 const brightBackdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="#f7d96b"/><circle cx="1180" cy="280" r="360" fill="#f6f8ff"/><path d="M500 900L1100 260l500 500v140z" fill="#5b8cff"/></svg>').toString('base64')}`;
 const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 30_000, bit_depth: 8, audio: [{ codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48_000, bitrate: 128_000 }] };
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
+const ownerLibrariesResponse: { status?: number; json: JSONValue } = { json: { libraries: [
+  { id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] },
+  { id: 'tv', name: 'TV', kind: 'episode', locations: [{ id: 'tv-root', library_id: 'tv', path: '/media/tv', root_kind: 'episode', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] },
+] } };
 
 async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue } | undefined) {
   // New routes take precedence. Keep interception installed while changing states
@@ -21,6 +25,7 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
       ?? (request.method() === 'GET' && url.pathname.startsWith('/api/v1/ratings/') ? { json: { rating: null } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });

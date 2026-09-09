@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -104,5 +105,125 @@ func TestOwnerReviewsAndConfirmsSuspiciousLibraryRemoval(t *testing.T) {
 		if after, ok := library.Item(item.ID); !ok || after.Playable {
 			t.Fatalf("confirmed item = %#v, exists=%v", after, ok)
 		}
+	}
+}
+
+func TestOwnerPreviewsAndConfirmsLocationRemoval(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.mp4"), []byte("one"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	library, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil || library.SetRoots(root, "") != nil || library.Scan(t.Context(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := house.Claim(house.SetupToken(), "passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := house.CreateProfile("One", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := house.Select(profile.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := web.NewServer(house, library).Handler()
+	request := func(method, path, body, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		if token != "" {
+			r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	if response := request(http.MethodGet, "/api/v1/owner/libraries", "", viewer); response.Code != http.StatusForbidden {
+		t.Fatalf("profile libraries = %d", response.Code)
+	}
+	libraries := request(http.MethodGet, "/api/v1/owner/libraries", "", owner)
+	if libraries.Code != http.StatusOK || !strings.Contains(libraries.Body.String(), `"id":"films-root"`) || !strings.Contains(libraries.Body.String(), root) {
+		t.Fatalf("owner libraries = %d %s", libraries.Code, libraries.Body.String())
+	}
+	previewResponse := request(http.MethodPost, "/api/v1/owner/library-locations/films-root/change-preview", `{"path":""}`, owner)
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("preview = %d %s", previewResponse.Code, previewResponse.Body.String())
+	}
+	var preview catalog.LocationChangePreview
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil || preview.AffectedSources != 1 || preview.AffectedTitles != 1 {
+		t.Fatalf("preview = %#v, %v", preview, err)
+	}
+	if response := request(http.MethodPost, "/api/v1/owner/library-location-changes/"+preview.ID+"/confirm", "", viewer); response.Code != http.StatusForbidden {
+		t.Fatalf("profile confirmation = %d", response.Code)
+	}
+	confirmed := request(http.MethodPost, "/api/v1/owner/library-location-changes/"+preview.ID+"/confirm", "", owner)
+	if confirmed.Code != http.StatusOK || strings.Contains(confirmed.Body.String(), `"id":"films-root"`) {
+		t.Fatalf("confirmation = %d %s", confirmed.Code, confirmed.Body.String())
+	}
+	items, err := library.List("", 0, 10)
+	if err != nil || len(items) != 1 || items[0].Playable {
+		t.Fatalf("removed location catalog = %#v, %v", items, err)
+	}
+}
+
+func TestLegacyRootAPIAndSettingsImportRequirePreviewForPopulatedLocation(t *testing.T) {
+	root, replacement := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "one.mp4"), []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	library, err := catalog.OpenWithProber(db, catalog.ProberFunc(func(context.Context, *os.File) (catalog.MediaProperties, error) {
+		return catalog.MediaProperties{}, nil
+	}))
+	if err != nil || library.SetRoots(root, "") != nil || library.Scan(t.Context(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := house.Claim(house.SetupToken(), "passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := web.NewServer(house, library).Handler()
+	request := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: owner})
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	for _, call := range []struct{ path, body string }{
+		{path: "/api/v1/owner/roots", body: `{"films":` + strconv.Quote(replacement) + `,"tv":""}`},
+		{path: "/api/v1/owner/settings/import/preview", body: `{"version":1,"settings":{"library.films_root":` + strconv.Quote(replacement) + `}}`},
+		{path: "/api/v1/owner/settings/import", body: `{"version":1,"settings":{"library.films_root":` + strconv.Quote(replacement) + `}}`},
+	} {
+		response := request(call.path, call.body)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "library_change_requires_preview") {
+			t.Fatalf("%s = %d %s", call.path, response.Code, response.Body.String())
+		}
+	}
+	films, _ := library.Roots()
+	canonicalRoot, _ := filepath.EvalSymlinks(root)
+	if films != canonicalRoot {
+		t.Fatalf("rejected compatibility APIs changed root to %q", films)
 	}
 }

@@ -69,6 +69,12 @@ func (b Bootstrap) NonSecretValues() map[string]string {
 		"server.demo": strconv.FormatBool(b.Demo), "household.initial_profile": b.InitialProfile,
 		"background.scan_on_start": strconv.FormatBool(b.ScanOnStart), "background.scan_workers": strconv.Itoa(b.ScanWorkers),
 	}
+	if b.FilmsRoot != nil {
+		values["library.films_root"] = canonicalInventoryRoot(*b.FilmsRoot)
+	}
+	if b.TVRoot != nil {
+		values["library.tv_root"] = canonicalInventoryRoot(*b.TVRoot)
+	}
 	if b.MetadataEnabled != nil {
 		values["metadata.enabled"] = strconv.FormatBool(*b.MetadataEnabled)
 	}
@@ -86,4 +92,18 @@ func (b Bootstrap) NonSecretValues() map[string]string {
 		}
 	}
 	return values
+}
+
+func canonicalInventoryRoot(root string) string {
+	if root == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(abs)
 }

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ settingsInventory: vi.fn().mockResolvedValue({ settings: [
-  { key: 'library.films_root', category: 'Libraries', scope: 'server', default: '', environment: 'FLIXR_FILMS_ROOT', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'existing directory', secret: false, advanced: false, value: '/media/films', source: 'environment', mutable: false },
+  { key: 'library.films_root', category: 'Libraries', scope: 'server', default: '', environment: 'FLIXR_FILMS_ROOT', file_secret: '', persistence: 'database', restart: 'immediate', valid: 'existing directory', secret: false, advanced: false, value: '/media/films', source: 'saved', pending_value: '/mnt/films', pending_source: 'environment', mutable: false },
   { key: 'playback.lease_ttl', category: 'Playback', scope: 'server', default: '45s', environment: 'FLIXR_LEASE_TTL', file_secret: '', persistence: 'environment', restart: 'restart', valid: 'positive duration', secret: false, advanced: true, value: '45s', source: 'default', mutable: false },
 ] }), settingsImportPreview: vi.fn(), settingsImport: vi.fn() }));
 
@@ -16,6 +16,8 @@ describe('settings panel', () => {
   it('searches the basic inventory and reveals advanced entries explicitly', async () => {
     render(<SettingsPanel onNotice={() => undefined} />);
     expect(await screen.findByText('library.films_root')).toBeInTheDocument();
+    expect(screen.getByText('/media/films')).toBeVisible();
+    expect(screen.getByText(/environment requested \/mnt\/films/i)).toBeVisible();
     expect(screen.getByText(/managed by the server environment/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reset library defaults' })).toBeDisabled();
     expect(screen.queryByText('playback.lease_ttl')).not.toBeInTheDocument();

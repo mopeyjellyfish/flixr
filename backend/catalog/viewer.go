@@ -379,11 +379,10 @@ func (c *Catalog) PlaybackItemContext(ctx context.Context, id string) (Item, err
 	if !item.Playable {
 		return Item{}, ErrNotPlayable
 	}
-	c.mu.RLock()
-	item.sourceRoot = c.film
-	if item.rootKind == "episode" {
-		item.sourceRoot = c.tv
+	root, err := c.sourceRoot(item)
+	if err != nil {
+		return Item{}, ErrNotPlayable
 	}
-	c.mu.RUnlock()
+	item.sourceRoot = root
 	return item, nil
 }

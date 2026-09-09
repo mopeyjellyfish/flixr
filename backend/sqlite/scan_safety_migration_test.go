@@ -54,7 +54,7 @@ func TestLibraryScanSafetyMigrationPreservesExistingCatalogAndProgress(t *testin
 	if err := db.QueryRow(`SELECT position_ms FROM progress WHERE catalog_id='film'`).Scan(&position); err != nil || position != 123 {
 		t.Fatalf("migrated progress = %d, %v", position, err)
 	}
-	if _, err := db.Exec(`INSERT INTO library_locations(root_kind,state) VALUES('film','unknown')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO library_locations(id,library_id,root_path,state) VALUES('extra','films','/media/extra','unknown')`); err != nil {
 		t.Fatalf("migrated location table: %v", err)
 	}
 }

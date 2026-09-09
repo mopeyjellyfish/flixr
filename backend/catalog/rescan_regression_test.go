@@ -229,10 +229,10 @@ func TestEmptyMountedRootRequiresReviewWithoutChangingCatalog(t *testing.T) {
 	}
 	var state, pending string
 	var complete, missing, candidates int
-	if err := db.QueryRow(`SELECT state,scan_complete,missing_count,pending_scan_id FROM library_locations WHERE root_kind='film'`).Scan(&state, &complete, &missing, &pending); err != nil {
+	if err := db.QueryRow(`SELECT state,scan_complete,missing_count,pending_scan_id FROM library_locations WHERE id='films-root'`).Scan(&state, &complete, &missing, &pending); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM library_removal_candidates WHERE root_kind='film' AND scan_id=?`, pending).Scan(&candidates); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM library_removal_candidates WHERE location_id='films-root' AND scan_id=?`, pending).Scan(&candidates); err != nil {
 		t.Fatal(err)
 	}
 	if state != "review_required" || complete != 0 || missing != 2 || pending == "" || candidates != 2 {
