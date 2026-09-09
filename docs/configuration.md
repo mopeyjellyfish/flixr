@@ -14,6 +14,7 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 | Remote metadata | `true` | server / database | `FLIXR_METADATA_ENABLED` | no |
 | Personal TMDB override | application default when present | server / database | `FLIXR_TMDB_TOKEN`, `_FILE` | no |
 | Scan on start, workers | `false`, `4` | server / environment | `FLIXR_SCAN_ON_START`, `FLIXR_SCAN_WORKERS` | yes |
+| Scan schedule override | unset | server / database | `FLIXR_SCAN_SCHEDULE` | no |
 | Segment directory | `<data-dir>/segments` | server / sidecar and database | `FLIXR_SEGMENT_DIR` | yes |
 | Generation/global bytes, generation count | 256 MiB, 512 MiB, 2 | server / database | `FLIXR_GENERATION_BYTES`, `FLIXR_GLOBAL_BYTES`, `FLIXR_MAX_GENERATIONS` | no |
 | Lease TTL, heartbeat, segment window, process grace | 45s, 15s, 60s, 2s | server / environment | `FLIXR_LEASE_TTL`, `FLIXR_HEARTBEAT_INTERVAL`, `FLIXR_SEGMENT_WINDOW`, `FLIXR_PROCESS_GRACE` | yes |
@@ -30,6 +31,35 @@ another location. Moving or removing a folder first creates an exact, durable
 preview of affected sources and titles; confirmation fails if a scan changed that
 snapshot. Logical titles, profile progress, lists, ratings, history, and owner
 metadata remain stored after removal.
+
+## Scheduled library scans
+
+Each named library has its own disabled-by-default interval or daily schedule in
+the owner Libraries view. Interval schedules run from the next recorded due time.
+Daily schedules use an IANA timezone such as `Europe/London`. During a spring
+daylight-saving gap, Flixr runs at the first valid local minute after the requested
+time. When a local time occurs twice in autumn, it uses the first occurrence.
+After downtime, any number of missed times becomes one queued scan and the next
+future due time is recorded.
+
+The single scan runner serializes manual, startup, scheduled, and retry requests.
+Another request for a library that is queued or running coalesces into its existing
+job. Running jobs become **interrupted** after a restart and can be retried. Transient
+per-file failures retry at one minute and then five minutes, up to three attempts;
+permission and unavailable-folder failures wait for an owner fix or the next normal
+schedule. Cancelling a run leaves the last committed catalog intact.
+
+Exclusions are newline-separated relative glob patterns. `*` matches within one
+path segment and `**` spans directories, for example `Extras/**` or
+`**/Samples/**`. Excluded files are not opened or probed. Titles already admitted
+from an excluded path remain available; exclusions do not delete catalog, history,
+ratings, or list data.
+
+`FLIXR_SCAN_SCHEDULE` applies one schedule to every library and makes schedule
+controls read-only. Accepted values are `off`, `every:<duration>` (at least one
+minute), and `daily:<HH:MM>@<IANA timezone>`, such as
+`daily:03:30@Europe/London`. `FLIXR_SCAN_WORKERS` remains the 1–32 concurrency
+bound inside the one active library scan.
 
 The owner Configuration panel provides a searchable Basic view, an Advanced view, portable non-secret export, and import preview. Imports use the same validated library or playback setter as the owner form and accept exactly one scope per request, so each applied change is atomic at that scope. Mixed scopes, network and access settings require explicit review. Exports omit all secret values; previews reject environment-managed values.
 

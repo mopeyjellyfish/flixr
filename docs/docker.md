@@ -146,6 +146,7 @@ signs that profile out; changing or removing its PIN also signs its active sessi
 | `FLIXR_INITIAL_PROFILE` | Optional unprotected initial profile, created only for a claimed household with no profiles |
 | `FLIXR_SCAN_ON_START` | `false`; start a background scan on boot |
 | `FLIXR_SCAN_WORKERS` | `4`, range 1–32; startup scan worker count |
+| `FLIXR_SCAN_SCHEDULE` | Optional all-library override: `off`, `every:6h`, or `daily:03:30@Europe/London`; schedule UI becomes read-only |
 | `FLIXR_GENERATION_BYTES` | Saved value or `268435456` (256 MiB) |
 | `FLIXR_GLOBAL_BYTES` | Saved value or `536870912` (512 MiB) |
 | `FLIXR_MAX_GENERATIONS` | Saved value or `2`; must fit the reserved global byte budget |

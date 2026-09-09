@@ -32,6 +32,7 @@ func Inventory(dataDir string) []SettingDefinition {
 		{"metadata.tmdb_token", "Metadata", "server", "", "FLIXR_TMDB_TOKEN", "FLIXR_TMDB_TOKEN_FILE", "database", "immediate", "provider token", true, false},
 		{"background.scan_on_start", "Background work", "server", "false", "FLIXR_SCAN_ON_START", "", "environment", "restart", "boolean", false, true},
 		{"background.scan_workers", "Background work", "server", "4", "FLIXR_SCAN_WORKERS", "", "environment", "restart", "integer 1–32", false, true},
+		{"background.scan_schedule", "Background work", "server", "", "FLIXR_SCAN_SCHEDULE", "", "database", "immediate", "off, every:<duration>, or daily:<HH:MM>@<timezone>", false, true},
 		{"playback.segment_dir", "Playback", "server", defaults.SegmentDir, "FLIXR_SEGMENT_DIR", "", "sidecar and database", "restart", "absolute, Flixr-owned directory", false, false},
 		{"playback.generation_bytes", "Playback", "server", strconv.FormatInt(defaults.GenerationBytes, 10), "FLIXR_GENERATION_BYTES", "", "database", "immediate", "positive; no more than global bytes", false, true},
 		{"playback.global_bytes", "Playback", "server", strconv.FormatInt(defaults.GlobalBytes, 10), "FLIXR_GLOBAL_BYTES", "", "database", "immediate", "at least generation bytes", false, false},
@@ -68,6 +69,9 @@ func (b Bootstrap) NonSecretValues() map[string]string {
 		"server.data_dir": b.DataDir, "server.listen_addr": b.ListenAddr, "server.tls_cert": b.TLSCert,
 		"server.demo": strconv.FormatBool(b.Demo), "household.initial_profile": b.InitialProfile,
 		"background.scan_on_start": strconv.FormatBool(b.ScanOnStart), "background.scan_workers": strconv.Itoa(b.ScanWorkers),
+	}
+	if b.ScanSchedule != "" {
+		values["background.scan_schedule"] = b.ScanSchedule
 	}
 	if b.FilmsRoot != nil {
 		values["library.films_root"] = canonicalInventoryRoot(*b.FilmsRoot)

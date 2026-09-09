@@ -226,9 +226,16 @@ type ScanStatus struct {
 	FinishedAt int64  `json:"finished_at,omitempty"`
 	Status     string `json:"status"`
 	Scanned    int    `json:"scanned"`
+	Total      *int   `json:"total,omitempty"`
+	Skipped    int    `json:"skipped"`
 	Failed     int    `json:"failed"`
 	Unmatched  int    `json:"unmatched"`
 	Message    string `json:"message,omitempty"`
+}
+
+type scanRequest struct {
+	libraries map[string]bool
+	retry     map[string]bool
 }
 
 type ArtworkMaintenanceStatus struct {
@@ -264,6 +271,14 @@ type Catalog struct {
 	maintenanceCancel                context.CancelFunc
 	maintenanceDone                  chan struct{}
 	maintenanceStatus                ArtworkMaintenanceStatus
+	schedulerMu                      sync.Mutex
+	schedulerCancel                  context.CancelFunc
+	schedulerDone                    chan struct{}
+	schedulerWake                    chan struct{}
+	schedulerWorkers                 int
+	scanScheduleOverride             string
+	activeJobID                      string
+	activeJobCancel                  context.CancelFunc
 	maintenanceDir                   afero.File
 	artworkObjectsDir                afero.File
 	derivativeBytes                  int64
@@ -677,9 +692,10 @@ type scanFile struct {
 type sidecarFile struct{ rel string }
 type scanKey struct{ locationID, kind, rel string }
 type scanResult struct {
-	item Item
-	file scanFile
-	err  error
+	item    Item
+	file    scanFile
+	err     error
+	skipped bool
 }
 
 type scanObservation struct {
@@ -698,6 +714,24 @@ func randomScanID() (string, error) {
 
 // StartScan begins one bounded asynchronous scan. Its current and last outcome is available through ScanStatus.
 func (c *Catalog) StartScan(ctx context.Context, workers int) error {
+	return c.startScan(ctx, workers, scanRequest{})
+}
+
+// StartLibraryScan runs the normal incremental scanner for one named library.
+func (c *Catalog) StartLibraryScan(ctx context.Context, workers int, libraryID string) error {
+	if strings.TrimSpace(libraryID) == "" {
+		return ErrLibraryNotFound
+	}
+	if c.db != nil {
+		var exists int
+		if err := c.db.QueryRow(`SELECT COUNT(*) FROM libraries WHERE id=?`, libraryID).Scan(&exists); err != nil || exists == 0 {
+			return ErrLibraryNotFound
+		}
+	}
+	return c.startScan(ctx, workers, scanRequest{libraries: map[string]bool{libraryID: true}})
+}
+
+func (c *Catalog) startScan(ctx context.Context, workers int, request scanRequest) error {
 	if workers < 1 {
 		workers = 1
 	}
@@ -725,7 +759,7 @@ func (c *Catalog) StartScan(ctx context.Context, workers int) error {
 	status := c.status
 	c.mu.Unlock()
 	c.saveStatus(status)
-	go c.runScan(ctx, workers)
+	go c.runScan(ctx, workers, request)
 	return nil
 }
 
@@ -750,8 +784,26 @@ func (c *Catalog) Scan(ctx context.Context, workers int) error {
 	}
 }
 
-func (c *Catalog) runScan(ctx context.Context, workers int) {
-	err := c.scan(ctx, workers)
+func (c *Catalog) scanLibrary(ctx context.Context, workers int, libraryID string, retry map[string]bool) error {
+	request := scanRequest{libraries: map[string]bool{libraryID: true}, retry: retry}
+	if err := c.startScan(ctx, workers, request); err != nil {
+		return err
+	}
+	c.mu.RLock()
+	done := c.done
+	c.mu.RUnlock()
+	select {
+	case <-done:
+		return c.scanError()
+	case <-ctx.Done():
+		c.Cancel()
+		<-done
+		return ctx.Err()
+	}
+}
+
+func (c *Catalog) runScan(ctx context.Context, workers int, request scanRequest) {
+	err := c.scan(ctx, workers, request)
 	c.mu.Lock()
 	if errors.Is(err, ErrRemovalReviewRequired) {
 		c.status.Status = "review_required"
@@ -801,7 +853,7 @@ func (c *Catalog) scanError() error {
 	return nil
 }
 
-func (c *Catalog) scan(ctx context.Context, workers int) error {
+func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) error {
 	c.mu.RLock()
 	scanID := c.status.ID
 	previousByPath := make(map[scanKey]Item, len(c.items))
@@ -821,12 +873,17 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	var files []scanFile
 	completedRoots := make([]rootScan, 0, len(roots))
 	protectedLocations := map[string]bool{}
+	protectedKeys := map[scanKey]bool{}
 	var unavailableLocations []*locationScanError
 	var removalReviews []struct {
 		root    rootScan
 		sources []activeSource
 	}
 	for _, r := range roots {
+		if len(request.libraries) > 0 && !request.libraries[r.libraryID] {
+			protectedLocations[r.id] = true
+			continue
+		}
 		if r.path == "" {
 			continue
 		}
@@ -836,7 +893,11 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		}
 		var rootFiles []scanFile
 		var sidecars, subtitleSidecars []sidecarFile
-		err = afero.Walk(c.fs, r.path, func(path string, info os.FileInfo, walkErr error) error {
+		exclusions, exclusionErr := c.scanExclusions(r.libraryID)
+		if exclusionErr != nil {
+			return exclusionErr
+		}
+		err = afero.Walk(c.fs, r.path, func(filePath string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				// A disconnected or unreadable mount is not an empty library.
 				return fmt.Errorf("read media directory: %w", walkErr)
@@ -844,19 +905,28 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-				return nil
-			}
-			rel, err := filepath.Rel(r.path, path)
+			rel, err := filepath.Rel(r.path, filePath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return ErrOutsideRoot
 			}
 			rel = filepath.ToSlash(rel)
-			if media(path) {
+			if rel != "." && excludedScanPath(rel, exclusions) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+			if media(filePath) {
+				if len(request.retry) > 0 && !request.retry[r.id+"\x00"+rel] {
+					return nil
+				}
 				rootFiles = append(rootFiles, scanFile{root: r.path, kind: r.kind, rel: rel, locationID: r.id, size: info.Size(), mtime: info.ModTime().UnixNano(), changeToken: fileChangeToken(info)})
-			} else if externalAudio(path) {
+			} else if externalAudio(filePath) {
 				sidecars = append(sidecars, sidecarFile{rel: rel})
-			} else if externalSubtitle(path) {
+			} else if externalSubtitle(filePath) {
 				subtitleSidecars = append(subtitleSidecars, sidecarFile{rel: rel})
 			}
 			return nil
@@ -881,12 +951,29 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			discovered[file.rel] = true
 		}
 		missing := make([]activeSource, 0)
+		excludedKnown := 0
+		if len(request.retry) > 0 {
+			protectedLocations[r.id] = true
+		}
 		for _, source := range active {
-			if !discovered[source.relativePath] {
+			if excludedScanPath(source.relativePath, exclusions) {
+				excludedKnown++
+				protectedKeys[scanKey{r.id, r.kind, source.relativePath}] = true
+				continue
+			}
+			if len(request.retry) == 0 && !discovered[source.relativePath] {
 				missing = append(missing, source)
 			}
 		}
-		rootState := rootScan{locationID: r.id, kind: r.kind, path: r.path, items: len(rootFiles), missing: len(missing)}
+		rootState := rootScan{locationID: r.id, kind: r.kind, path: r.path, items: len(rootFiles) + excludedKnown, missing: len(missing)}
+		if len(request.retry) > 0 {
+			for index := range rootFiles {
+				rootFiles[index].sidecars = matchingAudioSidecars(rootFiles[index].rel, sidecars)
+				rootFiles[index].subtitleSidecars = matchingSubtitleSidecars(rootFiles[index].rel, subtitleSidecars)
+			}
+			files = append(files, rootFiles...)
+			continue
+		}
 		if suspiciousRemoval(len(active), len(missing), len(rootFiles)) {
 			removalReviews = append(removalReviews, struct {
 				root    rootScan
@@ -902,6 +989,10 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 		}
 		files = append(files, rootFiles...)
 	}
+	total := len(files)
+	c.mu.Lock()
+	c.status.Total = &total
+	c.mu.Unlock()
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].locationID+"/"+files[i].rel < files[j].locationID+"/"+files[j].rel
 	})
@@ -913,7 +1004,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 			// A stable path, size and mtime never opens, hashes, or probes the file again.
 			if old, ok := previousByPath[scanKey{f.locationID, f.kind, f.rel}]; ok && old.size == f.size && old.mtime == f.mtime && old.changeToken == f.changeToken && old.probeRevision == mediaProbeRevision && old.digest != "" && len(f.sidecars) == 0 && len(f.subtitleSidecars) == 0 && !hasExternalAudio(old.Audio) && !hasExternalSubtitles(old.Subtitles) {
 				select {
-				case results <- scanResult{item: old, file: f}:
+				case results <- scanResult{item: old, file: f, skipped: true}:
 					return nil
 				case <-groupCtx.Done():
 					return groupCtx.Err()
@@ -937,7 +1028,11 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	var inspected []scanResult
 	for result := range results {
 		c.mu.Lock()
-		c.status.Scanned++
+		if result.skipped {
+			c.status.Skipped++
+		} else {
+			c.status.Scanned++
+		}
 		if result.err != nil {
 			c.status.Failed++
 		}
@@ -960,10 +1055,13 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	}
 	c.mu.RLock()
 	for _, source := range physicalProof {
-		if !protectedLocations[source.sourceLocationID] || !source.sourcePresent {
+		key := scanKey{source.sourceLocationID, source.rootKind, source.path}
+		if (!protectedLocations[source.sourceLocationID] && !protectedKeys[key]) || !source.sourcePresent {
 			continue
 		}
-		key := scanKey{source.sourceLocationID, source.rootKind, source.path}
+		if len(request.retry) > 0 && request.retry[source.sourceLocationID+"\x00"+source.path] && failures[key] == "" {
+			continue
+		}
 		sources[key] = source
 		if _, exists := next[source.ID]; !exists {
 			if current, ok := c.items[source.ID]; ok {
@@ -1584,7 +1682,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			return err
 		}
 		for key, message := range failures {
-			if _, err = tx.Exec("INSERT INTO scan_files(scan_id,relative_path,outcome,message) VALUES(?,?,?,?)", status.ID, key.kind+":"+key.rel, "failed", message); err != nil {
+			if _, err = tx.Exec("INSERT INTO scan_files(scan_id,relative_path,outcome,message) VALUES(?,?,?,?)", status.ID, key.locationID+"\t"+key.kind+":"+key.rel, "failed", message); err != nil {
 				return err
 			}
 		}
@@ -1639,7 +1737,7 @@ func (c *Catalog) saveStatus(status ScanStatus) {
 		return
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO scan_runs(id,started_at,finished_at,status,scanned,failed,unmatched,message) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,scanned=excluded.scanned,failed=excluded.failed,unmatched=excluded.unmatched,message=excluded.message`, status.ID, status.StartedAt, nullableTime(status.FinishedAt), status.Status, status.Scanned, status.Failed, status.Unmatched, status.Message); err != nil {
+	if _, err := tx.Exec(`INSERT INTO scan_runs(id,started_at,finished_at,status,scanned,total,skipped,failed,unmatched,message) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished_at=excluded.finished_at,status=excluded.status,scanned=excluded.scanned,total=excluded.total,skipped=excluded.skipped,failed=excluded.failed,unmatched=excluded.unmatched,message=excluded.message`, status.ID, status.StartedAt, nullableTime(status.FinishedAt), status.Status, status.Scanned, nullableInt(status.Total), status.Skipped, status.Failed, status.Unmatched, status.Message); err != nil {
 		return
 	}
 	if _, err := tx.Exec(`DELETE FROM scan_runs
@@ -1652,6 +1750,12 @@ func (c *Catalog) saveStatus(status ScanStatus) {
 	}
 	_ = tx.Commit()
 }
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
 func nullableTime(t int64) any {
 	if t == 0 {
 		return nil
@@ -1660,7 +1764,12 @@ func nullableTime(t int64) any {
 }
 func (c *Catalog) lastStatus() ScanStatus {
 	var s ScanStatus
-	_ = c.db.QueryRow(`SELECT id,started_at,COALESCE(finished_at,0),status,scanned,failed,unmatched,message FROM scan_runs ORDER BY started_at DESC LIMIT 1`).Scan(&s.ID, &s.StartedAt, &s.FinishedAt, &s.Status, &s.Scanned, &s.Failed, &s.Unmatched, &s.Message)
+	var total sql.NullInt64
+	_ = c.db.QueryRow(`SELECT id,started_at,COALESCE(finished_at,0),status,scanned,total,skipped,failed,unmatched,message FROM scan_runs ORDER BY started_at DESC LIMIT 1`).Scan(&s.ID, &s.StartedAt, &s.FinishedAt, &s.Status, &s.Scanned, &total, &s.Skipped, &s.Failed, &s.Unmatched, &s.Message)
+	if total.Valid {
+		n := int(total.Int64)
+		s.Total = &n
+	}
 	return s
 }
 func (c *Catalog) ScanStatus() ScanStatus { c.mu.RLock(); defer c.mu.RUnlock(); return c.status }
@@ -1673,6 +1782,19 @@ func (c *Catalog) Cancel() {
 	}
 }
 func (c *Catalog) Shutdown(ctx context.Context) error {
+	c.schedulerMu.Lock()
+	schedulerCancel, schedulerDone := c.schedulerCancel, c.schedulerDone
+	c.schedulerMu.Unlock()
+	if schedulerCancel != nil {
+		schedulerCancel()
+	}
+	if schedulerDone != nil {
+		select {
+		case <-schedulerDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	c.mu.RLock()
 	cancel, done, maintenanceCancel, maintenanceDone := c.cancel, c.done, c.maintenanceCancel, c.maintenanceDone
 	c.mu.RUnlock()

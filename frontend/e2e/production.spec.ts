@@ -11,7 +11,7 @@ const viewports = [
 ];
 
 test('built binary completes setup, scan, profile, browse, and detail flow', async ({ page, browser }, testInfo) => {
-  test.setTimeout(150_000);
+  test.setTimeout(190_000);
   const token = process.env.FLIXR_SETUP_TOKEN;
   const filmsRoot = process.env.FLIXR_FILMS_ROOT;
   const tvRoot = process.env.FLIXR_TV_ROOT;
@@ -40,11 +40,11 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   expect((await scan).ok()).toBeTruthy();
   await expect(page.getByRole('heading', { name: /profile/i })).toBeVisible();
   await expect.poll(async () => page.evaluate(async () => {
-    const response = await fetch('/api/v1/owner/scan/status');
-    const body = await response.json() as { scan?: { status?: string; scanned?: number; unmatched?: number; failed?: number } };
-    const scanStatus = body.scan;
-    return `${scanStatus?.status}:${scanStatus?.scanned}:${scanStatus?.unmatched}:${scanStatus?.failed}`;
-  }), { timeout: 30_000 }).toBe('complete:4:0:0');
+    const response = await fetch('/api/v1/owner/scan/jobs');
+    const body = await response.json() as { jobs?: Array<{ status: string; scanned: number; skipped: number; failed: number }> };
+    const jobs=body.jobs??[];const active=jobs.filter((job)=>job.status==='queued'||job.status==='running').length;
+    return `${jobs.length}:${active}:${jobs.reduce((sum,job)=>sum+job.scanned+job.skipped,0)}:${jobs.reduce((sum,job)=>sum+job.failed,0)}`;
+  }), { timeout: 30_000 }).toBe('2:0:4:0');
   await page.getByLabel(/^name$/i).fill('Production viewer');
   await page.getByRole('button', { name: /create profile/i }).click();
   await expect(page).toHaveURL(/\/home$/);
@@ -276,19 +276,40 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('production-search-desktop.png'), fullPage: true });
   await acceptScreens(page, browser, testInfo);
-  const activeGenerations = await page.evaluate(async () => {
-    const login = await fetch('/api/v1/owner/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'production-owner-password' }),
-    });
-    if (!login.ok) throw new Error(`owner login failed with HTTP ${login.status}`);
+
+  const ownerContext = await browser.newContext({ baseURL: origin });
+  await ownerContext.route('**/*', (route) => {
+    if (new URL(route.request().url()).origin === origin) return route.continue();
+    externalRequests.push(route.request().url());
+    return route.abort();
+  });
+  const ownerPage = await ownerContext.newPage();
+  ownerPage.on('pageerror', (error) => errors.push(error.message));
+  ownerPage.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  await ownerPage.goto('/login');
+  await expect(ownerPage.locator('[data-app-content]')).not.toHaveAttribute('inert');
+  await ownerPage.getByLabel(/owner password/i).fill('production-owner-password');
+  await ownerPage.getByRole('button',{name:/sign in/i}).click();
+  await expect(ownerPage.getByRole('heading',{name:'Scheduled scans'})).toBeVisible({timeout:15_000});
+  const activeGenerations = await ownerPage.evaluate(async () => {
     const status = await fetch('/api/v1/owner/playback/status');
     if (!status.ok) throw new Error(`playback status failed with HTTP ${status.status}`);
     const body = await status.json() as { generations: unknown[] };
     return body.generations;
   });
   expect(activeGenerations).toEqual([]);
+  const filmsSchedule=ownerPage.locator('form.setting-row').filter({hasText:'Films'});
+  await filmsSchedule.getByLabel(/enable scheduled scans/i).check();
+  const savedSchedule=ownerPage.waitForResponse((response)=>response.request().method()==='PATCH'&&response.url().endsWith('/owner/libraries/films/scan-policy'));
+  await filmsSchedule.getByRole('button',{name:/save schedule for films/i}).click();
+  expect((await savedSchedule).ok()).toBeTruthy();
+  const queuedScan=ownerPage.waitForResponse((response)=>response.request().method()==='POST'&&response.url().endsWith('/owner/scan/jobs'));
+  await filmsSchedule.getByRole('button',{name:/run now for films/i}).click();
+  const queuedResponse=await queuedScan;expect(queuedResponse.ok()).toBeTruthy();const queuedBody=await queuedResponse.json() as {job:{id:string}};
+  await expect.poll(async()=>ownerPage.evaluate(async(id)=>{const response=await fetch(`/api/v1/owner/scan/jobs/${id}`);const body=await response.json() as {job:{status:string}};return body.job.status;},queuedBody.job.id),{timeout:30_000}).toBe('succeeded');
+  await expect(ownerPage.getByText(/2 unchanged/i).first()).toBeVisible();
+  await ownerPage.screenshot({path:testInfo.outputPath('production-scheduled-scan.png'),fullPage:true});
+  await ownerContext.close();
   expect(errors.filter((message) => !message.includes('ERR_INTERNET_DISCONNECTED') && !message.includes('503'))).toEqual([]);
   expect(externalRequests).toEqual([]);
 });

@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -47,8 +47,14 @@ export const api = {
   settingsExport: () => request<{ version: number; settings: Record<string, string> }>('/owner/settings/export'),
   settingsImportPreview: (data: { version: number; settings: Record<string, string> }) => request<{ changes: Record<string, { from: string; to: string }>; requires_review: boolean; restart_required?: boolean }>('/owner/settings/import/preview', { method: 'POST', body: JSON.stringify(data) }),
   settingsImport: (data: { version: number; settings: Record<string, string> }) => request<{ imported: boolean; restart_required?: boolean }>('/owner/settings/import', { method: 'POST', body: JSON.stringify(data) }),
-  scan: () => request<{ scan: Scan }>('/owner/scan', { method: 'POST' }),
+  scan: () => request<{ scan: Scan; jobs?: ScanJob[] }>('/owner/scan', { method: 'POST' }),
   scanStatus: () => request<{ scan: Scan; locations: LibraryLocation[] }>('/owner/scan/status'),
+  scanJobs: () => request<{ jobs: ScanJob[] }>('/owner/scan/jobs'),
+  queueScan: (libraryID: string) => request<{ job: ScanJob }>('/owner/scan/jobs', { method: 'POST', body: JSON.stringify({ library_id: libraryID }) }),
+  cancelScanJob: (id: string) => request<{ job: ScanJob }>(`/owner/scan/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  retryScanJob: (id: string, files: ScanJobFile[] = []) => request<{ job: ScanJob }>(`/owner/scan/jobs/${encodeURIComponent(id)}/retry`, { method: 'POST', body: JSON.stringify({ files }) }),
+  scanPolicy: (libraryID: string) => request<{ policy: ScanPolicy }>(`/owner/libraries/${encodeURIComponent(libraryID)}/scan-policy`),
+  saveScanPolicy: (libraryID: string, policy: ScanPolicy) => request<{ policy: ScanPolicy }>(`/owner/libraries/${encodeURIComponent(libraryID)}/scan-policy`, { method: 'PATCH', body: JSON.stringify(policy) }),
   confirmScanRemovals: (scanID: string, locationID: string) => request<{ confirmed: boolean; scan: Scan; locations: LibraryLocation[] }>('/owner/scan/removals/confirm', { method: 'POST', body: JSON.stringify({ scan_id: scanID, location_id: locationID }) }),
   unmatchedMetadata: () => request<{ items: MetadataTarget[] }>('/owner/metadata/unmatched'),
   metadataCandidates: (kind: string, id: string) => request<{ candidates: MetadataCandidate[] }>(`/owner/metadata/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/candidates`),

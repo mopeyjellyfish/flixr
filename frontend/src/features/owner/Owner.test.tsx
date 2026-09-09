@@ -322,4 +322,23 @@ describe('owner operations', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/repair list changed before this merge/i);
     expect(screen.getByRole('button', { name: /refresh repair list/i })).toBeInTheDocument();
   });
+
+  it('configures a per-library schedule and exposes durable scan activity', async () => {
+    const fetcher=vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
+      const path=String(input);
+      if(path.includes('/setup/status'))return new Response(JSON.stringify({claimed:true,readiness:{ffprobe:true,ffmpeg:true}}));
+      if(path.endsWith('/owner/libraries')&&!init?.method)return new Response(JSON.stringify({libraries:[{id:'films',name:'Films',kind:'film',locations:[]}]}));
+      if(path.endsWith('/owner/libraries/films/scan-policy'))return new Response(JSON.stringify({policy:{library_id:'films',enabled:true,schedule_kind:'interval',interval_seconds:21600,local_time:'03:00',timezone:'UTC',next_run_at:1800000000,exclusions:['Extras/**']}}));
+      if(path.endsWith('/owner/scan/jobs')&&init?.method==='POST')return new Response(JSON.stringify({job:{id:'job-2',library_id:'films',trigger:'manual',status:'queued',queued_at:1,attempt:1,scanned:0,skipped:0,failed:0,unmatched:0}}),{status:202});
+      if(path.endsWith('/owner/scan/jobs'))return new Response(JSON.stringify({jobs:[{id:'job-1',library_id:'films',trigger:'schedule',status:'partial',queued_at:1,finished_at:2,attempt:1,total:2,scanned:1,skipped:1,failed:1,unmatched:0,files:[{location_id:'films-root',relative_path:'broken.mp4',outcome:'failed',message:'This file could not be inspected.',retryable:true}]}]}));
+      if(path.includes('/profiles'))return new Response(JSON.stringify({profiles:[]}));
+      return new Response(JSON.stringify({scan:{},settings:[],configured:false,screens:[]}));
+    });
+    render(<Owner onBrowse={()=>undefined} onLogout={()=>undefined}/>);
+    expect(await screen.findByRole('heading',{name:/scheduled scans/i})).toBeVisible();
+    expect(await screen.findByDisplayValue('Extras/**')).toBeVisible();
+    expect(screen.getByText(/broken.mp4/i)).toBeVisible();
+    fireEvent.click(screen.getByRole('button',{name:/run now/i}));
+    await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/jobs',expect.objectContaining({method:'POST',body:JSON.stringify({library_id:'films'})})));
+  });
 });
