@@ -207,6 +207,79 @@ func TestMetadataRefreshDueTracksSuccessfulCredentialRevision(t *testing.T) {
 	}
 }
 
+func TestCredentialRefreshRemainsDueUntilEveryLibraryCompletes(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{VideoCodec: "h264"}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyRoot := t.TempDir()
+	archiveRoot := t.TempDir()
+	if err := os.WriteFile(archiveRoot+"/Film.mp4", []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetRoots(emptyRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := c.CreateLibrary("Archive", "film")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddLibraryLocation(archive.ID, archiveRoot); err != nil {
+		t.Fatal(err)
+	}
+	provider := &revisionProvider{}
+	c.SetProvider(provider)
+	c.SetApplicationTMDBToken("application-one")
+	if err := c.Scan(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	c.SetApplicationTMDBToken("application-two")
+	if err := c.scanLibrary(t.Context(), 1, "films", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !c.metadataRefreshDueFor(map[string]bool{archive.ID: true}, false) {
+		t.Fatal("empty first library prematurely completed the credential refresh batch")
+	}
+	afterEmpty := provider.byID
+	if err := c.scanLibrary(t.Context(), 1, archive.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	due := c.metadataRefreshDueFor(nil, false)
+	if provider.byID != afterEmpty+1 || due {
+		t.Fatalf("archive refresh byID=%d due=%v", provider.byID, due)
+	}
+}
+
+func TestMetadataRefreshDueIncludesNamedLibraryLocations(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	library, err := c.CreateLibrary("Archive", "film")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddLibraryLocation(library.ID, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	c.SetApplicationTMDBToken("application-one")
+	if !c.MetadataRefreshDue() {
+		t.Fatal("named-only library location was omitted from metadata refresh readiness")
+	}
+}
+
 func TestMetadataWithoutApplicationCredentialIsTruthfullyUnavailable(t *testing.T) {
 	status := New().MetadataStatus()
 	if status.Configured || !status.Enabled || status.Source != "none" || status.State != "unavailable" {

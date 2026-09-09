@@ -341,4 +341,69 @@ describe('owner operations', () => {
     fireEvent.click(screen.getByRole('button',{name:/run now/i}));
     await vi.waitFor(()=>expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/jobs',expect.objectContaining({method:'POST',body:JSON.stringify({library_id:'films'})})));
   });
+
+  it('keeps exclusions writable for environment schedules, including newly created libraries', async () => {
+    let created = false;
+    const policy = (libraryID: string) => ({ library_id: libraryID, enabled: true, schedule_kind: 'daily', interval_seconds: 86400, local_time: '03:00', timezone: 'Europe/London', next_run_at: 1800000000, last_success_at: 1700000000, exclusions: ['Extras/**'] });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.endsWith('/owner/settings')) return new Response(JSON.stringify({ settings: [{ key: 'background.scan_schedule', source: 'environment' }] }));
+      if (path.endsWith('/owner/libraries') && init?.method === 'POST') { created = true; return new Response(JSON.stringify({ id: 'archive', name: 'Archive', kind: 'film', locations: [] }), { status: 201 }); }
+      if (path.endsWith('/owner/libraries')) return new Response(JSON.stringify({ libraries: [
+        { id: 'films', name: 'Films', kind: 'film', locations: [] },
+        ...(created ? [{ id: 'archive', name: 'Archive', kind: 'film', locations: [] }] : []),
+      ] }));
+      const match = path.match(/\/owner\/libraries\/([^/]+)\/scan-policy$/);
+      if (match && init?.method === 'PATCH') return new Response(JSON.stringify({ policy: { ...policy(match[1]), ...JSON.parse(String(init.body)) } }));
+      if (match) return new Response(JSON.stringify({ policy: policy(match[1]) }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ scan: {}, jobs: [], configured: false, settings: [], screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+
+    const filmsForm = (await screen.findByRole('button', { name: /save exclusions for films/i })).closest('form')!;
+    expect(within(filmsForm).getByLabelText(/enable scheduled scans/i)).toBeDisabled();
+    expect(within(filmsForm).getByLabelText(/frequency/i)).toBeDisabled();
+    const exclusions = within(filmsForm).getByLabelText(/excluded paths/i);
+    expect(exclusions).toBeEnabled();
+    expect(within(filmsForm).getByRole('button', { name: /save exclusions for films/i })).toBeEnabled();
+    expect(filmsForm.querySelector('time[datetime="2023-11-14T22:13:20.000Z"]')).not.toBeNull();
+    fireEvent.change(exclusions, { target: { value: 'Extras/**\nSamples/**' } });
+    fireEvent.click(within(filmsForm).getByRole('button', { name: /save exclusions for films/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/libraries/films/scan-policy', expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ ...policy('films'), exclusions: ['Extras/**', 'Samples/**'] }) })));
+
+    const createForm = screen.getByRole('heading', { name: /create library/i }).closest('form')!;
+    fireEvent.change(within(createForm).getByLabelText(/^name$/i), { target: { value: 'Archive' } });
+    fireEvent.click(within(createForm).getByRole('button', { name: /create library/i }));
+    const archiveForm = (await screen.findByRole('button', { name: /save exclusions for archive/i })).closest('form')!;
+    expect(within(archiveForm).getByLabelText(/enable scheduled scans/i)).toBeDisabled();
+    expect(within(archiveForm).getByLabelText(/excluded paths/i)).toBeEnabled();
+    expect(within(archiveForm).getByRole('button', { name: /save exclusions for archive/i })).toBeEnabled();
+  });
+
+  it('shows exact job timestamps and retries one selected failed file', async () => {
+    const failedFile = { location_id: 'disk-a', relative_path: 'broken/movie-a.mkv', outcome: 'failed', error_code: 'probe_failed', message: 'Probe failed.', retryable: true };
+    const otherFile = { location_id: 'disk-b', relative_path: 'broken/movie-b.mkv', outcome: 'failed', error_code: 'probe_failed', message: 'Probe failed.', retryable: true };
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.endsWith('/owner/libraries')) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [] }] }));
+      if (path.endsWith('/owner/libraries/films/scan-policy')) return new Response(JSON.stringify({ policy: { library_id: 'films', enabled: false, schedule_kind: 'interval', interval_seconds: 21600, local_time: '03:00', timezone: 'UTC', exclusions: [] } }));
+      if (path.endsWith('/owner/scan/jobs/job-1/retry') && init?.method === 'POST') return new Response(JSON.stringify({ job: { id: 'retry-1', library_id: 'films', trigger: 'retry', status: 'queued', queued_at: 1700000180, attempt: 2, scanned: 0, skipped: 0, failed: 0, unmatched: 0 } }), { status: 202 });
+      if (path.endsWith('/owner/scan/jobs')) return new Response(JSON.stringify({ jobs: [{ id: 'job-1', library_id: 'films', trigger: 'schedule', status: 'partial', queued_at: 1700000000, started_at: 1700000060, finished_at: 1700000120, attempt: 1, total: 2, scanned: 0, skipped: 0, failed: 2, unmatched: 0, files: [failedFile, otherFile] }] }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ scan: {}, configured: false, settings: [], screens: [] }));
+    });
+    const { container } = render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+
+    expect(await screen.findByText('broken/movie-a.mkv', { exact: false })).toBeVisible();
+    for (const timestamp of ['2023-11-14T22:13:20.000Z', '2023-11-14T22:14:20.000Z', '2023-11-14T22:15:20.000Z']) {
+      expect(container.querySelector(`time[datetime="${timestamp}"]`)).not.toBeNull();
+    }
+    fireEvent.click(screen.getByRole('button', { name: /retry broken\/movie-a\.mkv from disk-a/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/jobs/job-1/retry', expect.objectContaining({ method: 'POST', body: JSON.stringify({ files: [failedFile] }) })));
+    fireEvent.click(screen.getByRole('button', { name: /retry failed files/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/jobs/job-1/retry', expect.objectContaining({ method: 'POST', body: JSON.stringify({ files: [failedFile, otherFile] }) })));
+  });
 });

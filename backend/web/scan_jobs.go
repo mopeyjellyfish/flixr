@@ -21,16 +21,18 @@ func (s *Server) libraryScanPolicy(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusOK, map[string]any{"policy": policy})
 		return
 	}
-	if s.settingsLocks["background.scan_schedule"] {
-		fail(w, http.StatusConflict, "environment_locked")
-		return
-	}
 	var policy catalog.ScanPolicy
 	if !decode(r, &policy) {
 		fail(w, http.StatusBadRequest, "invalid_scan_policy")
 		return
 	}
-	saved, err := s.catalog.SetScanPolicy(libraryID, policy)
+	var saved catalog.ScanPolicy
+	var err error
+	if s.settingsLocks["background.scan_schedule"] {
+		saved, err = s.catalog.SetScanExclusions(libraryID, policy.Exclusions)
+	} else {
+		saved, err = s.catalog.SetScanPolicy(libraryID, policy)
+	}
 	if err != nil {
 		scanPolicyFailure(w, err)
 		return
@@ -57,6 +59,10 @@ func (s *Server) scanJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		write(w, http.StatusOK, map[string]any{"jobs": jobs})
+		return
+	}
+	if !s.ffprobeReady() {
+		fail(w, http.StatusServiceUnavailable, "ffprobe_unavailable")
 		return
 	}
 	var request struct {

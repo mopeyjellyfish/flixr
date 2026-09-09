@@ -9,6 +9,7 @@ CREATE TABLE library_scan_policies (
  local_time TEXT NOT NULL DEFAULT '03:00',
  timezone TEXT NOT NULL DEFAULT 'UTC',
  next_run_at INTEGER,
+ last_success_at INTEGER,
  schedule_override TEXT NOT NULL DEFAULT '',
  updated_at INTEGER NOT NULL DEFAULT 0
 );

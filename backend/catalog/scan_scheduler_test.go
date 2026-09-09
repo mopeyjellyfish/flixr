@@ -3,8 +3,10 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,6 +58,10 @@ func TestSchedulerPollsLibraryAndSkipsUnchangedMedia(t *testing.T) {
 	first = waitScanJob(t, c, first.ID)
 	if first.Status != "succeeded" || first.Scanned != 1 || first.Skipped != 0 {
 		t.Fatalf("first job = %#v", first)
+	}
+	policy, err := c.ScanPolicy("films")
+	if err != nil || policy.LastSuccessAt == 0 || policy.LastSuccessAt != first.FinishedAt {
+		t.Fatalf("last successful completion = %#v, job=%#v, err=%v", policy, first, err)
 	}
 	second, err := c.QueueLibraryScan("films", "schedule")
 	if err != nil {
@@ -137,6 +143,115 @@ func TestSchedulerMarksRunningJobInterruptedOnRestart(t *testing.T) {
 	job, err = c.ScanJob(job.ID)
 	if err != nil || job.Status != "interrupted" {
 		t.Fatalf("restarted job = %#v, %v", job, err)
+	}
+}
+
+func TestCancellingWhilePersistenceWaitsDoesNotPublishScan(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "film.mp4")
+	if err := os.WriteFile(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var probes atomic.Int32
+	c, err := OpenWithProber(db, ProberFunc(func(_ context.Context, _ *os.File) (MediaProperties, error) {
+		if probes.Add(1) > 1 {
+			entered <- struct{}{}
+			<-release
+		}
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil || c.Scan(t.Context(), 1) != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	before, err := c.List("", 0, 10)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial catalog = %#v, %v", before, err)
+	}
+	if err := os.WriteFile(path, []byte("changed media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartScanScheduler(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown(context.Background())
+	job, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("changed file did not enter probe")
+	}
+	writerBlock, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- c.CancelScanJob(job.ID) }()
+	time.Sleep(50 * time.Millisecond)
+	if err := writerBlock.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-cancelDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not finish after the writer became available")
+	}
+	job = waitScanJob(t, c, job.ID)
+	after, err := c.List("", 0, 10)
+	if err != nil || job.Status != "cancelled" || len(after) != 1 || after[0].ID != before[0].ID || !after[0].Playable {
+		t.Fatalf("cancelled job=%#v catalog=%#v err=%v", job, after, err)
+	}
+}
+
+func TestTerminalWriteFailureReleasesLibraryQueue(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	c, err := OpenWithProber(db, ProberFunc(func(_ context.Context, _ *os.File) (MediaProperties, error) {
+		entered <- struct{}{}
+		<-release
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil || c.StartScanScheduler(t.Context(), 1) != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer c.Shutdown(context.Background())
+	job, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TRIGGER fail_scan_terminal BEFORE UPDATE OF status ON scan_jobs WHEN OLD.id=%q AND NEW.status='succeeded' BEGIN SELECT RAISE(FAIL,'injected terminal failure'); END`, job.ID)); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	job = waitScanJob(t, c, job.ID)
+	if job.Status != "failed" || !strings.Contains(job.Message, "could not be recorded") {
+		t.Fatalf("terminal failure job = %#v", job)
+	}
+	if _, err := c.QueueLibraryScan("films", "manual"); err != nil {
+		t.Fatalf("terminal failure permanently blocked the library: %v", err)
 	}
 }
 
@@ -273,6 +388,174 @@ func TestScanJobCancelAndPerFileRetry(t *testing.T) {
 			t.Fatalf("retry=%#v calls=%#v", retry, calls)
 		}
 	})
+}
+
+func TestScopedRetryPreservesKnownFileWhenItCannotBeAttempted(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wantCode  string
+		makeStale func(*testing.T, *Catalog, string)
+	}{
+		{
+			name:     "deleted",
+			wantCode: "not_found",
+			makeStale: func(t *testing.T, _ *Catalog, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "excluded",
+			wantCode: "excluded_by_policy",
+			makeStale: func(t *testing.T, c *Catalog, _ string) {
+				t.Helper()
+				if _, err := c.SetScanPolicy("films", ScanPolicy{ScheduleKind: "interval", IntervalSeconds: 3600, Exclusions: []string{"film.mp4"}}); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "film.mp4")
+			if err := os.WriteFile(path, []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			fail := false
+			c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+				if fail {
+					return MediaProperties{}, errors.New("temporary probe failure")
+				}
+				return MediaProperties{}, nil
+			}))
+			if err != nil || c.SetRoots(root, "") != nil || c.Scan(t.Context(), 1) != nil {
+				t.Fatalf("initial scan: %v", err)
+			}
+			before, err := c.List("", 0, 10)
+			if err != nil || len(before) != 1 {
+				t.Fatalf("initial catalog: items=%#v err=%v", before, err)
+			}
+			if err := os.WriteFile(path, []byte("changed"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fail = true
+			job, err := c.QueueLibraryScan("films", "manual")
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimed, err := c.claimScanJob(time.Now())
+			if err != nil || claimed.ID != job.ID {
+				t.Fatalf("claim failed job: %#v %v", claimed, err)
+			}
+			c.executeScanJob(t.Context(), claimed)
+			failed, err := c.ScanJob(job.ID)
+			if err != nil || failed.Status != "partial" || len(failed.Files) != 1 || !failed.Files[0].Retryable {
+				t.Fatalf("failed job = %#v, %v", failed, err)
+			}
+			if _, err := db.Exec(`DELETE FROM scan_jobs WHERE retry_of=?`, job.ID); err != nil {
+				t.Fatal(err)
+			}
+			retry, err := c.RetryScanJob(job.ID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.makeStale(t, c, path)
+			claimed, err = c.claimScanJob(time.Now())
+			if err != nil || claimed.ID != retry.ID {
+				t.Fatalf("claim retry: %#v %v", claimed, err)
+			}
+			c.executeScanJob(t.Context(), claimed)
+			retry, err = c.ScanJob(retry.ID)
+			if err != nil || retry.Status == "succeeded" || len(retry.Files) != 1 || retry.Files[0].ErrorCode != tc.wantCode || retry.Files[0].Retryable {
+				t.Fatalf("unattempted retry = %#v, %v", retry, err)
+			}
+			after, err := c.List("", 0, 10)
+			if err != nil || len(after) != 1 || after[0].ID != before[0].ID {
+				t.Fatalf("known catalog item was erased: before=%#v after=%#v err=%v", before, after, err)
+			}
+		})
+	}
+}
+
+func TestMissingFFprobeFailureIsPermanentForScheduledJob(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{}, errors.New("ffprobe unavailable")
+	}))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatal(err)
+	}
+	queued, err := c.QueueLibraryScan("films", "schedule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.claimScanJob(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.executeScanJob(t.Context(), claimed)
+	job, err := c.ScanJob(queued.ID)
+	if err != nil || job.Status != "partial" || len(job.Files) != 1 || job.Files[0].ErrorCode != "ffprobe_unavailable" || job.Files[0].Retryable {
+		t.Fatalf("ffprobe failure = %#v, %v", job, err)
+	}
+	jobs, err := c.ScanJobs(10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("permanent failure queued retries: %#v, %v", jobs, err)
+	}
+}
+
+func TestDisablingPolicySerializesWithDueEnqueue(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetScanPolicy("films", ScanPolicy{Enabled: true, ScheduleKind: "interval", IntervalSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE library_scan_policies SET next_run_at=? WHERE library_id='films'`, time.Now().Add(-time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		errs <- c.enqueueDueScans(time.Now())
+	}()
+	go func() {
+		<-start
+		_, err := c.SetScanPolicy("films", ScanPolicy{Enabled: false, ScheduleKind: "interval", IntervalSeconds: 60})
+		errs <- err
+	}()
+	close(start)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy, err := c.ScanPolicy("films")
+	if err != nil || policy.Enabled || policy.NextRunAt != 0 {
+		t.Fatalf("disabled policy was overwritten by due enqueue: %#v, %v", policy, err)
+	}
 }
 
 func waitScanJob(t *testing.T, c *Catalog, id string) ScanJob {

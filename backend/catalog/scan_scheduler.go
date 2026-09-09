@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	// Keep IANA schedule zones available in minimal container images.
+	_ "time/tzdata"
 )
 
 const scanJobHistoryLimit = 20
@@ -22,6 +25,7 @@ type ScanPolicy struct {
 	LocalTime       string   `json:"local_time"`
 	Timezone        string   `json:"timezone"`
 	NextRunAt       int64    `json:"next_run_at,omitempty"`
+	LastSuccessAt   int64    `json:"last_success_at,omitempty"`
 	Exclusions      []string `json:"exclusions"`
 }
 
@@ -130,7 +134,7 @@ func (c *Catalog) ScanPolicies() ([]ScanPolicy, error) {
 	if c.db == nil {
 		return nil, nil
 	}
-	rows, err := c.db.Query(`SELECT l.id,COALESCE(p.enabled,0),COALESCE(p.schedule_kind,'interval'),COALESCE(p.interval_seconds,86400),COALESCE(p.local_time,'03:00'),COALESCE(p.timezone,'UTC'),COALESCE(p.next_run_at,0) FROM libraries l LEFT JOIN library_scan_policies p ON p.library_id=l.id ORDER BY l.created_at,l.id`)
+	rows, err := c.db.Query(`SELECT l.id,COALESCE(p.enabled,0),COALESCE(p.schedule_kind,'interval'),COALESCE(p.interval_seconds,86400),COALESCE(p.local_time,'03:00'),COALESCE(p.timezone,'UTC'),COALESCE(p.next_run_at,0),COALESCE(p.last_success_at,0) FROM libraries l LEFT JOIN library_scan_policies p ON p.library_id=l.id ORDER BY l.created_at,l.id`)
 	if err != nil {
 		return nil, fmt.Errorf("load scan policies: %w", err)
 	}
@@ -141,7 +145,7 @@ func (c *Catalog) ScanPolicies() ([]ScanPolicy, error) {
 	var policies []ScanPolicy
 	for rows.Next() {
 		var p ScanPolicy
-		if err := rows.Scan(&p.LibraryID, &p.Enabled, &p.ScheduleKind, &p.IntervalSeconds, &p.LocalTime, &p.Timezone, &p.NextRunAt); err != nil {
+		if err := rows.Scan(&p.LibraryID, &p.Enabled, &p.ScheduleKind, &p.IntervalSeconds, &p.LocalTime, &p.Timezone, &p.NextRunAt, &p.LastSuccessAt); err != nil {
 			return nil, err
 		}
 		p.Exclusions, err = c.scanExclusions(p.LibraryID)
@@ -179,6 +183,12 @@ func (c *Catalog) ScanSchedulerRunning() bool {
 }
 
 func (c *Catalog) SetScanPolicy(libraryID string, policy ScanPolicy) (ScanPolicy, error) {
+	c.scanPolicyMu.Lock()
+	defer c.scanPolicyMu.Unlock()
+	return c.setScanPolicy(libraryID, policy)
+}
+
+func (c *Catalog) setScanPolicy(libraryID string, policy ScanPolicy) (ScanPolicy, error) {
 	if c.db == nil {
 		return ScanPolicy{}, ErrLibraryNotFound
 	}
@@ -236,10 +246,45 @@ func (c *Catalog) SetScanPolicy(libraryID string, policy ScanPolicy) (ScanPolicy
 		return ScanPolicy{}, err
 	}
 	c.wakeScheduler()
-	return policy, nil
+	return c.ScanPolicy(libraryID)
+}
+
+func (c *Catalog) SetScanExclusions(libraryID string, patterns []string) (ScanPolicy, error) {
+	c.scanPolicyMu.Lock()
+	defer c.scanPolicyMu.Unlock()
+	if c.db == nil {
+		return ScanPolicy{}, ErrLibraryNotFound
+	}
+	exclusions, err := normalizeExclusions(patterns)
+	if err != nil {
+		return ScanPolicy{}, err
+	}
+	tx, err := c.db.Begin()
+	if err != nil {
+		return ScanPolicy{}, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM libraries WHERE id=?`, libraryID).Scan(&exists); err != nil || exists == 0 {
+		return ScanPolicy{}, ErrLibraryNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM library_scan_exclusions WHERE library_id=?`, libraryID); err != nil {
+		return ScanPolicy{}, err
+	}
+	for _, pattern := range exclusions {
+		if _, err := tx.Exec(`INSERT INTO library_scan_exclusions(library_id,pattern) VALUES(?,?)`, libraryID, pattern); err != nil {
+			return ScanPolicy{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ScanPolicy{}, err
+	}
+	return c.ScanPolicy(libraryID)
 }
 
 func (c *Catalog) ApplyScanScheduleOverride(spec string) error {
+	c.scanPolicyMu.Lock()
+	defer c.scanPolicyMu.Unlock()
 	if spec != "" {
 		if _, err := scanPolicyWithOverride(ScanPolicy{ScheduleKind: "interval", IntervalSeconds: 86400, LocalTime: "03:00", Timezone: "UTC"}, spec); err != nil {
 			return err
@@ -511,18 +556,29 @@ func (c *Catalog) CancelScanJob(id string) error {
 	if c.db == nil {
 		return errors.New("scan job not found")
 	}
-	result, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,finished_at=CASE WHEN status='queued' THEN ? ELSE finished_at END,message=CASE WHEN status='queued' THEN 'Cancelled before starting.' ELSE message END WHERE id=? AND status IN ('queued','running')`, time.Now().Unix(), id)
+	c.scanCommitMu.Lock()
+	c.schedulerMu.Lock()
+	active := c.activeJobID == id && c.activeJobCancel != nil && !c.activeJobCommitted
+	if active {
+		c.activeJobOwnerCancelled = true
+		c.activeJobCancel()
+	}
+	c.schedulerMu.Unlock()
+	c.scanCommitMu.Unlock()
+	if active {
+		if _, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1 WHERE id=?`, id); err != nil {
+			return err
+		}
+		c.wakeScheduler()
+		return nil
+	}
+	result, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1,status='cancelled',finished_at=?,message='Cancelled before starting.' WHERE id=? AND status='queued'`, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed == 0 {
 		return errors.New("scan job not active")
 	}
-	c.schedulerMu.Lock()
-	if c.activeJobID == id && c.activeJobCancel != nil {
-		c.activeJobCancel()
-	}
-	c.schedulerMu.Unlock()
 	c.wakeScheduler()
 	if job, lookupErr := c.scanJob(id); lookupErr == nil && job.Status == "cancelled" {
 		_ = c.pruneScanJobHistory(job.LibraryID)
@@ -675,6 +731,8 @@ func (c *Catalog) runScanScheduler(ctx context.Context) {
 }
 
 func (c *Catalog) enqueueDueScans(now time.Time) error {
+	c.scanPolicyMu.Lock()
+	defer c.scanPolicyMu.Unlock()
 	policies, err := c.ScanPolicies()
 	if err != nil {
 		return err
@@ -724,6 +782,8 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	c.schedulerMu.Lock()
 	c.activeJobID = job.ID
 	c.activeJobCancel = cancel
+	c.activeJobCommitted = false
+	c.activeJobOwnerCancelled = false
 	c.schedulerMu.Unlock()
 	var cancelRequested int
 	_ = c.db.QueryRow(`SELECT cancel_requested FROM scan_jobs WHERE id=?`, job.ID).Scan(&cancelRequested)
@@ -738,8 +798,11 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	}
 	err := c.scanLibrary(ctx, c.schedulerWorkers, job.LibraryID, retry)
 	c.schedulerMu.Lock()
+	ownerCancelled := c.activeJobOwnerCancelled
 	c.activeJobID = ""
 	c.activeJobCancel = nil
+	c.activeJobCommitted = false
+	c.activeJobOwnerCancelled = false
 	c.schedulerMu.Unlock()
 	cancel()
 	if errors.Is(err, ErrScanActive) {
@@ -750,9 +813,7 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	terminal := "succeeded"
 	message := ""
 	if errors.Is(err, context.Canceled) {
-		var requested int
-		_ = c.db.QueryRow(`SELECT cancel_requested FROM scan_jobs WHERE id=?`, job.ID).Scan(&requested)
-		if requested != 0 {
+		if ownerCancelled {
 			terminal = "cancelled"
 			message = "Cancelled by owner."
 		} else {
@@ -766,8 +827,11 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 		terminal = "partial"
 		message = redactScanError(status.Message)
 	}
-	_, _ = c.db.Exec(`UPDATE scan_jobs SET status=?,finished_at=?,total=?,scanned=?,skipped=?,failed=?,unmatched=?,message=? WHERE id=?`, terminal, time.Now().Unix(), nullableInt(status.Total), status.Scanned, status.Skipped, status.Failed, status.Unmatched, message, job.ID)
-	_ = c.captureScanJobFiles(job.ID, job.LibraryID, status.ID)
+	finishedAt := time.Now().Unix()
+	if finishErr := c.finishScanJob(job, status, terminal, message, finishedAt); finishErr != nil {
+		_, _ = c.db.Exec(`UPDATE scan_jobs SET status='failed',finished_at=?,message='The scan finished, but its result could not be recorded. Run it again.' WHERE id=? AND status='running'`, finishedAt, job.ID)
+		return
+	}
 	rawLower := strings.ToLower(status.Message)
 	permanent := strings.Contains(rawLower, "permission") || strings.Contains(rawLower, "unavailable") || strings.Contains(rawLower, "not exist")
 	if (terminal == "partial" || terminal == "failed") && job.Attempt < 3 && !permanent {
@@ -780,6 +844,30 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 		}
 	}
 	_ = c.pruneScanJobHistory(job.LibraryID)
+}
+
+func (c *Catalog) finishScanJob(job ScanJob, status ScanStatus, terminal, message string, finishedAt int64) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE scan_jobs SET status=?,finished_at=?,total=?,scanned=?,skipped=?,failed=?,unmatched=?,message=? WHERE id=? AND status='running'`, terminal, finishedAt, nullableInt(status.Total), status.Scanned, status.Skipped, status.Failed, status.Unmatched, message, job.ID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("scan job is no longer running")
+	}
+	if err := c.captureScanJobFilesTx(tx, job.ID, job.LibraryID, status.ID); err != nil {
+		return err
+	}
+	if terminal == "succeeded" {
+		if _, err := tx.Exec(`UPDATE library_scan_policies SET last_success_at=?,updated_at=? WHERE library_id=?`, finishedAt, time.Now().UnixNano(), job.LibraryID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (c *Catalog) pruneScanJobHistory(libraryID string) error {
@@ -801,8 +889,8 @@ func redactScanError(message string) string {
 	}
 }
 
-func (c *Catalog) captureScanJobFiles(jobID, libraryID, scanID string) error {
-	if _, err := c.db.Exec(`UPDATE scan_job_files SET outcome='succeeded',error_code='',message='',retryable=0 WHERE job_id=? AND outcome='queued'`, jobID); err != nil {
+func (c *Catalog) captureScanJobFilesTx(tx *sql.Tx, jobID, libraryID, scanID string) error {
+	if _, err := tx.Exec(`UPDATE scan_job_files SET outcome='succeeded',error_code='',message='',retryable=0 WHERE job_id=? AND outcome='queued'`, jobID); err != nil {
 		return err
 	}
 	rows, err := c.db.Query(`SELECT relative_path,outcome,message FROM scan_files WHERE scan_id=? AND outcome IN ('failed','unmatched') ORDER BY relative_path`, scanID)
@@ -841,13 +929,26 @@ func (c *Catalog) captureScanJobFiles(jobID, libraryID, scanID string) error {
 		message := "Metadata could not match this file."
 		if retryable {
 			message = "This file could not be inspected. Retry after checking that it is readable."
-			if strings.Contains(strings.ToLower(raw), "permission") {
+			switch {
+			case strings.HasPrefix(raw, "excluded_by_policy:"):
+				code = "excluded_by_policy"
+				retryable = false
+				message = strings.TrimSpace(strings.TrimPrefix(raw, "excluded_by_policy:"))
+			case strings.HasPrefix(raw, "not_found:"):
+				code = "not_found"
+				retryable = false
+				message = strings.TrimSpace(strings.TrimPrefix(raw, "not_found:"))
+			case strings.Contains(strings.ToLower(raw), "permission"):
 				code = "permission_denied"
 				retryable = false
 				message = "This file could not be read. Check its permissions before the next scan."
+			case strings.Contains(strings.ToLower(raw), "ffprobe") && (strings.Contains(strings.ToLower(raw), "not found") || strings.Contains(strings.ToLower(raw), "unavailable")):
+				code = "ffprobe_unavailable"
+				retryable = false
+				message = "FFprobe is unavailable. Install or configure it before the next scan."
 			}
 		}
-		if _, err := c.db.Exec(`INSERT OR REPLACE INTO scan_job_files(job_id,location_id,relative_path,outcome,error_code,message,retryable) VALUES(?,?,?,?,?,?,?)`, jobID, locationID, relative, outcome, code, message, retryable); err != nil {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO scan_job_files(job_id,location_id,relative_path,outcome,error_code,message,retryable) VALUES(?,?,?,?,?,?,?)`, jobID, locationID, relative, outcome, code, message, retryable); err != nil {
 			return err
 		}
 	}

@@ -348,6 +348,8 @@ queue jobs with `GET` or `POST /api/v1/owner/scan/jobs`, inspect or cancel one a
 `POST /api/v1/owner/scan/jobs/{id}/retry`. Read or patch a library's interval or
 daily schedule and exclusions at
 `/api/v1/owner/libraries/{id}/scan-policy`. The service has one polling runner,
-so these jobs do not depend on filesystem watcher events and never overlap.
+so these jobs do not depend on filesystem watcher events and never overlap. Retry
+requests can select exact `location_id` and `relative_path` pairs from a prior
+job, and scan policies expose the library's durable `last_success_at` timestamp.
 
 Player controls and local chapter/preview limits are described in [Watching with FlixR](player.md).

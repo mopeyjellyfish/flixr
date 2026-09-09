@@ -56,10 +56,13 @@ from an excluded path remain available; exclusions do not delete catalog, histor
 ratings, or list data.
 
 `FLIXR_SCAN_SCHEDULE` applies one schedule to every library and makes schedule
-controls read-only. Accepted values are `off`, `every:<duration>` (at least one
+timing controls read-only; owners can still save per-library exclusions. Accepted
+values are `off`, `every:<duration>` (at least one
 minute), and `daily:<HH:MM>@<IANA timezone>`, such as
 `daily:03:30@Europe/London`. `FLIXR_SCAN_WORKERS` remains the 1–32 concurrency
-bound inside the one active library scan.
+bound inside the one active library scan. Each library reports its last successful
+completion independently of the retained job history. FlixR embeds the IANA time
+zone database so daily schedules also work in minimal containers.
 
 The owner Configuration panel provides a searchable Basic view, an Advanced view, portable non-secret export, and import preview. Imports use the same validated library or playback setter as the owner form and accept exactly one scope per request, so each applied change is atomic at that scope. Mixed scopes, network and access settings require explicit review. Exports omit all secret values; previews reject environment-managed values.
 

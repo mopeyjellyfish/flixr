@@ -669,17 +669,17 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 	if !s.owner(w, r) {
 		return
 	}
-	s.readyMu.RLock()
-	ffprobe := s.readiness.FFprobe
-	s.readyMu.RUnlock()
-	if !ffprobe {
+	if !s.ffprobeReady() {
 		fail(w, http.StatusServiceUnavailable, "ffprobe_unavailable")
 		return
 	}
 	if s.catalog.ScanSchedulerRunning() {
 		jobs, err := s.catalog.QueueAllLibraryScans("manual")
-		if err != nil { fail(w, http.StatusInternalServerError, "scan_failed"); return }
-		write(w,http.StatusAccepted,map[string]any{"scan":s.catalog.ScanStatus(),"jobs":jobs})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "scan_failed")
+			return
+		}
+		write(w, http.StatusAccepted, map[string]any{"scan": s.catalog.ScanStatus(), "jobs": jobs})
 		return
 	}
 	if err := s.catalog.StartScan(context.Background(), 2); err != nil {
@@ -691,6 +691,12 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusAccepted, map[string]any{"scan": s.catalog.ScanStatus()})
+}
+
+func (s *Server) ffprobeReady() bool {
+	s.readyMu.RLock()
+	defer s.readyMu.RUnlock()
+	return s.readiness.FFprobe
 }
 
 func (s *Server) scanStatus(w http.ResponseWriter, r *http.Request) {

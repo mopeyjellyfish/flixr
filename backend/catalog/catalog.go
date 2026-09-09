@@ -272,6 +272,7 @@ type Catalog struct {
 	maintenanceDone                  chan struct{}
 	maintenanceStatus                ArtworkMaintenanceStatus
 	schedulerMu                      sync.Mutex
+	scanPolicyMu                     sync.Mutex
 	schedulerCancel                  context.CancelFunc
 	schedulerDone                    chan struct{}
 	schedulerWake                    chan struct{}
@@ -279,6 +280,9 @@ type Catalog struct {
 	scanScheduleOverride             string
 	activeJobID                      string
 	activeJobCancel                  context.CancelFunc
+	activeJobCommitted               bool
+	activeJobOwnerCancelled          bool
+	scanCommitMu                     sync.Mutex
 	maintenanceDir                   afero.File
 	artworkObjectsDir                afero.File
 	derivativeBytes                  int64
@@ -739,7 +743,7 @@ func (c *Catalog) startScan(ctx context.Context, workers int, request scanReques
 	if err != nil {
 		return fmt.Errorf("generate scan ID: %w", err)
 	}
-	refreshDue := c.MetadataRefreshDue()
+	refreshDue := c.metadataRefreshDueFor(request.libraries, false)
 	c.mu.Lock()
 	if c.scanning {
 		c.mu.Unlock()
@@ -826,7 +830,7 @@ func (c *Catalog) runScan(ctx context.Context, workers int, request scanRequest)
 		c.recordUnavailableLocation(locationErr.scanID, locationErr.root, locationErr.cause)
 	}
 	if (status.Status == "complete" || status.Status == "partial") && metadataFailure == "" && credentialRevision != "" {
-		c.recordMetadataRefresh(credentialRevision)
+		c.recordMetadataRefresh(credentialRevision, request.libraries, status.ID)
 	}
 
 	// Keep the scan active until its terminal report is persisted. Otherwise a
@@ -874,12 +878,31 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	completedRoots := make([]rootScan, 0, len(roots))
 	protectedLocations := map[string]bool{}
 	protectedKeys := map[scanKey]bool{}
+	retryTargets := map[scanKey]bool{}
+	exclusionsByLocation := map[string][]string{}
+	for target := range request.retry {
+		parts := strings.SplitN(target, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		for key := range previousByPath {
+			if key.locationID == parts[0] && key.rel == parts[1] {
+				retryTargets[key] = true
+			}
+		}
+	}
 	var unavailableLocations []*locationScanError
 	var removalReviews []struct {
 		root    rootScan
 		sources []activeSource
 	}
 	for _, r := range roots {
+		retryPrefix := r.id + "\x00"
+		for target := range request.retry {
+			if strings.HasPrefix(target, retryPrefix) {
+				retryTargets[scanKey{r.id, r.kind, strings.TrimPrefix(target, retryPrefix)}] = true
+			}
+		}
 		if len(request.libraries) > 0 && !request.libraries[r.libraryID] {
 			protectedLocations[r.id] = true
 			continue
@@ -897,6 +920,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		if exclusionErr != nil {
 			return exclusionErr
 		}
+		exclusionsByLocation[r.id] = exclusions
 		err = afero.Walk(c.fs, r.path, func(filePath string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				// A disconnected or unreadable mount is not an empty library.
@@ -989,9 +1013,26 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		}
 		files = append(files, rootFiles...)
 	}
-	total := len(files)
+	discoveredRetry := map[scanKey]bool{}
+	for _, file := range files {
+		discoveredRetry[scanKey{file.locationID, file.kind, file.rel}] = true
+	}
+	preflightFailures := map[scanKey]string{}
+	for key := range retryTargets {
+		if discoveredRetry[key] {
+			continue
+		}
+		protectedKeys[key] = true
+		if excludedScanPath(key.rel, exclusionsByLocation[key.locationID]) {
+			preflightFailures[key] = "excluded_by_policy: The file is excluded by the current scan policy. Remove or change the exclusion before retrying."
+		} else {
+			preflightFailures[key] = "not_found: The file was not found when its retry began. Restore it before retrying."
+		}
+	}
+	total := len(files) + len(preflightFailures)
 	c.mu.Lock()
 	c.status.Total = &total
+	c.status.Failed += len(preflightFailures)
 	c.mu.Unlock()
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].locationID+"/"+files[i].rel < files[j].locationID+"/"+files[j].rel
@@ -1036,7 +1077,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	}
 	wait := make(chan error, 1)
 	go func() { wait <- g.Wait(); close(results) }()
-	failures := map[scanKey]string{}
+	failures := preflightFailures
 	var inspected []scanResult
 	for result := range results {
 		c.mu.Lock()
@@ -1549,7 +1590,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 		}
 	}
 	if c.db != nil {
-		tx, err := c.db.Begin()
+		tx, err := c.db.BeginTx(ctx)
 		if err != nil {
 			return err
 		}
@@ -1731,7 +1772,19 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err = tx.Commit(); err != nil {
+		c.scanCommitMu.Lock()
+		if err = ctx.Err(); err == nil {
+			err = tx.Commit()
+		}
+		if err == nil {
+			c.schedulerMu.Lock()
+			if c.activeJobID != "" {
+				c.activeJobCommitted = true
+			}
+			c.schedulerMu.Unlock()
+		}
+		c.scanCommitMu.Unlock()
+		if err != nil {
 			return err
 		}
 	}
