@@ -75,6 +75,25 @@ describe('owner operations', () => {
     expect(within(screen.getByText('/media/tv').parentElement!).getByRole('button', { name: 'Move folder' })).toBeEnabled();
   });
 
+  it('surfaces and explicitly confirms an environment-staged populated root move', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.endsWith('/owner/libraries') && !init?.method) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1, pending_change_id: 'env-preview', pending_path: '/mnt/films', pending_change_origin: 'environment' }] }] }));
+      if (path.includes('/library-location-changes/env-preview/confirm')) return new Response(JSON.stringify({ libraries: [{ id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/mnt/films', root_kind: 'film', state: 'unknown', scan_complete: false, items: 0, missing: 0, updated_at: 2 }] }] }));
+      if (path.endsWith('/owner/settings')) return new Response(JSON.stringify({ settings: [{ key: 'library.films_root', source: 'environment' }] }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ scan: {}, configured: false, screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    expect(await screen.findByText('/mnt/films')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: /review and apply/i }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('/mnt/films'));
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/env-preview/confirm', expect.objectContaining({ method: 'POST' }));
+    expect(await screen.findByText(/environment-managed folder moved/i)).toBeVisible();
+  });
+
   it('shows the explicit initial scan state', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const path = String(input);
@@ -126,6 +145,24 @@ describe('owner operations', () => {
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 affected titles'));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-locations/disk-2/change-preview', expect.objectContaining({ method: 'POST', body: JSON.stringify({ path: '' }) }));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1/confirm', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('discards a folder preview when the owner cancels confirmation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const path = String(input);
+      if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
+      if (path.endsWith('/owner/libraries') && !init?.method) return new Response(JSON.stringify({ libraries: [{ id: 'archive', name: 'Archive', kind: 'film', locations: [{ id: 'disk-2', library_id: 'archive', path: '/media/archive', root_kind: 'film', state: 'available', scan_complete: true, items: 3, missing: 0, updated_at: 1 }] }] }));
+      if (path.includes('/change-preview')) return new Response(JSON.stringify({ id: 'preview-1', location_id: 'disk-2', affected_sources: 3, affected_titles: 2 }));
+      if (path.endsWith('/library-location-changes/preview-1') && init?.method === 'DELETE') return new Response(JSON.stringify({ libraries: [{ id: 'archive', name: 'Archive', kind: 'film', locations: [{ id: 'disk-2', library_id: 'archive', path: '/media/archive', root_kind: 'film', state: 'available', scan_complete: true, items: 3, missing: 0, updated_at: 1 }] }] }));
+      if (path.includes('/scan/status')) return new Response(JSON.stringify({ scan: {} }));
+      if (path.includes('/profiles')) return new Response(JSON.stringify({ profiles: [] }));
+      return new Response(JSON.stringify({ configured: false, settings: [], screens: [] }));
+    });
+    render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: /remove folder/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1', expect.objectContaining({ method: 'DELETE' })));
+    expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1/confirm', expect.anything());
   });
 
   it('offers an owner-only local diagnostics download and explains its contents', async () => {

@@ -38,6 +38,7 @@ export const api = {
   addLibraryLocation: (libraryID: string, path: string) => request<LibraryLocation>(`/owner/libraries/${encodeURIComponent(libraryID)}/locations`, { method: 'POST', body: JSON.stringify({ path }) }),
   previewLibraryLocationChange: (locationID: string, path: string) => request<LocationChangePreview>(`/owner/library-locations/${encodeURIComponent(locationID)}/change-preview`, { method: 'POST', body: JSON.stringify({ path }) }),
   confirmLibraryLocationChange: (previewID: string) => request<{ libraries: Library[] }>(`/owner/library-location-changes/${encodeURIComponent(previewID)}/confirm`, { method: 'POST' }),
+  cancelLibraryLocationChange: (previewID: string) => request<{ libraries: Library[] }>(`/owner/library-location-changes/${encodeURIComponent(previewID)}`, { method: 'DELETE' }),
   tmdbSettings: () => request<TMDBSettings>('/owner/settings/tmdb'),
   saveTMDBToken: (token: string) => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token }) }),
   removeTMDBToken: () => request<TMDBSettings>('/owner/settings/tmdb', { method: 'PUT', body: JSON.stringify({ token: '' }) }),

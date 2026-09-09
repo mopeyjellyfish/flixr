@@ -102,11 +102,33 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
     try {
       const preview = await api.previewLibraryLocationChange(location.id, path);
       const action = path ? 'move this folder' : 'remove this folder';
-      if (!window.confirm(`This will ${action} and make ${preview.affected_titles} affected titles unavailable until another location or a fresh scan verifies them. Media files and viewing history are kept. Continue?`)) return;
+      if (!window.confirm(`This will ${action} and make ${preview.affected_titles} affected titles unavailable until another location or a fresh scan verifies them. Media files and viewing history are kept. Continue?`)) {
+        await api.cancelLibraryLocationChange(preview.id);
+        await refreshLibraries();
+        return;
+      }
       const result = await api.confirmLibraryLocationChange(preview.id);
       setLibraries(result.libraries ?? []);
       setNotice(path ? 'Library folder moved. Start a scan to verify the new location.' : 'Library folder removed. Media files were untouched and title history was kept.');
     } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to change library folder.'); }
+  };
+  const confirmPendingLocation = async (location: LibraryLocation) => {
+    if (!location.pending_change_id) return;
+    const action = location.pending_path ? `move this folder to ${location.pending_path}` : 'remove this folder';
+    if (!window.confirm(`${location.pending_change_origin === 'environment' ? 'The server environment requested to ' : 'Apply the pending request to '}${action}? Media files and viewing history are kept.`)) return;
+    try {
+      const result = await api.confirmLibraryLocationChange(location.pending_change_id);
+      setLibraries(result.libraries ?? []);
+      setNotice(location.pending_path ? 'Environment-managed folder moved. Start a scan to verify it.' : 'Environment-managed folder removed.');
+    } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to apply the pending folder change.'); }
+  };
+  const cancelPendingLocation = async (location: LibraryLocation) => {
+    if (!location.pending_change_id) return;
+    try {
+      const result = await api.cancelLibraryLocationChange(location.pending_change_id);
+      setLibraries(result.libraries ?? []);
+      setNotice('Pending folder change discarded.');
+    } catch (error) { setNotice(error instanceof ApiError ? error.message : 'Unable to discard the pending folder change.'); }
   };
   const saveTMDB = async (event: FormEvent) => {
     event.preventDefault();
@@ -231,7 +253,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="libraries" className="owner-section" aria-labelledby="libraries-title">
             <h2 id="libraries-title">Libraries</h2><p>Folders are read from this server. Your original media stays untouched.</p>
             {readiness && <ReadinessControls readiness={readiness} onRecheck={recheck} />}
-            <LibraryManager libraries={libraries} locked={locked} onCreate={createLibrary} onRename={renameLibrary} onDelete={deleteLibrary} onAddLocation={addLocation} onChangeLocation={changeLocation} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} />
+            <LibraryManager libraries={libraries} locked={locked} onCreate={createLibrary} onRename={renameLibrary} onDelete={deleteLibrary} onAddLocation={addLocation} onChangeLocation={changeLocation} onConfirmPending={confirmPendingLocation} onCancelPending={cancelPendingLocation} /><ScanPanel scan={scan} locations={locations} onStart={startScan} onConfirm={confirmRemovals} />
           </section>
           <section id="household" className="owner-section" aria-labelledby="household-title">
             <h2 id="household-title">Household</h2><p>Each profile has its own list, viewing progress, and optional PIN.</p>
@@ -349,14 +371,14 @@ function ReadinessControls({ readiness, onRecheck }: { readiness: Readiness; onR
   );
 }
 
-function LibraryManager({ libraries, locked, onCreate, onRename, onDelete, onAddLocation, onChangeLocation }: { libraries: Library[]; locked: Set<string>; onCreate: (name: string, kind: Library['kind']) => Promise<void>; onRename: (library: Library) => Promise<void>; onDelete: (library: Library) => Promise<void>; onAddLocation: (library: Library, path: string) => Promise<void>; onChangeLocation: (location: LibraryLocation, path: string) => Promise<void> }) {
+function LibraryManager({ libraries, locked, onCreate, onRename, onDelete, onAddLocation, onChangeLocation, onConfirmPending, onCancelPending }: { libraries: Library[]; locked: Set<string>; onCreate: (name: string, kind: Library['kind']) => Promise<void>; onRename: (library: Library) => Promise<void>; onDelete: (library: Library) => Promise<void>; onAddLocation: (library: Library, path: string) => Promise<void>; onChangeLocation: (location: LibraryLocation, path: string) => Promise<void>; onConfirmPending: (location: LibraryLocation) => Promise<void>; onCancelPending: (location: LibraryLocation) => Promise<void> }) {
   const [name, setName] = useState('');
   const [kind, setKind] = useState<Library['kind']>('film');
   const [paths, setPaths] = useState<Record<string, string>>({});
   const locationLocked = (location: LibraryLocation) => (location.id === 'films-root' && locked.has('library.films_root')) || (location.id === 'tv-root' && locked.has('library.tv_root'));
   return <section className="library-manager"><h2>Named libraries</h2><p>Group folders from local disks and mounted shares. Overlapping folders are rejected.</p>
     {libraries.map((library) => <section key={library.id}><div className="actions"><h3>{library.name}</h3><span>{library.kind === 'film' ? 'Films' : 'TV'}</span><button type="button" onClick={() => void onRename(library)}>Rename</button>{library.locations.length === 0 && <button type="button" onClick={() => void onDelete(library)}>Delete library</button>}</div>
-      {library.locations.map((location) => <div key={location.id} className="library-location"><code>{location.path}</code><span>{location.state === 'available' ? `${location.items} files` : location.state.replace('_', ' ')}</span>{locationLocked(location) ? <span>Managed by environment</span> : <><button type="button" onClick={() => { const next = window.prompt('New folder path', location.path ?? '')?.trim(); if (next) void onChangeLocation(location, next); }}>Move folder</button><button type="button" onClick={() => void onChangeLocation(location, '')}>Remove folder</button></>}</div>)}
+      {library.locations.map((location) => <div key={location.id} className="library-location"><code>{location.path}</code><span>{location.state === 'available' ? `${location.items} files` : location.state.replace('_', ' ')}</span>{location.message && <span>{location.message}</span>}{location.pending_change_id && <><span>{location.pending_change_origin === 'environment' ? 'Environment requested' : 'Pending change'} {location.pending_path ? <code>{location.pending_path}</code> : 'removal'}.</span><button type="button" onClick={() => void onConfirmPending(location)}>Review and apply</button><button type="button" onClick={() => void onCancelPending(location)}>Discard</button></>}{locationLocked(location) ? <span>Managed by environment</span> : <><button type="button" onClick={() => { const next = window.prompt('New folder path', location.path ?? '')?.trim(); if (next) void onChangeLocation(location, next); }}>Move folder</button><button type="button" onClick={() => void onChangeLocation(location, '')}>Remove folder</button></>}</div>)}
       <PendingForm onSubmit={async (event) => { event.preventDefault(); const path = paths[library.id]?.trim(); if (!path) return; await onAddLocation(library, path); setPaths((current) => ({ ...current, [library.id]: '' })); }}><label>Add folder to {library.name}<input value={paths[library.id] ?? ''} onChange={(event) => setPaths((current) => ({ ...current, [library.id]: event.target.value }))} placeholder="/media/library" /></label><button>Add folder</button></PendingForm>
     </section>)}
     <PendingForm onSubmit={async (event) => { event.preventDefault(); if (!name.trim()) return; await onCreate(name, kind); setName(''); }}><h3>Create library</h3><label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>Media type<select value={kind} onChange={(event) => setKind(event.target.value as Library['kind'])}><option value="film">Films</option><option value="episode">TV episodes</option></select></label><button>Create library</button></PendingForm>

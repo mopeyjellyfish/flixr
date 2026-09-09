@@ -56,7 +56,7 @@ export type PlaybackStatus = { settings: PlaybackSettings; generations: Playback
 export type EffectiveSetting = { key: string; category: string; scope: string; default: string; environment: string; file_secret: string; persistence: string; restart: string; valid: string; secret: boolean; advanced: boolean; value: string; source: 'default' | 'saved' | 'environment'; mutable: boolean };
 export type SettingsInventory = { settings: EffectiveSetting[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; failed: number; unmatched: number; message?: string; finished_at?: number };
-export type LibraryLocation = { id: string; library_id: string; library_name?: string; path?: string; revision?: number; root_kind: 'film' | 'episode'; state: 'unknown' | 'available' | 'unavailable' | 'review_required'; scan_complete: boolean; items: number; missing: number; pending_scan_id?: string; last_scan_id?: string; updated_at: number; message?: string };
+export type LibraryLocation = { id: string; library_id: string; library_name?: string; path?: string; revision?: number; root_kind: 'film' | 'episode'; state: 'unknown' | 'available' | 'unavailable' | 'review_required' | 'topology_review'; scan_complete: boolean; items: number; missing: number; pending_scan_id?: string; last_scan_id?: string; updated_at: number; message?: string; pending_change_id?: string; pending_path?: string; pending_change_origin?: 'owner' | 'environment' };
 export type Library = { id: string; name: string; kind: 'film' | 'episode'; locations: LibraryLocation[] };
 export type LocationChangePreview = { id: string; location_id: string; new_path?: string; affected_sources: number; affected_titles: number };
 export type ApiErrorCode =
@@ -71,7 +71,7 @@ export type ApiErrorCode =
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
-  | 'catalog_continue_watching_failed'
+  | 'catalog_continue_watching_failed' | 'library_change_requires_preview'
   | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
@@ -114,6 +114,7 @@ export function messageFor(code: string): string {
     library_has_locations: 'Remove this library’s folders before deleting it.', invalid_library_location: 'That library folder is not valid.',
     library_location_overlap: 'That folder overlaps another configured library folder.', library_change_changed: 'This folder preview changed. Review it again before confirming.',
     library_change_failed: 'Flixr could not change that library folder.', libraries_failed: 'Flixr could not load libraries.',
+    library_change_requires_preview: 'This populated folder must be moved or removed from Named libraries so you can review the affected titles.',
     scan_failed: 'Flixr could not start a scan.', scan_status_failed: 'Flixr could not load scan status.',
     removal_review_changed: 'This removal review changed. Refresh scan status before confirming cleanup.',
     library_cleanup_failed: 'Flixr could not confirm library cleanup.', settings_failed: 'Flixr could not save those settings.',

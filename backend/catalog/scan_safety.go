@@ -35,20 +35,23 @@ type activeSource struct {
 var ErrRemovalReviewNotFound = errors.New("library removal review not found")
 
 type LibraryLocation struct {
-	ID            string `json:"id"`
-	LibraryID     string `json:"library_id"`
-	LibraryName   string `json:"library_name,omitempty"`
-	RootPath      string `json:"path,omitempty"`
-	Revision      int64  `json:"revision,omitempty"`
-	RootKind      string `json:"root_kind"`
-	State         string `json:"state"`
-	ScanComplete  bool   `json:"scan_complete"`
-	Items         int    `json:"items"`
-	Missing       int    `json:"missing"`
-	PendingScanID string `json:"pending_scan_id,omitempty"`
-	LastScanID    string `json:"last_scan_id,omitempty"`
-	UpdatedAt     int64  `json:"updated_at"`
-	Message       string `json:"message,omitempty"`
+	ID                  string `json:"id"`
+	LibraryID           string `json:"library_id"`
+	LibraryName         string `json:"library_name,omitempty"`
+	RootPath            string `json:"path,omitempty"`
+	Revision            int64  `json:"revision,omitempty"`
+	RootKind            string `json:"root_kind"`
+	State               string `json:"state"`
+	ScanComplete        bool   `json:"scan_complete"`
+	Items               int    `json:"items"`
+	Missing             int    `json:"missing"`
+	PendingScanID       string `json:"pending_scan_id,omitempty"`
+	LastScanID          string `json:"last_scan_id,omitempty"`
+	UpdatedAt           int64  `json:"updated_at"`
+	Message             string `json:"message,omitempty"`
+	PendingChangeID     string `json:"pending_change_id,omitempty"`
+	PendingRootPath     string `json:"pending_path,omitempty"`
+	PendingChangeOrigin string `json:"pending_change_origin,omitempty"`
 }
 
 func (c *Catalog) LibraryLocations() ([]LibraryLocation, error) {
@@ -133,21 +136,18 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, locationID string
 	if len(catalogIDs) == 0 {
 		return ErrRemovalReviewNotFound
 	}
+	switched := make(map[string]bool, len(catalogIDs))
+	ids := make([]string, 0, len(catalogIDs))
 	for catalogID := range catalogIDs {
-		if _, err := tx.ExecContext(ctx, `UPDATE catalog_items SET available=EXISTS(SELECT 1 FROM catalog_physical_files WHERE catalog_id=? AND present=1) WHERE id=?`, catalogID, catalogID); err != nil {
-			return fmt.Errorf("confirm catalog source removal: %w", err)
+		changed, err := reselectCatalogSource(ctx, tx, catalogID)
+		if err != nil {
+			return fmt.Errorf("select remaining catalog source: %w", err)
 		}
+		switched[catalogID] = changed
+		ids = append(ids, catalogID)
 	}
 	if err := applyIdentityMappings(tx); err != nil {
 		return fmt.Errorf("apply cleanup availability: %w", err)
-	}
-	playable := make(map[string]bool, len(catalogIDs))
-	for catalogID := range catalogIDs {
-		var available bool
-		if err := tx.QueryRowContext(ctx, `SELECT playable FROM catalog_items WHERE id=?`, catalogID).Scan(&available); err != nil {
-			return fmt.Errorf("read cleaned catalog item: %w", err)
-		}
-		playable[catalogID] = available
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM library_removal_candidates WHERE location_id=? AND scan_id=?`, locationID, scanID); err != nil {
 		return fmt.Errorf("clear library cleanup review: %w", err)
@@ -158,10 +158,8 @@ func (c *Catalog) ConfirmRemovals(ctx context.Context, scanID, locationID string
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit library cleanup: %w", err)
 	}
-	for catalogID, available := range playable {
-		item := c.items[catalogID]
-		item.Playable = available
-		c.items[catalogID] = item
+	if err := c.refreshReselectedItems(ids, switched); err != nil {
+		return fmt.Errorf("refresh cleaned catalog source: %w", err)
 	}
 	c.refreshSeriesAvailability()
 	if c.status.ID == scanID && c.status.Status == "review_required" {

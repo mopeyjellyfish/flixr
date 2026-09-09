@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -172,6 +173,7 @@ type Item struct {
 	MediaProperties
 
 	metadataVersion  uint64
+	sourcePresent    bool
 	path             string
 	rootKind         string
 	digest           string
@@ -297,6 +299,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	c := &Catalog{db: db, items: map[string]Item{}, series: map[string]Series{}, refreshPreviews: map[string]refreshPreview{}, prober: prober, provider: NewTMDB(nil), fs: fs, metadataEnabled: true}
 	if db == nil {
 		return c, nil
+	}
+	if err := c.normalizeLocationTopology(); err != nil {
+		return nil, fmt.Errorf("normalize library locations: %w", err)
 	}
 	rows, err := db.Query(`SELECT id, kind, title, relative_path, local_only, root_kind, source_location_id, fingerprint, size_bytes, mtime_unix, container, duration_ms, video_codec, video_profile, video_level, primary_video_stream_index, video_width, video_height, video_bitrate, video_frame_rate_milli, video_bit_depth, video_hdr, audio_json, subtitle_json, probe_revision, series_id, provider_id, year, synopsis, poster, backdrop, genres_json, added_at, playable, demo FROM catalog_items`)
 	if err != nil {
@@ -496,6 +501,17 @@ func (c *Catalog) SetRoots(film, tv string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.db != nil {
+		for _, location := range []struct{ id, path string }{{"films-root", nextFilm}, {"tv-root", nextTV}} {
+			var current string
+			var sources int
+			err := c.db.QueryRow(`SELECT x.root_path,(SELECT COUNT(*) FROM catalog_physical_files f WHERE f.location_id=x.id AND f.present=1) FROM library_locations x WHERE x.id=?`, location.id).Scan(&current, &sources)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil && current != location.path && sources > 0 {
+				return ErrLocationChangeReviewRequired
+			}
+		}
 		tx, err := c.db.Begin()
 		if err != nil {
 			return err
@@ -528,6 +544,93 @@ func (c *Catalog) SetRoots(film, tv string) error {
 	}
 	c.film, c.tv = nextFilm, nextTV
 	return nil
+}
+
+// StageEnvironmentRoots keeps proven sources on their admitted roots. Fresh or
+// empty locations still follow the environment immediately; populated changes
+// become durable owner previews and take effect only after confirmation.
+func (c *Catalog) StageEnvironmentRoots(film, tv string) error {
+	if err := c.ValidateRoots(film, tv); err != nil {
+		return err
+	}
+	currentFilm, currentTV := c.Roots()
+	nextFilm, err := canonicalRoot(film)
+	if err != nil {
+		return err
+	}
+	nextTV, err := canonicalRoot(tv)
+	if err != nil {
+		return err
+	}
+	for _, change := range []struct {
+		id      string
+		current string
+		desired string
+		keep    *string
+	}{
+		{id: "films-root", current: currentFilm, desired: nextFilm, keep: &nextFilm},
+		{id: "tv-root", current: currentTV, desired: nextTV, keep: &nextTV},
+	} {
+		if change.current == change.desired || c.db == nil {
+			continue
+		}
+		var sources int
+		err := c.db.QueryRow(`SELECT COUNT(*) FROM catalog_physical_files WHERE location_id=? AND present=1`, change.id).Scan(&sources)
+		if err != nil {
+			return err
+		}
+		if sources == 0 {
+			continue
+		}
+		if _, err := c.previewLocationChange(change.id, change.desired, "environment"); err != nil {
+			return err
+		}
+		*change.keep = change.current
+	}
+	return c.SetRoots(nextFilm, nextTV)
+}
+
+// RootChangesRequireReview reports whether compatibility root settings would
+// bypass the explicit preview required for an already populated location.
+func (c *Catalog) RootChangesRequireReview(film, tv string) (bool, error) {
+	if c.db == nil {
+		return false, nil
+	}
+	film, err := canonicalRoot(film)
+	if err != nil {
+		return false, err
+	}
+	tv, err = canonicalRoot(tv)
+	if err != nil {
+		return false, err
+	}
+	for _, location := range []struct{ id, path string }{{"films-root", film}, {"tv-root", tv}} {
+		var current string
+		var sources int
+		err := c.db.QueryRow(`SELECT x.root_path,(SELECT COUNT(*) FROM catalog_physical_files f WHERE f.location_id=x.id AND f.present=1) FROM library_locations x WHERE x.id=?`, location.id).Scan(&current, &sources)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		if err == nil && current != location.path && sources > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func canonicalRoot(root string) (string, error) {
+	if root == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	canonical := filepath.Clean(abs)
+	if resolved, resolveErr := filepath.EvalSymlinks(canonical); resolveErr == nil {
+		canonical = filepath.Clean(resolved)
+	}
+	return canonical, nil
 }
 
 // ValidateRoots applies the same filesystem checks as SetRoots without saving.
@@ -857,7 +960,7 @@ func (c *Catalog) scan(ctx context.Context, workers int) error {
 	}
 	c.mu.RLock()
 	for _, source := range physicalProof {
-		if !protectedLocations[source.sourceLocationID] {
+		if !protectedLocations[source.sourceLocationID] || !source.sourcePresent {
 			continue
 		}
 		key := scanKey{source.sourceLocationID, source.rootKind, source.path}

@@ -91,3 +91,65 @@ func TestNamedLibraryMigrationPreservesLegacyRootsSourcesAndReview(t *testing.T)
 		t.Fatalf("migrated profile progress = %d, %v", position, err)
 	}
 }
+
+func TestNamedLibraryMigrationRetainsEqualLegacyRootsForTopologyReview(t *testing.T) {
+	dir := t.TempDir()
+	legacy, err := sql.Open("sqlite", databaseDSN(filepath.Join(dir, "flixr.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = legacy.Exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := migrations.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		var version int
+		if _, err = fmt.Sscanf(entry.Name(), "%d_", &version); err != nil {
+			t.Fatal(err)
+		}
+		if version > 25 {
+			continue
+		}
+		body, readErr := migrations.ReadFile("migrations/" + entry.Name())
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, err = legacy.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", entry.Name(), err)
+		}
+		if _, err = legacy.Exec("INSERT INTO schema_migrations VALUES(?)", version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = legacy.Exec(`INSERT INTO settings(key,value) VALUES('film_root','/media/shared'),('tv_root','/media/shared')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("equal legacy roots bricked migration: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT id,root_path FROM library_locations ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]string{}
+	for rows.Next() {
+		var id, root string
+		if err := rows.Scan(&id, &root); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = root
+	}
+	if got["films-root"] != "/media/shared" || got["tv-root"] != "/media/shared" {
+		t.Fatalf("legacy roots not retained: %#v", got)
+	}
+}

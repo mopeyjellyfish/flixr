@@ -133,6 +133,17 @@ func (s *Server) confirmLibraryLocationChange(w http.ResponseWriter, r *http.Req
 	s.writeLibraries(w)
 }
 
+func (s *Server) cancelLibraryLocationChange(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	if err := s.catalog.CancelLocationChange(r.PathValue("id")); err != nil {
+		fail(w, http.StatusConflict, "library_change_changed")
+		return
+	}
+	s.writeLibraries(w)
+}
+
 func (s *Server) writeLibraries(w http.ResponseWriter) {
 	libraries, err := s.catalog.Libraries()
 	if err != nil {

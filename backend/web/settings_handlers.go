@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/config"
 	"github.com/mopeyjellyfish/flixr/backend/playback"
 )
@@ -118,7 +119,7 @@ func (s *Server) settingsImportPreview(w http.ResponseWriter, r *http.Request) {
 	plan, code := s.planSettingsImport(body)
 	if code != "" {
 		status := http.StatusBadRequest
-		if code == "environment_locked" || code == "import_requires_review" {
+		if code == "environment_locked" || code == "import_requires_review" || code == "library_change_requires_preview" {
 			status = http.StatusConflict
 		}
 		fail(w, status, code)
@@ -139,7 +140,7 @@ func (s *Server) settingsImport(w http.ResponseWriter, r *http.Request) {
 	plan, code := s.planSettingsImport(body)
 	if code != "" {
 		status := http.StatusBadRequest
-		if code == "environment_locked" || code == "import_requires_review" {
+		if code == "environment_locked" || code == "import_requires_review" || code == "library_change_requires_preview" {
 			status = http.StatusConflict
 		}
 		fail(w, status, code)
@@ -151,6 +152,10 @@ func (s *Server) settingsImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if plan.scope == "library" {
 		if err := s.catalog.SetRoots(plan.films, plan.tv); err != nil {
+			if errors.Is(err, catalog.ErrLocationChangeReviewRequired) {
+				fail(w, http.StatusConflict, "library_change_requires_preview")
+				return
+			}
 			fail(w, http.StatusBadRequest, "invalid_roots")
 			return
 		}
@@ -233,6 +238,13 @@ func (s *Server) planSettingsImport(body settingsImportRequest) (settingsImportP
 	if plan.scope == "library" {
 		if err := s.catalog.ValidateRoots(plan.films, plan.tv); err != nil {
 			return settingsImportPlan{}, "invalid_roots"
+		}
+		requiresReview, err := s.catalog.RootChangesRequireReview(plan.films, plan.tv)
+		if err != nil {
+			return settingsImportPlan{}, "invalid_roots"
+		}
+		if requiresReview {
+			return settingsImportPlan{}, "library_change_requires_preview"
 		}
 	}
 	if plan.scope == "playback" {

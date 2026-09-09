@@ -123,7 +123,9 @@ the variables. Merely mounting a `.env` file inside a container does not load it
 See [Docker's environment documentation](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/).
 
 Explicit environment settings apply at startup. Omitted roots/token retain saved
-settings; provided roots/token are imported into the saved configuration. Playback
+settings. Provided roots initialize empty locations; changes to populated roots are
+staged in Named libraries until the owner reviews and confirms the affected titles.
+Playback
 environment values overlay saved settings without persisting that overlay. UI changes
 can apply during the process lifetime; an explicit environment value wins again on
 restart. To hand management back to the UI, remove that variable and recreate the
@@ -137,7 +139,7 @@ signs that profile out; changing or removing its PIN also signs its active sessi
 | `FLIXR_DATA_DIR` | `/config` in Docker; `./flixr-data` natively |
 | `FLIXR_SEGMENT_DIR` | `/cache/segments` in Docker; saved setting or data-dir `segments` natively; absolute path |
 | `FLIXR_LISTEN_ADDR` | `0.0.0.0:8787` in Docker; `127.0.0.1:8787` natively |
-| `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | Saved roots; container paths. Explicit empty value clears that root |
+| `FLIXR_FILMS_ROOT`, `FLIXR_TV_ROOT` | Saved roots; container paths. Changes and explicit removal of populated roots require owner confirmation in Named libraries |
 | `FLIXR_TMDB_TOKEN` / `FLIXR_TMDB_TOKEN_FILE` | Optional TMDB read-access token; empty direct value removes saved token |
 | `FLIXR_METADATA_ENABLED` | `true`; set `false` for explicit offline/disabled metadata without deleting credentials |
 | `FLIXR_OWNER_PASSWORD` / `FLIXR_OWNER_PASSWORD_FILE` | Optional first-start owner claim; never resets an existing owner |

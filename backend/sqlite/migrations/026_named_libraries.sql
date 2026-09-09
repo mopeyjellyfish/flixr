@@ -11,9 +11,9 @@ ALTER TABLE library_locations RENAME TO library_locations_legacy;
 CREATE TABLE library_locations (
  id TEXT PRIMARY KEY,
  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
- root_path TEXT NOT NULL UNIQUE,
+ root_path TEXT NOT NULL,
  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
- state TEXT NOT NULL DEFAULT 'unknown' CHECK(state IN ('unknown','available','unavailable','review_required')),
+ state TEXT NOT NULL DEFAULT 'unknown' CHECK(state IN ('unknown','available','unavailable','review_required','topology_review')),
  scan_complete INTEGER NOT NULL DEFAULT 0 CHECK(scan_complete IN (0,1)),
  item_count INTEGER NOT NULL DEFAULT 0 CHECK(item_count >= 0),
  missing_count INTEGER NOT NULL DEFAULT 0 CHECK(missing_count >= 0),
@@ -87,6 +87,7 @@ CREATE TABLE library_location_removal_previews (
  location_revision INTEGER NOT NULL,
  new_root_path TEXT NOT NULL DEFAULT '',
  source_count INTEGER NOT NULL DEFAULT 0,
+ origin TEXT NOT NULL DEFAULT 'owner' CHECK(origin IN ('owner','environment')),
  created_at INTEGER NOT NULL
 );
 CREATE TABLE library_location_removal_preview_sources (

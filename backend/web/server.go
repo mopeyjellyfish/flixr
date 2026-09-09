@@ -129,6 +129,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/owner/libraries/{id}/locations", s.libraryLocations)
 	s.mux.HandleFunc("POST /api/v1/owner/library-locations/{id}/change-preview", s.previewLibraryLocationChange)
 	s.mux.HandleFunc("POST /api/v1/owner/library-location-changes/{id}/confirm", s.confirmLibraryLocationChange)
+	s.mux.HandleFunc("DELETE /api/v1/owner/library-location-changes/{id}", s.cancelLibraryLocationChange)
 	s.mux.HandleFunc("POST /api/v1/owner/scan", s.scan)
 	s.mux.HandleFunc("GET /api/v1/owner/scan/status", s.scanStatus)
 	s.mux.HandleFunc("POST /api/v1/owner/scan/removals/confirm", s.confirmScanRemovals)
@@ -619,7 +620,11 @@ func (s *Server) roots(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "environment_locked")
 		return
 	}
-	if s.catalog.SetRoots(v.Films, v.TV) != nil {
+	if err := s.catalog.SetRoots(v.Films, v.TV); err != nil {
+		if errors.Is(err, catalog.ErrLocationChangeReviewRequired) {
+			fail(w, http.StatusConflict, "library_change_requires_preview")
+			return
+		}
 		fail(w, 400, "invalid_roots")
 		return
 	}

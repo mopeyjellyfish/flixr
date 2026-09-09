@@ -133,7 +133,7 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		if cfg.TVRoot != nil {
 			tv = *cfg.TVRoot
 		}
-		if err := c.SetRoots(films, tv); err != nil {
+		if err := c.StageEnvironmentRoots(films, tv); err != nil {
 			return fmt.Errorf("environment media roots: %w", err)
 		}
 	}

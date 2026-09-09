@@ -56,7 +56,7 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 	if c.db == nil {
 		return nil, nil
 	}
-	rows, err := c.db.Query(`SELECT catalog_id,location_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix FROM catalog_physical_files ORDER BY present,last_seen,id`)
+	rows, err := c.db.Query(`SELECT catalog_id,location_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix,present FROM catalog_physical_files ORDER BY present,last_seen,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,8 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 	for rows.Next() {
 		var catalogID, locationID, root, path, fp, digest, token, sourceSeries string
 		var size, mtime int64
-		if err := rows.Scan(&catalogID, &locationID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime); err != nil {
+		var present bool
+		if err := rows.Scan(&catalogID, &locationID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime, &present); err != nil {
 			return nil, err
 		}
 		c.mu.RLock()
@@ -75,6 +76,7 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 		}
 		item.path, item.rootKind, item.sourceLocationID, item.fingerprint, item.digest, item.changeToken, item.size, item.mtime = path, root, locationID, fp, digest, token, size, mtime
 		item.sourceSeriesID = sourceSeries
+		item.sourcePresent = present
 		previous[scanKey{locationID, root, path}] = item
 		proof = append(proof, item)
 	}

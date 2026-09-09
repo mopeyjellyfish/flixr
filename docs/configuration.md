@@ -20,7 +20,11 @@ Flixr resolves a setting in this order: explicit environment value, persisted ow
 
 The owner Libraries panel supports any number of named film or TV libraries and
 folders. The two environment roots remain compatible as read-only locations in
-the default Films and TV libraries. Adding a folder rejects the same directory,
+the default Films and TV libraries. An environment root initializes an empty
+location immediately. If it differs after that location contains indexed media,
+Flixr keeps the proven root active and shows the requested move or removal in
+Named libraries for explicit owner confirmation. The confirmed value becomes
+the saved root and matches the environment on the next restart. Adding a folder rejects the same directory,
 nested directories, parent directories, and symlink aliases already covered by
 another location. Moving or removing a folder first creates an exact, durable
 preview of affected sources and titles; confirmation fails if a scan changed that
