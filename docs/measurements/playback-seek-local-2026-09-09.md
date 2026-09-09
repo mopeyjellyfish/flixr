@@ -4,6 +4,9 @@ This records reproducible local evidence for issue #196. It does not replace
 qualification on the household's real media or a resource-constrained reference
 host.
 
+The corresponding machine-readable observations are in
+[`playback-seek-local-2026-09-09.json`](./playback-seek-local-2026-09-09.json).
+
 ## Baseline and isolation
 
 - Baseline: `f2e4b1610c632d7ad6d01efee1021ad63a94182b` (`main`).
