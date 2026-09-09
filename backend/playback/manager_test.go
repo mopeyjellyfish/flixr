@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -828,9 +829,14 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 		t.Fatalf("unexpected command: %s %v", name, args)
 	}
 	joined := strings.Join(args, " ")
-	for _, exact := range []string{"-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-master_pl_name master.m3u8"} {
+	for _, exact := range []string{"-readrate 1", "-readrate_initial_burst 4", "-readrate_catchup 4", "-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-force_key_frames expr:gte(t,n_forced*2)", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-hls_time 2", "-master_pl_name master.m3u8"} {
 		if !strings.Contains(joined, exact) {
 			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
+		}
+	}
+	for _, arg := range args {
+		if arg == "-re" {
+			t.Fatalf("command still uses fixed real-time startup pacing: %v", args)
 		}
 	}
 	if _, _, err := ffmpegCommand(Plan{Kind: Remux, VideoBitrate: 1}, "https://media.example/file", "", 1, dir, 0, time.Minute); err == nil {
@@ -841,8 +847,37 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := strings.Join(externalArgs, " ")
-	if strings.Count(external, "-ss 23.000") != 2 || !strings.Contains(external, "-map 1:0") {
+	if strings.Count(external, "-ss 23.000") != 2 || strings.Count(external, "-readrate_catchup 4") != 2 || !strings.Contains(external, "-map 1:0") {
 		t.Fatalf("external audio command is not source-relative: %v", externalArgs)
+	}
+}
+
+func TestFFmpegCommandFallsBackToPreCatchupPacing(t *testing.T) {
+	args := []string{"-readrate", "1", "-readrate_initial_burst", "4", "-readrate_catchup", "4", "-i", "input"}
+	got := ffmpegArgsForCatchupSupport(args, false)
+	want := "-readrate 1 -readrate_initial_burst 4 -i input"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("compatible args = %q, want %q", strings.Join(got, " "), want)
+	}
+	if strings.Join(args, " ") != "-readrate 1 -readrate_initial_burst 4 -readrate_catchup 4 -i input" {
+		t.Fatalf("fallback mutated shared command args: %v", args)
+	}
+}
+
+func TestFFmpegFeatureProbeIsTimeBounded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture requires a POSIX host")
+	}
+	probe := filepath.Join(t.TempDir(), "ffmpeg-probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if detectFFmpegReadrateCatchup(probe, 50*time.Millisecond) {
+		t.Fatal("hanging feature probe reported support")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("feature probe returned in %s, want a bounded return", elapsed)
 	}
 }
 

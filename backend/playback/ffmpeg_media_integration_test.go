@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -405,6 +406,252 @@ func TestRealFFmpegRemuxAndTranscodeProducePlayableHLS(t *testing.T) {
 	}
 }
 
+func TestRealFFmpegNonzeroMain10TranscodeSeekPresentsFramesWithinTwoSeconds(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("FLIXR_REQUIRE_MEDIA_INTEGRATION") == "1" {
+				t.Fatalf("%s is required for media integration", tool)
+			}
+			t.Skipf("%s is unavailable", tool)
+		}
+	}
+
+	work := t.TempDir()
+	fixture := filepath.Join(work, "seek-main10.mkv")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	generate := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=black:s=320x180:r=30:d=28",
+		"-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=28",
+		"-vf", "drawbox=color=red:t=fill:enable='between(t,0,2)',drawbox=color=green:t=fill:enable='between(t,2,4)',drawbox=color=blue:t=fill:enable='between(t,4,6)',drawbox=color=yellow:t=fill:enable='between(t,6,7)',drawbox=color=cyan:t=fill:enable='between(t,7,10)',drawbox=color=magenta:t=fill:enable='gte(t,10)'",
+		"-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+		"-x265-params", "log-level=error:keyint=60:min-keyint=60:scenecut=0",
+		"-c:a", "aac", "-b:a", "96k", "-shortest", fixture,
+	)
+	if output, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("generate Main 10 seek fixture: %v\n%s", err, output)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, fixture)
+	}))
+	defer server.Close()
+	outputDir := filepath.Join(work, "output")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name, args, err := ffmpegCommand(Plan{Kind: Transcode}, server.URL, "", -1, outputDir, 6*time.Second, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("ffmpeg args: %s", strings.Join(args, " "))
+	var stderr bytes.Buffer
+	started := time.Now()
+	process, err := (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Kill() })
+
+	manifest := filepath.Join(outputDir, "index.m3u8")
+	segments := waitForMediaSegments(t, manifest, 1, process, 10*time.Second)
+	firstSegmentReady := time.Since(started)
+	firstFrame := decodeFragmentRGB(t, outputDir, segments[0])
+	firstFrameReady := time.Since(started)
+	t.Logf("first segment %s; first decoded frame %s", firstSegmentReady.Round(time.Millisecond), firstFrameReady.Round(time.Millisecond))
+	assertRGBNear(t, firstFrame, [3]byte{253, 253, 0}, 20)
+	if firstFrameReady >= 2*time.Second {
+		t.Fatalf("first decoded target frame ready in %s, want under 2s; ffmpeg:\n%s", firstFrameReady, stderr.String())
+	}
+
+	segments = waitForMediaSegments(t, manifest, 2, process, 10*time.Second)
+	continuingFrame := decodeFragmentRGB(t, outputDir, segments[1])
+	continuingReady := time.Since(started)
+	assertRGBNear(t, continuingFrame, [3]byte{0, 253, 253}, 20)
+
+	waitForMediaSegments(t, manifest, 7, process, 15*time.Second)
+	seventhSegmentReady := time.Since(started)
+	waitForMediaSegments(t, manifest, 9, process, 15*time.Second)
+	ninthSegmentReady := time.Since(started)
+	if pacedInterval := ninthSegmentReady - seventhSegmentReady; pacedInterval < 3500*time.Millisecond {
+		t.Fatalf("two later segments advanced in %s; input did not return to sustained real-time pacing", pacedInterval)
+	}
+	t.Logf("Main 10 -> H.264 seek: first segment %s; first target frame %s; continuing frame %s; seventh segment %s; ninth segment %s", firstSegmentReady.Round(time.Millisecond), firstFrameReady.Round(time.Millisecond), continuingReady.Round(time.Millisecond), seventhSegmentReady.Round(time.Millisecond), ninthSegmentReady.Round(time.Millisecond))
+
+	if err := process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = process.Kill()
+		t.Fatalf("ffmpeg did not stop after seek qualification; stderr:\n%s", stderr.String())
+	}
+}
+
+func TestRealFFmpegNonzeroRemuxSeekPresentsTargetAndContinuingFrames(t *testing.T) {
+	for _, tool := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("FLIXR_REQUIRE_MEDIA_INTEGRATION") == "1" {
+				t.Fatalf("%s is required for media integration", tool)
+			}
+			t.Skipf("%s is unavailable", tool)
+		}
+	}
+
+	work := t.TempDir()
+	fixture := filepath.Join(work, "seek-remux.mp4")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	generate := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=black:s=320x180:r=24:d=20",
+		"-f", "lavfi", "-i", "sine=frequency=660:sample_rate=48000:duration=20",
+		"-vf", "drawbox=color=red:t=fill:enable='between(t,0,4)',drawbox=color=yellow:t=fill:enable='between(t,4,8)',drawbox=color=cyan:t=fill:enable='between(t,8,12)',drawbox=color=magenta:t=fill:enable='between(t,12,16)',drawbox=color=green:t=fill:enable='gte(t,16)'",
+		"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-pix_fmt", "yuv420p",
+		"-g", "96", "-keyint_min", "96", "-sc_threshold", "0", "-bf", "0",
+		"-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", "-shortest", fixture,
+	)
+	if output, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("generate remux seek fixture: %v\n%s", err, output)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, fixture)
+	}))
+	defer server.Close()
+	outputDir := filepath.Join(work, "output")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := Plan{Kind: Remux, VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 96_000}
+	name, args, err := ffmpegCommand(plan, server.URL, "", -1, outputDir, 8*time.Second, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "-hls_time 4") || !strings.Contains(joined, "-hls_list_size 15") {
+		t.Fatalf("remux did not preserve its bounded four-second segment window: %s", joined)
+	}
+	var stderr bytes.Buffer
+	started := time.Now()
+	process, err := (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Kill() })
+
+	manifest := filepath.Join(outputDir, "index.m3u8")
+	segments := waitForMediaSegments(t, manifest, 1, process, 10*time.Second)
+	firstFrame := decodeFragmentRGB(t, outputDir, segments[0])
+	firstFrameReady := time.Since(started)
+	assertRGBNear(t, firstFrame, [3]byte{0, 253, 253}, 20)
+	if firstFrameReady >= 2*time.Second {
+		t.Fatalf("first decoded remux target frame ready in %s, want under 2s; ffmpeg:\n%s", firstFrameReady, stderr.String())
+	}
+	segments = waitForMediaSegments(t, manifest, 2, process, 10*time.Second)
+	continuingFrame := decodeFragmentRGB(t, outputDir, segments[1])
+	continuingReady := time.Since(started)
+	assertRGBNear(t, continuingFrame, [3]byte{253, 0, 252}, 20)
+	t.Logf("H.264 remux seek: first target frame %s; continuing frame %s", firstFrameReady.Round(time.Millisecond), continuingReady.Round(time.Millisecond))
+
+	if err := process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = process.Kill()
+		t.Fatalf("ffmpeg did not stop after remux seek qualification; stderr:\n%s", stderr.String())
+	}
+}
+
+func waitForMediaSegments(t *testing.T, manifest string, count int, process Process, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		content, err := os.ReadFile(manifest)
+		if err == nil {
+			var segments []string
+			for _, line := range strings.Split(string(content), "\n") {
+				if strings.HasPrefix(line, "segment-") && strings.HasSuffix(line, ".m4s") {
+					segments = append(segments, line)
+				}
+			}
+			if len(segments) >= count {
+				return segments
+			}
+		}
+		select {
+		case <-deadline.C:
+			_ = process.Kill()
+			t.Fatalf("playlist did not publish %d complete segments within %s", count, timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func decodeFragmentRGB(t *testing.T, outputDir, segment string) [3]byte {
+	t.Helper()
+	fragment, err := os.CreateTemp(t.TempDir(), "segment-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"init.mp4", segment} {
+		input, err := os.Open(filepath.Join(outputDir, name))
+		if err != nil {
+			fragment.Close()
+			t.Fatal(err)
+		}
+		_, copyErr := io.Copy(fragment, input)
+		closeErr := input.Close()
+		if copyErr != nil {
+			fragment.Close()
+			t.Fatal(copyErr)
+		}
+		if closeErr != nil {
+			fragment.Close()
+			t.Fatal(closeErr)
+		}
+	}
+	if err := fragment.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-i", fragment.Name(),
+		"-map", "0:v:0", "-frames:v", "1", "-vf", "scale=1:1,format=rgb24", "-f", "rawvideo", "-",
+	).Output()
+	if err != nil {
+		t.Fatalf("decode segment %s: %v", segment, err)
+	}
+	if len(output) != 3 {
+		t.Fatalf("decoded RGB frame has %d bytes, want 3", len(output))
+	}
+	return [3]byte(output)
+}
+
+func assertRGBNear(t *testing.T, got, want [3]byte, tolerance int) {
+	t.Helper()
+	for channel := range got {
+		difference := int(got[channel]) - int(want[channel])
+		if difference < 0 {
+			difference = -difference
+		}
+		if difference > tolerance {
+			t.Fatalf("decoded RGB = %v, want %v within %d", got, want, tolerance)
+		}
+	}
+}
+
 func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
 	for _, tool := range []string{"ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -442,8 +689,27 @@ func TestRealFFmpegTranscodePreservesRotatedDisplayGeometry(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, name, args...).CombinedOutput(); err != nil {
-		t.Fatalf("transcode rotated fixture: %v\n%s", err, output)
+	var stderr bytes.Buffer
+	process, err := (OSExecutor{}).Start(name, args, &stderr)
+	if err != nil {
+		t.Fatalf("start rotated fixture transcode: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- process.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("transcode rotated fixture: %v\n%s", err, stderr.String())
+		}
+	case <-ctx.Done():
+		timeoutErr := ctx.Err()
+		_ = process.Kill()
+		select {
+		case <-done:
+			t.Fatalf("transcode rotated fixture: %v\n%s", timeoutErr, stderr.String())
+		case <-time.After(time.Second):
+			t.Fatalf("transcode rotated fixture: %v; process did not exit after kill", timeoutErr)
+		}
 	}
 	rendered := probeAV(t, filepath.Join(outputDir, "index.m3u8"))
 	if rendered.Video.Width != 1080 || rendered.Video.Height != 1920 {

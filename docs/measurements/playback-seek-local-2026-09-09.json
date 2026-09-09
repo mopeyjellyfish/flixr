@@ -1,0 +1,67 @@
+{
+  "baseline": {
+    "revision": "f2e4b1610c632d7ad6d01efee1021ad63a94182b",
+    "fixture": "generated-hevc-main10-aac-matroska",
+    "start_ms": 6000,
+    "first_segment_ms": 6903,
+    "first_decoded_target_frame_ms": 6966,
+    "result": "failed-under-2000ms-assertion"
+  },
+  "candidate_local_runs": {
+    "code_revision": "f870a846babd898687fdd1d29cf9e9db59882ce6",
+    "fixture": "generated-hevc-main10-aac-matroska",
+    "start_ms": 6000,
+    "runs": [
+      {
+        "first_segment_ms": 1384,
+        "first_decoded_target_frame_ms": 1445,
+        "continuing_decoded_frame_ms": 1967,
+        "later_four_media_seconds_ms": 4002
+      },
+      {
+        "first_segment_ms": 1406,
+        "first_decoded_target_frame_ms": 1451,
+        "continuing_decoded_frame_ms": 1932,
+        "later_four_media_seconds_ms": 4002,
+        "peak_ffmpeg_cpu_percent": 126.4,
+        "peak_ffmpeg_rss_kib": 176688
+      }
+    ],
+    "remux_four_second_gop": {
+      "start_ms": 8000,
+      "first_decoded_target_frame_ms": 1119,
+      "continuing_decoded_frame_ms": 4094,
+      "hls_time_seconds": 4,
+      "playlist_entries": 15
+    }
+  },
+  "candidate_container": {
+    "source": "official-Dockerfile-local-candidate",
+    "published_release": false,
+    "code_revision": "f870a846babd898687fdd1d29cf9e9db59882ce6",
+    "image": "flixr:issue-196-8610f2b",
+    "manifest_list_digest": "sha256:1e6b3c0d0479c83db5f7bf18e9a7581f7eb588139788461f9561b2ff2643879a",
+    "browser": "Chromium",
+    "unretained": {
+      "target_ms": 24016.8,
+      "seek_http_ms": 269,
+      "first_correct_frame_ms": 311,
+      "continuing_playback": true
+    },
+    "retained": {
+      "target_ms": 24500,
+      "seek_http_ms": 7,
+      "first_correct_frame_ms": 55,
+      "stream_offset_ms": 24000,
+      "continuing_playback": true
+    }
+  },
+  "household_release_baseline": {
+    "version": "v0.15.0",
+    "fixture": "real-hevc-main10-to-h264-hls",
+    "unretained_seek_http_ms": 6706,
+    "first_correct_frame_ms": 6895,
+    "retained_seek_http_ms": 46,
+    "candidate_was_not_run_on_household": true
+  }
+}
