@@ -283,6 +283,9 @@ type Catalog struct {
 	activeJobCommitted               bool
 	activeJobOwnerCancelled          bool
 	scanCommitMu                     sync.Mutex
+	pendingJobCancellations          map[string]*scanCancellationIntent
+	cancelMarkerHook                 func()
+	jobTerminalHook                  func()
 	maintenanceDir                   afero.File
 	artworkObjectsDir                afero.File
 	derivativeBytes                  int64

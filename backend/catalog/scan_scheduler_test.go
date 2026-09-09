@@ -252,6 +252,131 @@ func TestCancelAfterClaimBeforeExecutionRegistration(t *testing.T) {
 	}
 }
 
+func TestCancelIntentCrossingExecutionRegistrationIsConsumed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var probes atomic.Int32
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		probes.Add(1)
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatal(err)
+	}
+	queued, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.claimScanJob(time.Now())
+	if err != nil || claimed.ID != queued.ID {
+		t.Fatalf("claim = %#v, %v", claimed, err)
+	}
+	markerReached := make(chan struct{})
+	releaseMarker := make(chan struct{})
+	c.cancelMarkerHook = func() {
+		close(markerReached)
+		<-releaseMarker
+	}
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- c.CancelScanJob(claimed.ID) }()
+	<-markerReached
+	executeDone := make(chan struct{})
+	go func() {
+		c.executeScanJob(t.Context(), claimed)
+		close(executeDone)
+	}()
+	select {
+	case <-executeDone:
+	case <-time.After(time.Second):
+		t.Fatal("execution did not consume the pending cancellation intent")
+	}
+	if probes.Load() != 0 {
+		t.Fatalf("crossed cancellation probed %d files", probes.Load())
+	}
+	close(releaseMarker)
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("consumed cancellation returned an error: %v", err)
+	}
+	c.cancelMarkerHook = nil
+	job, err := c.ScanJob(claimed.ID)
+	if err != nil || job.Status != "cancelled" {
+		t.Fatalf("crossed cancellation job=%#v err=%v", job, err)
+	}
+	if err := c.CancelScanJob("missing-job"); err == nil {
+		t.Fatal("missing job cancellation succeeded")
+	}
+	failing, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TRIGGER fail_cancel_marker BEFORE UPDATE OF cancel_requested ON scan_jobs WHEN OLD.id=%q BEGIN SELECT RAISE(FAIL,'injected cancellation failure'); END`, failing.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CancelScanJob(failing.ID); err == nil {
+		t.Fatal("injected cancellation marker failure was ignored")
+	}
+	c.schedulerMu.Lock()
+	pending := len(c.pendingJobCancellations)
+	c.schedulerMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending cancellation intents retained after terminal paths: %d", pending)
+	}
+}
+
+func TestCancelIsRejectedAfterCatalogCommitUntilJobIsTerminal(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) {
+		return MediaProperties{}, nil
+	}))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatal(err)
+	}
+	queued, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.claimScanJob(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalReached := make(chan struct{})
+	releaseTerminal := make(chan struct{})
+	c.jobTerminalHook = func() {
+		close(terminalReached)
+		<-releaseTerminal
+	}
+	executeDone := make(chan struct{})
+	go func() {
+		c.executeScanJob(t.Context(), claimed)
+		close(executeDone)
+	}()
+	<-terminalReached
+	if err := c.CancelScanJob(queued.ID); err == nil {
+		t.Fatal("cancellation was acknowledged after the catalog commit")
+	}
+	close(releaseTerminal)
+	<-executeDone
+	job, err := c.ScanJob(queued.ID)
+	if err != nil || job.Status != "succeeded" {
+		t.Fatalf("sealed terminal job=%#v err=%v", job, err)
+	}
+}
+
 func TestTerminalWriteFailureReleasesLibraryQueue(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {

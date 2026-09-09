@@ -59,6 +59,10 @@ type ScanJobFile struct {
 	Retryable    bool   `json:"retryable"`
 }
 
+type scanCancellationIntent struct {
+	consumed bool
+}
+
 func normalizeExclusions(patterns []string) ([]string, error) {
 	seen := map[string]bool{}
 	result := make([]string, 0, len(patterns))
@@ -558,10 +562,24 @@ func (c *Catalog) CancelScanJob(id string) error {
 	}
 	c.scanCommitMu.Lock()
 	c.schedulerMu.Lock()
-	active := c.activeJobID == id && c.activeJobCancel != nil && !c.activeJobCommitted
+	active := c.activeJobID == id && c.activeJobCancel != nil
+	if active && c.activeJobCommitted {
+		c.schedulerMu.Unlock()
+		c.scanCommitMu.Unlock()
+		return errors.New("scan job is no longer cancellable")
+	}
 	if active {
 		c.activeJobOwnerCancelled = true
 		c.activeJobCancel()
+	} else {
+		if c.pendingJobCancellations == nil {
+			c.pendingJobCancellations = map[string]*scanCancellationIntent{}
+		}
+	}
+	intent := c.pendingJobCancellations[id]
+	if !active && intent == nil {
+		intent = &scanCancellationIntent{}
+		c.pendingJobCancellations[id] = intent
 	}
 	c.schedulerMu.Unlock()
 	c.scanCommitMu.Unlock()
@@ -572,11 +590,22 @@ func (c *Catalog) CancelScanJob(id string) error {
 		c.wakeScheduler()
 		return nil
 	}
+	if c.cancelMarkerHook != nil {
+		c.cancelMarkerHook()
+	}
 	result, err := c.db.Exec(`UPDATE scan_jobs SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,finished_at=CASE WHEN status='queued' THEN ? ELSE finished_at END,message=CASE WHEN status='queued' THEN 'Cancelled before starting.' ELSE message END WHERE id=? AND status IN ('queued','running')`, time.Now().Unix(), id)
+	c.scanCommitMu.Lock()
+	c.schedulerMu.Lock()
+	consumed := intent.consumed
+	if c.pendingJobCancellations[id] == intent {
+		delete(c.pendingJobCancellations, id)
+	}
+	c.schedulerMu.Unlock()
+	c.scanCommitMu.Unlock()
 	if err != nil {
 		return err
 	}
-	if changed, _ := result.RowsAffected(); changed == 0 {
+	if changed, _ := result.RowsAffected(); changed == 0 && !consumed {
 		return errors.New("scan job not active")
 	}
 	c.wakeScheduler()
@@ -779,15 +808,26 @@ func (c *Catalog) claimScanJob(now time.Time) (ScanJob, error) {
 
 func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	ctx, cancel := context.WithCancel(parent)
+	c.scanCommitMu.Lock()
 	c.schedulerMu.Lock()
+	pendingIntent := c.pendingJobCancellations[job.ID]
+	pendingCancellation := pendingIntent != nil
+	if pendingIntent != nil {
+		pendingIntent.consumed = true
+	}
+	delete(c.pendingJobCancellations, job.ID)
 	c.activeJobID = job.ID
 	c.activeJobCancel = cancel
 	c.activeJobCommitted = false
-	c.activeJobOwnerCancelled = false
+	c.activeJobOwnerCancelled = pendingCancellation
 	c.schedulerMu.Unlock()
+	c.scanCommitMu.Unlock()
+	if pendingCancellation {
+		cancel()
+	}
 	var cancelRequested int
 	_ = c.db.QueryRow(`SELECT cancel_requested FROM scan_jobs WHERE id=?`, job.ID).Scan(&cancelRequested)
-	if cancelRequested != 0 {
+	if cancelRequested != 0 && !pendingCancellation {
 		c.schedulerMu.Lock()
 		if c.activeJobID == job.ID {
 			c.activeJobOwnerCancelled = true
@@ -802,29 +842,40 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 		}
 	}
 	err := c.scanLibrary(ctx, c.schedulerWorkers, job.LibraryID, retry)
+	c.scanCommitMu.Lock()
 	c.schedulerMu.Lock()
 	ownerCancelled := c.activeJobOwnerCancelled
-	c.activeJobID = ""
-	c.activeJobCancel = nil
-	c.activeJobCommitted = false
-	c.activeJobOwnerCancelled = false
+	if c.activeJobID == job.ID {
+		c.activeJobCommitted = true
+	}
 	c.schedulerMu.Unlock()
+	c.scanCommitMu.Unlock()
 	cancel()
+	if c.jobTerminalHook != nil {
+		c.jobTerminalHook()
+	}
 	if errors.Is(err, ErrScanActive) {
-		_, _ = c.db.Exec(`UPDATE scan_jobs SET status='queued',started_at=NULL,not_before=? WHERE id=?`, time.Now().Add(time.Second).Unix(), job.ID)
+		var terminalErr error
+		if ownerCancelled {
+			_, terminalErr = c.db.Exec(`UPDATE scan_jobs SET status='cancelled',finished_at=?,cancel_requested=1,message='Cancelled by owner.' WHERE id=? AND status='running'`, time.Now().Unix(), job.ID)
+		} else {
+			_, terminalErr = c.db.Exec(`UPDATE scan_jobs SET status='queued',started_at=NULL,not_before=? WHERE id=?`, time.Now().Add(time.Second).Unix(), job.ID)
+		}
+		if terminalErr != nil {
+			_, _ = c.db.Exec(`UPDATE scan_jobs SET status='failed',finished_at=?,message='The scan could not be rescheduled. Run it again.' WHERE id=? AND status='running'`, time.Now().Unix(), job.ID)
+		}
+		c.clearActiveScanJob(job.ID)
 		return
 	}
 	status := c.ScanStatus()
 	terminal := "succeeded"
 	message := ""
-	if errors.Is(err, context.Canceled) {
-		if ownerCancelled {
-			terminal = "cancelled"
-			message = "Cancelled by owner."
-		} else {
-			terminal = "interrupted"
-			message = "Interrupted by server shutdown."
-		}
+	if ownerCancelled {
+		terminal = "cancelled"
+		message = "Cancelled by owner."
+	} else if errors.Is(err, context.Canceled) {
+		terminal = "interrupted"
+		message = "Interrupted by server shutdown."
 	} else if err != nil || status.Status == "failed" {
 		terminal = "failed"
 		message = redactScanError(status.Message)
@@ -835,6 +886,7 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 	finishedAt := time.Now().Unix()
 	if finishErr := c.finishScanJob(job, status, terminal, message, finishedAt); finishErr != nil {
 		_, _ = c.db.Exec(`UPDATE scan_jobs SET status='failed',finished_at=?,message='The scan finished, but its result could not be recorded. Run it again.' WHERE id=? AND status='running'`, finishedAt, job.ID)
+		c.clearActiveScanJob(job.ID)
 		return
 	}
 	rawLower := strings.ToLower(status.Message)
@@ -849,6 +901,20 @@ func (c *Catalog) executeScanJob(parent context.Context, job ScanJob) {
 		}
 	}
 	_ = c.pruneScanJobHistory(job.LibraryID)
+	c.clearActiveScanJob(job.ID)
+}
+
+func (c *Catalog) clearActiveScanJob(id string) {
+	c.scanCommitMu.Lock()
+	c.schedulerMu.Lock()
+	if c.activeJobID == id {
+		c.activeJobID = ""
+		c.activeJobCancel = nil
+		c.activeJobCommitted = false
+		c.activeJobOwnerCancelled = false
+	}
+	c.schedulerMu.Unlock()
+	c.scanCommitMu.Unlock()
 }
 
 func (c *Catalog) finishScanJob(job ScanJob, status ScanStatus, terminal, message string, finishedAt int64) error {
