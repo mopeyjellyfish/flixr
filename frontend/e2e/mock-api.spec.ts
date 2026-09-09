@@ -4,18 +4,21 @@ import AxeBuilder from '@axe-core/playwright';
 
 const viewports = [{ name: 'tv', width: 1920, height: 1080 }, { name: 'desktop', width: 1440, height: 900 }, { name: 'tablet', width: 1024, height: 768 }, { name: 'phone', width: 390, height: 844 }];
 type JSONValue = Record<string, unknown>;
+type MockResponse = { status?: number; json: JSONValue };
+type ScanPolicyFixture = { library_id: string; enabled: boolean; schedule_kind: 'interval' | 'daily'; interval_seconds: number; local_time: string; timezone: string; exclusions: string[] };
 const ready = { claimed: true, readiness: { ffprobe: true, ffmpeg: true } };
 const posterArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 600"><defs><linearGradient id="g" x2="1" y2="1"><stop stop-color="#183a82"/><stop offset="1" stop-color="#05070c"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="295" cy="160" r="105" fill="#5b8cff" opacity=".52"/><path d="M0 430L230 250l170 155v195H0z" fill="#101623" opacity=".82"/></svg>').toString('base64')}`;
 const backdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><defs><radialGradient id="g"><stop stop-color="#5b8cff"/><stop offset="1" stop-color="#05070c"/></radialGradient></defs><rect width="1600" height="900" fill="#05070c"/><ellipse cx="1180" cy="330" rx="520" ry="380" fill="url(#g)" opacity=".58"/><path d="M580 900L1100 330l500 430v140z" fill="#101623" opacity=".85"/></svg>').toString('base64')}`;
 const brightBackdropArt = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="#f7d96b"/><circle cx="1180" cy="280" r="360" fill="#f6f8ff"/><path d="M500 900L1100 260l500 500v140z" fill="#5b8cff"/></svg>').toString('base64')}`;
 const film = { id: 'film-1', title: 'Cobalt Sky', kind: 'film', year: 2024, synopsis: 'A small local signal.', local_only: false, poster: posterArt, backdrop: backdropArt, container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 30_000, bit_depth: 8, audio: [{ codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48_000, bitrate: 128_000 }] };
 const series = { id: 'series-1', title: 'Night Relay', kind: 'series', year: 2023, synopsis: 'Episodes from a local relay.', local_only: true, poster: posterArt };
-const ownerLibrariesResponse: { status?: number; json: JSONValue } = { json: { libraries: [
+const ownerLibrariesResponse: MockResponse = { json: { libraries: [
   { id: 'films', name: 'Films', kind: 'film', locations: [{ id: 'films-root', library_id: 'films', path: '/media/films', root_kind: 'film', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] },
   { id: 'tv', name: 'TV', kind: 'episode', locations: [{ id: 'tv-root', library_id: 'tv', path: '/media/tv', root_kind: 'episode', state: 'available', scan_complete: true, items: 1, missing: 0, updated_at: 1 }] },
 ] } };
+const scanPolicyResponse = (libraryID: string): MockResponse => ({ json: { policy: { library_id: libraryID, enabled: false, schedule_kind: 'interval', interval_seconds: 86400, local_time: '03:00', timezone: 'UTC', exclusions: [] } satisfies ScanPolicyFixture } });
 
-async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => { status?: number; json: JSONValue } | undefined) {
+async function mock(page: Page, handler: (path: string, method: string, query: string, body?: Record<string, unknown>) => MockResponse | undefined) {
   // New routes take precedence. Keep interception installed while changing states
   // so an in-flight request cannot escape to the real development proxy.
   await page.route('**/api/v1/**', (route) => {
@@ -26,6 +29,8 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/scan/jobs' ? { json: { jobs: [] } } : undefined)
+      ?? (request.method() === 'GET' && /^\/api\/v1\/owner\/libraries\/[^/]+\/scan-policy$/.test(url.pathname) ? scanPolicyResponse(url.pathname.split('/').at(-2) ?? '') : undefined)
       ?? (request.method() === 'GET' && url.pathname.startsWith('/api/v1/ratings/') ? { json: { rating: null } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
