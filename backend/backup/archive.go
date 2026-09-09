@@ -188,6 +188,9 @@ func snapshotEntries(ctx context.Context, snapshot, dataDir string, beforeArtwor
 		}
 		entry, err := inspectSourceFile(ctx, filepath.ToSlash(filepath.Join("artwork", "objects", name)), path)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, 0, ctx.Err()
+			}
 			return nil, 0, errors.New("a referenced artwork object became unavailable")
 		}
 		entries = append(entries, entry)

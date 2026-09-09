@@ -44,17 +44,19 @@ type Job struct {
 }
 
 type Manager struct {
-	db       *sqlite.DB
-	source   Source
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	stop     context.CancelFunc
-	wake     chan struct{}
-	done     chan struct{}
-	running  bool
-	now      func() time.Time
-	override *Policy
-	locked   map[string]bool
+	db            *sqlite.DB
+	source        Source
+	mu            sync.Mutex
+	cancel        context.CancelFunc
+	stop          context.CancelFunc
+	wake          chan struct{}
+	done          chan struct{}
+	running       bool
+	now           func() time.Time
+	override      *Policy
+	locked        map[string]bool
+	afterSelect   func(string)
+	beforeArtwork func(string)
 }
 
 func NewManager(db *sqlite.DB, source Source) (*Manager, error) {
@@ -424,19 +426,23 @@ func (m *Manager) runOnce(parent context.Context) {
 	if err := m.db.QueryRow(`SELECT id FROM backup_jobs WHERE status='queued' ORDER BY queued_at,id LIMIT 1`).Scan(&id); err != nil {
 		return
 	}
+	if m.afterSelect != nil {
+		m.afterSelect(id)
+	}
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
 	m.cancel = cancel
 	m.mu.Unlock()
 	defer func() { cancel(); m.mu.Lock(); m.cancel = nil; m.mu.Unlock() }()
 	started := m.now().Unix()
-	if _, err := m.db.Exec(`UPDATE backup_jobs SET status='running',started_at=? WHERE id=? AND status='queued'`, started, id); err != nil {
+	claimed, err := m.claimJob(id, started)
+	if err != nil || !claimed {
 		return
 	}
 	p, err = m.Policy()
 	var result Result
 	if err == nil {
-		result, err = Create(ctx, m.source, Options{Destination: p.Destination, Now: m.now})
+		result, err = Create(ctx, m.source, Options{Destination: p.Destination, Now: m.now, beforeArtwork: m.beforeArtwork})
 	}
 	finished := m.now().Unix()
 	status, message := "succeeded", ""
@@ -469,6 +475,15 @@ func (m *Manager) runOnce(parent context.Context) {
 	} else {
 		_, _ = m.db.Exec(`UPDATE backup_policy SET last_status=?,last_message=? WHERE id=1`, status, message)
 	}
+}
+
+func (m *Manager) claimJob(id string, started int64) (bool, error) {
+	result, err := m.db.Exec(`UPDATE backup_jobs SET status='running',started_at=? WHERE id=? AND status='queued'`, started, id)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func backupFailureMessage(err error) string {

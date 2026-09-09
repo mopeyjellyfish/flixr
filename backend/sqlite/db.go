@@ -103,6 +103,10 @@ func (d *DB) DataDir() string         { return d.dir }
 // OnlineBackup writes a transactionally consistent SQLite snapshot without
 // copying the live database or its WAL files.
 func (d *DB) OnlineBackup(ctx context.Context, destination string) error {
+	return d.onlineBackup(ctx, destination, nil)
+}
+
+func (d *DB) onlineBackup(ctx context.Context, destination string, afterStep func(bool)) error {
 	conn, err := d.writer.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("open sqlite backup connection: %w", err)
@@ -127,6 +131,9 @@ func (d *DB) OnlineBackup(ctx context.Context, destination string) error {
 			more, err := backup.Step(128)
 			if err != nil {
 				return errors.Join(fmt.Errorf("copy sqlite backup pages: %w", err), backup.Finish())
+			}
+			if afterStep != nil {
+				afterStep(more)
 			}
 			if !more {
 				if err := backup.Finish(); err != nil {

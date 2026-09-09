@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -16,7 +17,11 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
 
-const restoreJournalName = ".flixr-restore-journal.json"
+const (
+	restoreJournalName     = ".flixr-restore-journal.json"
+	restoreStagePrefix     = ".flixr-restore-stage-"
+	maxRestoreJournalBytes = 4096
+)
 
 var errSimulatedRestoreInterruption = errors.New("simulated restore interruption")
 
@@ -75,11 +80,15 @@ func restore(ctx context.Context, archivePath, targetDir string, options restore
 	if err != nil {
 		return RestoreResult{}, err
 	}
-	stage := filepath.Join(targetDir, ".flixr-restore-stage-"+id)
+	stage := filepath.Join(targetDir, restoreStagePrefix+id)
 	if err := os.Mkdir(stage, 0o700); err != nil {
 		return RestoreResult{}, errors.New("cannot create restore staging directory")
 	}
-	defer os.RemoveAll(stage)
+	defer func() {
+		if !errors.Is(err, errSimulatedRestoreInterruption) {
+			_ = os.RemoveAll(stage)
+		}
+	}()
 	if err := extractArchive(ctx, archivePath, stage, manifest); err != nil {
 		return RestoreResult{}, err
 	}
@@ -247,6 +256,12 @@ func prepareStagedInstallation(stage, target string) error {
 		db.Close()
 		return errors.New("staged backup destination cannot be cleared")
 	}
+	// Screen and playback authority is runtime-only; sessions is the only
+	// persisted bearer authority and must never be resurrected by a restore.
+	if _, err := db.Exec(`DELETE FROM sessions`); err != nil {
+		db.Close()
+		return errors.New("staged authentication sessions cannot be cleared")
+	}
 	if err := db.Close(); err != nil {
 		return errors.New("staged backup database cannot be finalized")
 	}
@@ -309,19 +324,40 @@ func publishStagedInstallation(target, stage string, journal restoreJournal, int
 }
 
 func RecoverInterruptedRestore(target string) error {
+	if !filepath.IsAbs(target) {
+		return errors.New("restore target must be an absolute path")
+	}
+	target = filepath.Clean(target)
+	targetInfo, err := os.Lstat(target)
+	if err != nil || !targetInfo.IsDir() || targetInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("restore target must be an existing directory, not a symlink")
+	}
 	journalPath := filepath.Join(target, restoreJournalName)
-	data, err := os.ReadFile(journalPath)
+	journalInfo, err := os.Lstat(journalPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil || !journalInfo.Mode().IsRegular() || journalInfo.Size() > maxRestoreJournalBytes {
+		return errors.New("restore journal is invalid")
+	}
+	data, err := os.ReadFile(journalPath)
 	if err != nil {
 		return errors.New("restore journal cannot be read")
 	}
 	var journal restoreJournal
-	if err := json.Unmarshal(data, &journal); err != nil || (journal.Phase != "prepared" && journal.Phase != "published") || filepath.Base(journal.Stage) != journal.Stage {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&journal); err != nil || (journal.Phase != "prepared" && journal.Phase != "published") || !validRestoreStageName(journal.Stage) {
+		return errors.New("restore journal is invalid")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("restore journal is invalid")
 	}
 	stage := filepath.Join(target, journal.Stage)
+	stageInfo, err := os.Lstat(stage)
+	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("restore journal stage is invalid")
+	}
 	items := []struct {
 		live, prior string
 		existed     bool
@@ -361,6 +397,15 @@ func RecoverInterruptedRestore(target string) error {
 		return errors.New("restore journal could not be removed")
 	}
 	return syncDirectory(target)
+}
+
+func validRestoreStageName(name string) bool {
+	if len(name) != len(restoreStagePrefix)+12 || name[:len(restoreStagePrefix)] != restoreStagePrefix {
+		return false
+	}
+	suffix := name[len(restoreStagePrefix):]
+	decoded, err := hex.DecodeString(suffix)
+	return err == nil && hex.EncodeToString(decoded) == suffix
 }
 
 func regularFileExists(path string) bool {

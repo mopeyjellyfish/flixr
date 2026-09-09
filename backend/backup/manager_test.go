@@ -227,3 +227,130 @@ func TestCancellingQueuedJobDoesNotCancelRunningContext(t *testing.T) {
 		t.Fatal("queued cancellation cancelled running work")
 	}
 }
+
+func TestCancelWinningQueuedJobClaimIsNotOverwritten(t *testing.T) {
+	data := t.TempDir()
+	destination := t.TempDir()
+	db, err := sqlite.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m, err := NewManager(db, Source{DB: db, DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{Destination: destination, ScheduleKind: "interval", IntervalSeconds: 3600, LocalTime: "03:00", Timezone: "UTC", RetainCount: 2, RetainAgeSeconds: 86400, BudgetBytes: 1 << 30}
+	if _, err = m.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	job, err := m.Queue("manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := make(chan struct{})
+	resume := make(chan struct{})
+	m.afterSelect = func(string) {
+		close(selected)
+		<-resume
+	}
+	done := make(chan struct{})
+	go func() {
+		m.runOnce(context.Background())
+		close(done)
+	}()
+	<-selected
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+	}()
+	cancelled, err := m.Cancel(job.ID)
+	if err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("cancelled job=%+v err=%v", cancelled, err)
+	}
+	close(resume)
+	resumed = true
+	<-done
+	final, err := m.Job(job.ID)
+	if err != nil || final.Status != "cancelled" || final.ArchiveName != "" {
+		t.Fatalf("final job=%+v err=%v", final, err)
+	}
+	archives, err := filepath.Glob(filepath.Join(destination, "*"+archiveSuffix))
+	if err != nil || len(archives) != 0 {
+		t.Fatalf("cancelled job published archives=%v err=%v", archives, err)
+	}
+}
+
+func TestCancelRunningBackupPersistsCancelledAndCleansPartials(t *testing.T) {
+	data := t.TempDir()
+	destination := t.TempDir()
+	db, err := sqlite.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	objects := filepath.Join(data, "artwork", "objects")
+	if err = os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(objects, "cancel-proof"), []byte("artwork"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO catalog_artwork(catalog_id,kind,content_type,object_name) VALUES('cancel-film','poster','image/jpeg','cancel-proof')`); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(db, Source{DB: db, DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := Policy{Destination: destination, ScheduleKind: "interval", IntervalSeconds: 3600, LocalTime: "03:00", Timezone: "UTC", RetainCount: 2, RetainAgeSeconds: 86400, BudgetBytes: 1 << 30}
+	if _, err = m.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	job, err := m.Queue("manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyReached := make(chan struct{})
+	resume := make(chan struct{})
+	m.beforeArtwork = func(string) {
+		close(copyReached)
+		<-resume
+	}
+	done := make(chan struct{})
+	go func() {
+		m.runOnce(context.Background())
+		close(done)
+	}()
+	<-copyReached
+	resumed := false
+	defer func() {
+		if !resumed {
+			close(resume)
+		}
+	}()
+	running, err := m.Job(job.ID)
+	if err != nil || running.Status != "running" {
+		t.Fatalf("running job=%+v err=%v", running, err)
+	}
+	if _, err = m.Cancel(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	resumed = true
+	<-done
+	final, err := m.Job(job.ID)
+	if err != nil || final.Status != "cancelled" || final.Message != "Cancelled by owner." {
+		t.Fatalf("final job=%+v err=%v", final, err)
+	}
+	partials, err := filepath.Glob(filepath.Join(destination, ".flixr-*.partial"))
+	if err != nil || len(partials) != 0 {
+		t.Fatalf("cancelled backup partials=%v err=%v", partials, err)
+	}
+	archives, err := filepath.Glob(filepath.Join(destination, "*"+archiveSuffix))
+	if err != nil || len(archives) != 0 {
+		t.Fatalf("cancelled backup archives=%v err=%v", archives, err)
+	}
+}

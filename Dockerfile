@@ -30,8 +30,8 @@ RUN apk upgrade --no-cache \
     && apk add --no-cache ca-certificates ffmpeg \
     && addgroup -S -g 101 flixr \
     && adduser -S -u 100 -G flixr -h /data flixr \
-    && mkdir -p /data /config /cache /media \
-    && chown flixr:flixr /data /config /cache
+    && mkdir -p /data /config /cache /media /backups \
+    && chown flixr:flixr /data /config /cache /backups
 COPY --from=backend-build /out/flixr /usr/local/bin/flixr
 COPY LICENSE /usr/share/licenses/flixr/LICENSE
 ARG VERSION=dev
