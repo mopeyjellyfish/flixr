@@ -13,7 +13,7 @@
 .player-immersive.controls-hidden { cursor: none; }
 .player-immersive.controls-hidden .player-header, .player-immersive.controls-hidden .player-toolbar { opacity: 0; pointer-events: none; }
 .player-immersive.controls-hidden .player-header button { pointer-events: none; }
-.player-immersive:focus-within .player-toolbar:focus-within { opacity: 1; pointer-events: auto; }
+.player-immersive.keyboard-controls:focus-within .player-toolbar:focus-within { opacity: 1; pointer-events: auto; }
 .player-controls { width: 100%; max-width: 150rem; margin: auto; }
 .player-control-row { display: flex; align-items: center; gap: clamp(.1rem, .7vw, .65rem); }
 .player-controls button, .player-controls summary { display: inline-flex; align-items: center; justify-content: center; gap: .65rem; min-height: 44px; min-width: 44px; padding: .6rem; background: transparent; border: 0; border-radius: .35rem; color: #f7f7f7; font: inherit; cursor: pointer; }
@@ -52,6 +52,9 @@
 /* Scale targets with the application's display scale, retaining touch minimums. */
 .player-controls button, .player-controls summary { min-width: max(44px, 2.75rem); min-height: max(44px, 2.75rem); }
 .player-controls button svg { width: 1.5rem; height: 1.5rem; flex-shrink: 0; }
+.player-controls .player-seek-step svg { width: 2rem; height: 2rem; overflow: visible; }
+.player-seek-step .player-seek-arrow { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.player-seek-step text { fill: currentColor; stroke: none; font-size: 9px; font-weight: 700; text-anchor: middle; }
 .player-timeline { height: 2rem; }
 .player-controls input[type=range] { min-height: max(28px, 1.75rem); }
 .player-chapter-markers i { top: .8rem; height: .4rem; }

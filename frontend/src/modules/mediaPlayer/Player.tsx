@@ -71,7 +71,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const [seriesTitle, setSeriesTitle] = useState<string>();
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [keyboardControls, setKeyboardControls] = useState(true);
   const [seeking, setSeeking] = useState(false);
+  const [pendingSeekMS, setPendingSeekMS] = useState<number>();
+  const [seekPlaying, setSeekPlaying] = useState(true);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const seekQueue = useRef<{ running: boolean; target?: number }>({ running: false });
   const [trackError, setTrackError] = useState<string>();
   const [switchingAudio, setSwitchingAudio] = useState(false);
@@ -100,6 +104,15 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const autoplayRequest = useRef<AbortController | null>(null);
   const autoStart = useRef(true);
   const initialPlayPending = useRef(true);
+  const seekingRef = useRef(false);
+  const seekPlayingIntent = useRef(true);
+  const keyboardInteraction = useRef(true);
+  const playbackRateIntent = useRef(1);
+  const attachedPlayback = useRef<PlaybackPlan | null>(null);
+  const seekSourceTransitioning = useRef(false);
+  const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
+  const playerStatus = useRef(state.status);
+  playerStatus.current = state.status;
 
   useEffect(() => {
     if (active) stage.current?.focus();
@@ -111,15 +124,28 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     const reveal = () => {
       setControlsVisible(true);
       window.clearTimeout(timer);
-      if (state.status === 'playing' && !seeking) timer = window.setTimeout(() => {
+      timer = window.setTimeout(() => {
+        if (playerStatus.current !== 'playing' || seekingRef.current) return;
         const focused = document.activeElement;
-        if (!root?.querySelector('details[open]') && (!focused || focused === root || !root?.contains(focused))) setControlsVisible(false);
+        const keyboardFocus = keyboardInteraction.current && focused && focused !== root && root?.contains(focused);
+        if (!root?.querySelector('details[open]') && !keyboardFocus) setControlsVisible(false);
       }, 3000);
     };
+    const pointer = () => { keyboardInteraction.current = false; setKeyboardControls(false); reveal(); };
+    const keyboard = () => { keyboardInteraction.current = true; setKeyboardControls(true); reveal(); };
     reveal();
-    for (const event of ['pointermove', 'pointerdown', 'keydown', 'focusin', 'focusout', 'toggle']) root?.addEventListener(event, reveal, true);
-    return () => { window.clearTimeout(timer); for (const event of ['pointermove', 'pointerdown', 'keydown', 'focusin', 'focusout', 'toggle']) root?.removeEventListener(event, reveal, true); };
-  }, [state.status, seeking]);
+    root?.addEventListener('pointerdown', pointer, true);
+    root?.addEventListener('pointermove', reveal, true);
+    root?.addEventListener('keydown', keyboard, true);
+    for (const event of ['focusin', 'focusout', 'toggle']) root?.addEventListener(event, reveal, true);
+    return () => {
+      window.clearTimeout(timer);
+      root?.removeEventListener('pointerdown', pointer, true);
+      root?.removeEventListener('pointermove', reveal, true);
+      root?.removeEventListener('keydown', keyboard, true);
+      for (const event of ['focusin', 'focusout', 'toggle']) root?.removeEventListener(event, reveal, true);
+    };
+  }, []);
 
   useEffect(() => {
     const tracks = video.current?.textTracks;
@@ -185,16 +211,17 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     hls.current?.destroy();
     hls.current = null;
     playback.current = plan;
+    attachedPlayback.current = null;
     dispatch({ type: 'load', source: plan.media_url, resumeMs: plan.resume_ms });
-    const rate = element.playbackRate;
     element.removeAttribute('src');
     element.load();
-    element.playbackRate = rate;
+    element.playbackRate = playbackRateIntent.current;
     // Prefer the bundled engine for live/sliding HLS; native MIME support alone
     // does not establish reliable live playback (notably in Chromium).
     const mse = typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.40.2"');
     if (plan.plan.kind === 'direct' || (!mse && element.canPlayType('application/vnd.apple.mpegurl'))) {
       element.src = plan.media_url;
+      attachedPlayback.current = plan;
       return;
     }
     const { default: Hls } = await import('hls.js');
@@ -215,6 +242,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     next.loadSource(plan.media_url);
     next.attachMedia(video.current);
     hls.current = next;
+    attachedPlayback.current = plan;
   }, []);
 
   const recover = useCallback(async (failure: unknown) => {
@@ -239,11 +267,13 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     consecutiveRecoveries.current += 1;
     recovering.current = true;
     const oldPlan = playback.current;
+    const wasSeeking = seekingRef.current;
     const continuePlaying = initialPlayPending.current || (video.current ? !video.current.paused : false);
     playback.current = null;
     sourceVersion.current += 1;
     hls.current?.destroy();
     hls.current = null;
+    attachedPlayback.current = null;
     video.current?.removeAttribute('src');
     video.current?.load();
     dispatch({ type: 'buffering' });
@@ -254,7 +284,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
       observation.current = 0;
-      autoStart.current = continuePlaying;
+      autoStart.current = wasSeeking ? seekPlayingIntent.current : continuePlaying;
+      if (wasSeeking && seekQueue.current.target !== undefined) {
+        playback.current = next;
+        return;
+      }
       await attach(next);
     } catch (error: unknown) {
       if (!finalizing.current) {
@@ -272,7 +306,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const heartbeat = useCallback(async (ended = false) => {
     const plan = playback.current;
     // Stop revokes the session before the media element is unmounted.
-    if (!plan || recovering.current || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
+    if (!plan || recovering.current || ((seekingRef.current || seekSourceTransitioning.current) && !ended) || (finalizing.current && !ended) || (endedPlayback.current && !ended)) return false;
     const version = sourceVersion.current;
     const positionMs = currentPosition();
     try {
@@ -440,14 +474,14 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return () => document.removeEventListener('visibilitychange', visibility);
   }, [cancelAutoplay]);
 
-  const seekTo = useCallback(async (target: number) => {
+  const seekTo = useCallback(async (target: number): Promise<'retained' | 'replacement' | 'failed' | 'superseded' | 'transitioned'> => {
     const plan = playback.current;
     const element = video.current;
-    if (!plan || !element) return;
+    if (!plan || !element) return 'failed';
     if (plan.plan.kind === 'direct') {
       element.currentTime = target / 1000;
       dispatch({ type: 'progress', positionMs: currentPosition() });
-      return;
+      return 'retained';
     }
     const version = sourceVersion.current;
     setTrackError(undefined);
@@ -455,51 +489,116 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
       if (version !== sourceVersion.current || finalizing.current || !video.current) {
         if (updated.session_id !== plan.session_id) void api.playbackStop(updated.session_id).catch(() => undefined);
-        return;
+        return 'failed';
       }
-      if (updated.media_url !== plan.media_url || updated.session_id !== plan.session_id) {
-        autoStart.current = !element.paused;
+      playback.current = updated;
+      const attached = attachedPlayback.current;
+      if (seekQueue.current.target !== undefined) {
+        if (updated.media_url === attached?.media_url && updated.session_id === attached.session_id) retainedSeekFallback.current = { plan: updated, target };
+        return 'superseded';
+      }
+      retainedSeekFallback.current = undefined;
+      if (updated.media_url !== attached?.media_url || updated.session_id !== attached.session_id) {
+        autoStart.current = seekPlayingIntent.current;
+        seekSourceTransitioning.current = true;
         await attach(updated);
+        return 'replacement';
       } else {
         initializingPosition.current = true;
         element.currentTime = Math.max(0, target - updated.stream_offset_ms) / 1000;
         dispatch({ type: 'progress', positionMs: currentPosition() });
+        return 'retained';
       }
     } catch (error: unknown) {
+      const sessionInvalid = error instanceof ApiError && error.code === 'playback_session_invalid';
+      if (sessionInvalid) retainedSeekFallback.current = undefined;
+      if (!sessionInvalid && seekQueue.current.target === undefined) {
+        const current = playback.current;
+        const attached = attachedPlayback.current;
+        if (current && (current.media_url !== attached?.media_url || current.session_id !== attached.session_id)) {
+          retainedSeekFallback.current = undefined;
+          autoStart.current = seekPlayingIntent.current;
+          seekSourceTransitioning.current = true;
+          await attach(current);
+          return 'replacement';
+        }
+        const fallback = retainedSeekFallback.current;
+        if (current && fallback && fallback.plan.media_url === current.media_url && fallback.plan.session_id === current.session_id) {
+          retainedSeekFallback.current = undefined;
+          initializingPosition.current = true;
+          element.currentTime = Math.max(0, fallback.target - current.stream_offset_ms) / 1000;
+          dispatch({ type: 'progress', positionMs: currentPosition() });
+          return 'retained';
+        }
+      }
       if (version === sourceVersion.current) {
-        if (isRetryablePlaybackFailure(error)) void recover(error);
+        if (isRetryablePlaybackFailure(error)) {
+          await recover(error);
+          return 'transitioned';
+        }
         else setTrackError(error instanceof ApiError ? error.message : 'Flixr could not seek in this stream. Try again.');
       }
+      return 'failed';
     }
   }, [attach, recover, currentPosition]);
   const requestSeek = useCallback((target: number) => {
+    const element = video.current;
+    if (!element) return;
+    if (seekQueue.current.running) {
+      seekQueue.current.target = target;
+      setPendingSeekMS(target);
+      return;
+    }
+    const plan = playback.current;
+    if (!plan) return;
+    if (plan.plan.kind === 'direct') {
+      void seekTo(target);
+      return;
+    }
     seekQueue.current.target = target;
-    if (seekQueue.current.running) return;
+    setPendingSeekMS(target);
     seekQueue.current.running = true;
+    seekingRef.current = true;
+    seekPlayingIntent.current = initialPlayPending.current || !element.paused;
+    setSeekPlaying(seekPlayingIntent.current);
     setSeeking(true);
+    element.pause();
     void (async () => {
+      let outcome: Awaited<ReturnType<typeof seekTo>> = 'failed';
+      let attachedDuringSeek = false;
       try {
         while (seekQueue.current.target !== undefined && !finalizing.current) {
           const next = seekQueue.current.target;
           seekQueue.current.target = undefined;
-          await seekTo(next);
+          outcome = await seekTo(next);
+          if (outcome === 'replacement') attachedDuringSeek = true;
         }
       } finally {
         seekQueue.current.running = false;
         seekQueue.current.target = undefined;
+        seekingRef.current = false;
+        setPendingSeekMS(undefined);
         setSeeking(false);
+        if (!finalizing.current && !attachedDuringSeek && outcome !== 'transitioned') {
+          if (seekPlayingIntent.current) {
+            void video.current?.play().catch(() => {
+              setTrackError('Playback could not resume after seeking. Press Play to try again.');
+              dispatch({ type: 'pause' });
+            });
+          } else {
+            dispatch({ type: 'pause' });
+          }
+        }
       }
     })();
   }, [seekTo]);
-  useEffect(() => screenCoordinator.onCommand((command) => {
-    if (command.type === 'pause') {
-      video.current?.pause();
-      cancelAutoplay();
-    }
-    if (command.type === 'seek') requestSeek(command.position_ms);
-  }), [cancelAutoplay, requestSeek]);
-
   const play = async () => {
+    if (seekingRef.current) {
+      seekPlayingIntent.current = true;
+      autoStart.current = true;
+      setSeekPlaying(true);
+      return;
+    }
     try {
       setTrackError(undefined);
       await video.current?.play();
@@ -510,11 +609,32 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     }
   };
 
-  const pause = () => {
+  const pause = useCallback(() => {
     initialPlayPending.current = false;
     autoStart.current = false;
+    if (seekingRef.current) {
+      seekPlayingIntent.current = false;
+      setSeekPlaying(false);
+      cancelAutoplay();
+      return;
+    }
     video.current?.pause();
     cancelAutoplay();
+  }, [cancelAutoplay]);
+
+  useEffect(() => screenCoordinator.onCommand((command) => {
+    if (command.type === 'pause') pause();
+    if (command.type === 'seek') requestSeek(command.position_ms);
+  }), [pause, requestSeek]);
+
+  const togglePlayback = () => {
+    if (seekingRef.current) {
+      if (seekPlayingIntent.current) pause();
+      else void play();
+      return;
+    }
+    if (video.current?.paused) void play();
+    else pause();
   };
 
   const finish = async () => {
@@ -663,9 +783,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   };
 
   const episodeIndex = episodes.findIndex((episode) => episode.id === catalogID);
-  const statusLabel = state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
+  const statusLabel = seeking && pendingSeekMS !== undefined ? `Seeking to ${Math.floor(pendingSeekMS / 1000)} seconds…` : state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
 
-  return <main ref={stage} tabIndex={-1} className={`player player-immersive ${controlsVisible ? '' : 'controls-hidden'}`}>
+  return <main ref={stage} tabIndex={-1} className={`player player-immersive ${controlsVisible ? '' : 'controls-hidden'} ${keyboardControls ? 'keyboard-controls' : ''}`}>
     <header className="player-header">
       <button ref={backButton} className="player-back" onClick={() => { void finish(); }}>← Back to library</button>
       <div className="player-heading"><h1 id="player-title">{seriesTitle ? `${seriesTitle} · ${item?.title}` : item?.title ?? 'Now playing'}</h1>{item?.kind === 'episode' && <p>Season {item.season} · Episode {item.episode}</p>}</div>
@@ -673,7 +793,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p><button onClick={() => { void finish(); }}>Return to your library</button></section> :
       <section className="player-stage" aria-labelledby="player-title">
         <div className="player-frame">
-          {(state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{state.status === 'buffering' ? 'Buffering…' : 'Starting playback…'}</span></div>}
+          {(seeking || state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{seeking ? 'Seeking…' : state.status === 'buffering' ? 'Buffering…' : 'Starting playback…'}</span></div>}
           <video
             ref={video}
             preload="auto"
@@ -682,6 +802,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             onLoadedMetadata={() => {
               const plan = playback.current;
               if (!video.current || !plan) return;
+              video.current.playbackRate = playbackRateIntent.current;
               const resumeSeconds = Math.max(0, plan.resume_ms - plan.stream_offset_ms) / 1000;
               if (resumeSeconds > 0) initializingPosition.current = true;
               video.current.currentTime = resumeSeconds;
@@ -690,8 +811,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
                 // Browser autoplay policy may require the receiver's local Play button.
                 void video.current.play().catch((error: unknown) => { if (error instanceof DOMException && error.name === 'NotAllowedError') { initialPlayPending.current = false; setTrackError('Press Play to start watching.'); } dispatch({ type: 'pause' }); });
               }
+              seekSourceTransitioning.current = false;
             }}
-            onCanPlay={() => dispatch({ type: video.current?.paused ? 'pause' : 'play' })}
+            onCanPlay={() => { seekSourceTransitioning.current = false; dispatch({ type: video.current?.paused ? 'pause' : 'play' }); }}
             onError={() => {
               if (recovering.current || finalizing.current) return;
               const plan = playback.current;
@@ -699,8 +821,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
               else dispatch({ type: 'error', message: 'This media could not be loaded. Check that the file is still available, then start the title again.' });
             }}
             onEnded={() => { dispatch({ type: 'pause' }); void complete(); }}
-            onPlaying={() => { initialPlayPending.current = false; dispatch({ type: 'play' }); }}
+            onPlaying={() => { seekSourceTransitioning.current = false; initialPlayPending.current = false; dispatch({ type: 'play' }); }}
             onPause={() => {
+              if (seekingRef.current || seekSourceTransitioning.current) return;
               dispatch({ type: 'pause' });
               if (!endedPlayback.current && !finalizing.current) cancelAutoplay();
               void heartbeat();
@@ -713,7 +836,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
               }
               void seeked();
             }}
-            onTimeUpdate={() => dispatch({ type: 'progress', positionMs: currentPosition() })}
+            onTimeUpdate={() => {
+              if (seekingRef.current || seekSourceTransitioning.current) return;
+              if (playerStatus.current === 'buffering' && video.current?.paused === false) dispatch({ type: 'play' });
+              dispatch({ type: 'progress', positionMs: currentPosition() });
+            }}
           >
             {playback.current?.subtitle_url && playback.current.selected_subtitle && <track
               key={playback.current.subtitle_url}
@@ -734,7 +861,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         </div>
           <p role="status" className="player-status player-sr-only"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
         <div className="player-toolbar">
-          <PlayerControls seeking={seeking} playing={state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={state.positionMs} disabled={!playback.current || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={() => { if (video.current?.paused) void play(); else pause(); }} video={video} stage={stage} chapters={chapters} sessionID={sessionID}>
+          <PlayerControls seeking={seeking} playing={seeking ? seekPlaying : state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={pendingSeekMS ?? state.positionMs} disabled={(!playback.current && !seeking) || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={togglePlayback} video={video} stage={stage} chapters={chapters} sessionID={sessionID} playbackRate={playbackRate} onPlaybackRateChange={(rate) => { playbackRateIntent.current = rate; setPlaybackRate(rate); }}>
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}

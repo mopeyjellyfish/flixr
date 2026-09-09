@@ -6,7 +6,7 @@ The title and controls fade after three seconds of inactivity. Move the pointer,
 tap the picture or use the keyboard to reveal them. Paused playback, open menus,
 buffering and keyboard focus keep the controls visible.
 
-The bottom controls let you pause, skip ten seconds, seek, change volume and enter
+The bottom controls let you pause, skip fifteen seconds, seek, change volume and enter
 fullscreen. Select the time display to switch between elapsed and remaining time.
 Settings contains audio tracks, subtitles, playback speed, fit/fill, episode
 selection and title information. Previous and next episode buttons appear when
@@ -17,7 +17,7 @@ shows a Play button.
 | Key | Action |
 | --- | --- |
 | Space or K | Play/pause |
-| Left / Right | Back/forward ten seconds |
+| Left / Right | Back/forward fifteen seconds |
 | Up / Down | Volume |
 | M | Mute |
 | F | Fullscreen |
@@ -25,9 +25,10 @@ shows a Play button.
 
 Shortcuts apply to the player. Focused form fields and buttons retain their
 normal keyboard behaviour. Dragging the timeline previews a target and seeks
-when released. Repeated ten-second presses accumulate from the latest requested position, even
-while an earlier seek finishes. The player coalesces pending requests and keeps
-the latest target.
+when released. Repeated fifteen-second presses accumulate from the latest requested position,
+even while an earlier seek finishes. During stream preparation, the timeline shows
+the requested source time and stale picture and audio remain paused. The player
+coalesces pending requests and keeps the latest target.
 
 ## Chapters and preview pictures
 
