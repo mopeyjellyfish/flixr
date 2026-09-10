@@ -606,7 +606,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   }, [activateAttachedSource, attach, catalogID, currentPosition, enqueueSourceOperation, waitForUsableSource]);
 
   qualityStartupRef.current = () => {
-    if (qualityPreferenceRef.current !== 'auto' || !qualityPolicy.current.startup(Date.now())) return;
+    if (qualityPreferenceRef.current !== 'auto' || !qualityPolicy.current.startup(Date.now(), !supportsHlsMSE())) return;
     const tier = qualityPolicy.current.proposedTier;
     if (tier) void replaceQuality('auto', tier);
   };

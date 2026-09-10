@@ -28,10 +28,12 @@ It compares delivery with the selected video plus audio bandwidth. Sustained
 insufficient delivery, a draining buffer or a three-second startup without usable
 media lowers the ceiling one step before the buffer is exhausted. Emergency
 downshifts can interrupt an upgrade cooldown. Credible constrained fragment
-delivery during startup can select the 360p floor directly. Raising quality requires sustained
+delivery during startup can select the 360p floor directly. Native HLS uses that
+floor when the deadline expires without usable media because fragment telemetry
+is unavailable. Raising quality requires sustained
 headroom and uses a longer recovery delay after a downgrade. Native HLS does not
-provide fragment telemetry, so it uses the same bounded startup deadline plus
-sampled buffer growth and drain as a fallback. Data saver uses the 480p ceiling.
+provide fragment telemetry, so it also uses sampled buffer growth and drain.
+Data saver uses the 480p ceiling.
 Original uses a compatible source or stream copy when possible. The settings
 menu shows the actual resolution and video bitrate selected by the server.
 

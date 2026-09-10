@@ -625,6 +625,29 @@ it('uses measured constrained startup delivery to skip directly to the safe floo
   expect(qualityBodies[0]).toMatchObject({ quality: { max_height: 360, max_video_bitrate: 500_000 } });
 });
 
+it('uses the safe floor for a native HLS startup without fragment telemetry', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  const qualityBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, width: 1920, height: 1080, bitrate: 8_000_000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 720, video_bitrate: 2_500_000, audio_bitrate: 128_000 }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) {
+      qualityBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 360, video_bitrate: 500_000, audio_bitrate: 64_000 }, session_id: 'low', media_url: '/low.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ accepted: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/balanced.m3u8'));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+
+  await waitFor(() => expect(qualityBodies).toHaveLength(1));
+  expect(qualityBodies[0]).toMatchObject({ quality: { max_height: 360, max_video_bitrate: 500_000 } });
+});
+
 it('measures in-flight HLS fragment delivery before the fragment completes', async () => {
   vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
   const qualityBodies: Array<Record<string, unknown>> = [];

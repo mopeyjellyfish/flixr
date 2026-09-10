@@ -58,6 +58,11 @@ it('ramps the conservative startup tier after measured fast-link headroom', () =
   for (const now of [1_000, 5_000, 9_000]) expect(policy.throughput(5_000_000, 12, now)).toBeUndefined();
   expect(policy.throughput(5_000_000, 12, 16_000)).toBe('up');
   expect(policy.proposedTier).toBe('saver');
+
+  const native = new AdaptiveQualityPolicy('balanced');
+  native.beginStartup(1_000);
+  expect(native.startup(4_000, true)).toBe(true);
+  expect(native.proposedTier).toBe('low');
 });
 
 it('exposes only sustained conservative throughput as rememberable evidence', () => {

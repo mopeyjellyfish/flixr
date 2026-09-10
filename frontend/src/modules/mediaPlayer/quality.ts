@@ -87,10 +87,10 @@ export class AdaptiveQualityPolicy {
 
   beginStartup(now: number): void { this.startupAt = now; }
 
-  startup(now: number): boolean {
+  startup(now: number, unmeasuredFloor = false): boolean {
     if (this.startupAt === undefined || now - this.startupAt < 3_000 || this.tier === 'low' || !this.canEmergency(now)) return false;
     const measured = this.rates.filter((sample) => sample.sampleID !== undefined).map((sample) => sample.bitsPerSecond);
-    return this.propose(this.tier === 'balanced' && measured.length > 0 && Math.min(...measured) < 1_600_000 ? 'low' : this.lowerTier());
+    return this.propose(this.tier === 'balanced' && (unmeasuredFloor || (measured.length > 0 && Math.min(...measured) < 1_600_000)) ? 'low' : this.lowerTier());
   }
 
   playing(): void { this.stalledAt = undefined; this.startupAt = undefined; }
