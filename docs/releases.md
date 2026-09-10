@@ -123,3 +123,25 @@ when required. A failed readiness check, lost configuration or playback regressi
 is a stop/rollback signal. Do not auto-update household servers: users control pull
 and restart timing. Pin supported Alpine/build images and review dependency updates;
 FFmpeg capabilities and working playback matter more than removing a few base megabytes.
+
+## Schema compatibility policy
+
+Binaries that include this policy record their oldest supported database state and
+newest embedded migration. Startup accepts an empty database or a database whose applied
+migration markers all belong to that embedded set. It refuses unknown markers, including
+a schema written by a newer release, before starting HTTP listeners. Migration numbers
+are intentionally not required to be contiguous.
+
+All pending migrations run in one transaction under the server lifecycle context.
+Failure or shutdown cancellation rolls back the transaction; restart retries from the
+last committed schema. Release validation upgrades a pinned earlier `0.x` fixture and
+checks database-owned preferences, authorization and history after reopening it.
+Quality and throughput are browser-local, while playback speed and autoplay cancellation
+are runtime-only, so they are outside the database migration contract.
+
+This policy protects binaries released with the compatibility check. It cannot make an
+already-published historic binary recognize a schema created later. Every schema-changing
+release therefore requires a verified backup and a stopped `/config` snapshot before
+upgrade. Downgrade by restoring a backup compatible with the older binary; never attempt
+an in-place schema downgrade or remove migration markers. The operator procedure is in
+[Docker update and recovery](docker.md#update-and-recovery).

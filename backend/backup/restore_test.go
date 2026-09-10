@@ -2,10 +2,12 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mopeyjellyfish/flixr/backend/household"
@@ -184,6 +186,51 @@ func TestRestoreRejectsOrphanedManagedDataWithoutSafetySnapshot(t *testing.T) {
 	}
 	if _, err := Restore(context.Background(), archive, target); err == nil {
 		t.Fatal("orphaned managed data was overwritten")
+	}
+}
+
+func TestRestoreRefusesUnsupportedExistingSchemaWithoutTargetMutation(t *testing.T) {
+	archive := durableTestArchive(t)
+	target := t.TempDir()
+	existing, err := sqlite.Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = existing.Exec(`CREATE TABLE restore_sentinel(value TEXT NOT NULL); INSERT INTO restore_sentinel(value) VALUES('unchanged')`); err != nil {
+		t.Fatal(err)
+	}
+	unsupported := sqlite.LatestSchemaVersion + 1
+	if _, err = existing.Exec(`INSERT INTO schema_migrations(version) VALUES(?)`, unsupported); err != nil {
+		t.Fatal(err)
+	}
+	if err = existing.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, restoreErr := Restore(context.Background(), archive, target)
+	var compatibility *sqlite.SchemaCompatibilityError
+	if !errors.Is(restoreErr, sqlite.ErrIncompatibleSchema) || !errors.As(restoreErr, &compatibility) {
+		t.Fatalf("restore error = %v, want typed compatibility error", restoreErr)
+	}
+	if compatibility.FoundVersion != unsupported || compatibility.SupportedVersion != sqlite.LatestSchemaVersion {
+		t.Fatalf("compatibility error = %+v", compatibility)
+	}
+	if message := restoreErr.Error(); !strings.Contains(message, "update Flixr") || !strings.Contains(message, "restore a compatible backup") {
+		t.Fatalf("compatibility guidance = %q", message)
+	}
+
+	database, err := sql.Open("sqlite", filepath.Join(target, "flixr.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var value string
+	if err = database.QueryRow(`SELECT value FROM restore_sentinel`).Scan(&value); err != nil || value != "unchanged" {
+		t.Fatalf("target after refusal = %q, %v", value, err)
+	}
+	var marker int
+	if err = database.QueryRow(`SELECT version FROM schema_migrations WHERE version=?`, unsupported).Scan(&marker); err != nil || marker != unsupported {
+		t.Fatalf("schema marker after refusal = %d, %v", marker, err)
 	}
 }
 

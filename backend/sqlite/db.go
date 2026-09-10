@@ -20,10 +20,32 @@ import (
 var migrations embed.FS
 
 const (
-	writerConnections   = 1
-	readerConnections   = 4
+	writerConnections = 1
+	readerConnections = 4
+	// MinimumSchemaVersion is the oldest database state Open can upgrade. Zero
+	// means a new database or one without any applied migrations.
+	MinimumSchemaVersion = 0
+	// LatestSchemaVersion is the newest embedded schema this binary understands.
 	LatestSchemaVersion = 29
 )
+
+// ErrIncompatibleSchema identifies a database containing migrations that this
+// binary does not understand.
+var ErrIncompatibleSchema = errors.New("database schema is not supported")
+
+// SchemaCompatibilityError reports an applied migration that this binary does
+// not recognize. Starting a newer Flixr version or restoring a compatible
+// pre-upgrade backup is safe; attempting to downgrade the schema in place is not.
+type SchemaCompatibilityError struct {
+	FoundVersion     int
+	SupportedVersion int
+}
+
+func (e *SchemaCompatibilityError) Error() string {
+	return fmt.Sprintf("database contains unsupported schema migration %d; this Flixr binary supports new databases and embedded migrations through %d; update Flixr or stop it and restore a compatible backup created before the unsupported upgrade", e.FoundVersion, e.SupportedVersion)
+}
+
+func (e *SchemaCompatibilityError) Unwrap() error { return ErrIncompatibleSchema }
 
 // DB routes mutations through one connection and reads through a separate bounded pool.
 type DB struct {
@@ -33,6 +55,15 @@ type DB struct {
 }
 
 func Open(dir string) (*DB, error) {
+	return OpenContext(context.Background(), dir)
+}
+
+// OpenContext opens and migrates Flixr's database. Cancellation rolls back an
+// in-progress migration before OpenContext returns.
+func OpenContext(ctx context.Context, dir string) (*DB, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := afero.NewOsFs().MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
@@ -51,11 +82,11 @@ func Open(dir string) (*DB, error) {
 	reader.SetMaxOpenConns(readerConnections)
 	reader.SetMaxIdleConns(readerConnections)
 	db := &DB{writer: writer, reader: reader, dir: dir}
-	if err := db.configure(); err != nil {
+	if err := migrate(ctx, writer); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("migrate database: %w", err)
 	}
-	if err := migrate(writer); err != nil {
+	if err := db.configure(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -67,9 +98,9 @@ func databaseDSN(path string) string {
 	return "file:" + url.PathEscape(path) + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
 }
 
-func (d *DB) configure() error {
+func (d *DB) configure(ctx context.Context) error {
 	for _, db := range []*sql.DB{d.writer, d.reader} {
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 			return fmt.Errorf("configure sqlite: %w", err)
 		}
 	}
@@ -156,44 +187,115 @@ func (d *DB) SchemaVersion() (int, error) {
 	return version, nil
 }
 
-func migrate(db *sql.DB) error {
-	entries, err := fs.ReadDir(migrations, "migrations")
+type migration struct {
+	version int
+	name    string
+}
+
+func migrationFiles(source fs.FS) ([]migration, map[int]struct{}, error) {
+	entries, err := fs.ReadDir(source, "migrations")
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	tx, err := db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"); err != nil {
-		return err
-	}
+	files := make([]migration, 0, len(entries))
+	supported := make(map[int]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		var version int
 		if _, err = fmt.Sscanf(entry.Name(), "%d_", &version); err != nil {
-			return fmt.Errorf("migration name %q: %w", entry.Name(), err)
+			return nil, nil, fmt.Errorf("migration name %q: %w", entry.Name(), err)
 		}
+		if _, exists := supported[version]; exists {
+			return nil, nil, fmt.Errorf("duplicate migration version %d", version)
+		}
+		supported[version] = struct{}{}
+		files = append(files, migration{version: version, name: entry.Name()})
+	}
+	return files, supported, nil
+}
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	files, supported, err := migrationFiles(migrations)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 || files[len(files)-1].version != LatestSchemaVersion {
+		return fmt.Errorf("latest embedded migration does not match schema version %d", LatestSchemaVersion)
+	}
+	return applyMigrations(ctx, db, migrations, files, supported, LatestSchemaVersion)
+}
+
+func migrateFS(ctx context.Context, db *sql.DB, source fs.FS) error {
+	files, supported, err := migrationFiles(source)
+	if err != nil {
+		return err
+	}
+	supportedVersion := MinimumSchemaVersion
+	if len(files) > 0 {
+		supportedVersion = files[len(files)-1].version
+	}
+	return applyMigrations(ctx, db, source, files, supported, supportedVersion)
+}
+
+func applyMigrations(ctx context.Context, db *sql.DB, source fs.FS, files []migration, supported map[int]struct{}, supportedVersion int) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var migrationTable string
+	err = tx.QueryRowContext(ctx, `SELECT name FROM sqlite_schema WHERE type='table' AND name='schema_migrations'`).Scan(&migrationTable)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
+		if queryErr != nil {
+			return fmt.Errorf("inspect applied schema migrations: %w", queryErr)
+		}
+		for rows.Next() {
+			var version int
+			if scanErr := rows.Scan(&version); scanErr != nil {
+				rows.Close()
+				return fmt.Errorf("inspect applied schema migrations: %w", scanErr)
+			}
+			if _, ok := supported[version]; !ok {
+				rows.Close()
+				return &SchemaCompatibilityError{FoundVersion: version, SupportedVersion: supportedVersion}
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return fmt.Errorf("inspect applied schema migrations: %w", rowsErr)
+		}
+		rows.Close()
+	}
+	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"); err != nil {
+		return err
+	}
+	for _, migration := range files {
 		var done int
-		err = tx.QueryRow("SELECT version FROM schema_migrations WHERE version=?", version).Scan(&done)
+		err = tx.QueryRowContext(ctx, "SELECT version FROM schema_migrations WHERE version=?", migration.version).Scan(&done)
 		if err == nil {
 			continue
 		}
 		if err != sql.ErrNoRows {
 			return err
 		}
-		body, err := migrations.ReadFile("migrations/" + entry.Name())
-		if err != nil {
+		body, readErr := fs.ReadFile(source, "migrations/"+migration.name)
+		if readErr != nil {
+			return readErr
+		}
+		if err = ctx.Err(); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(string(body)); err != nil {
-			return fmt.Errorf("migration %s: %w", entry.Name(), err)
+		if _, err = tx.ExecContext(ctx, string(body)); err != nil {
+			return fmt.Errorf("migration %s: %w", migration.name, err)
 		}
-		if _, err = tx.Exec("INSERT INTO schema_migrations(version) VALUES(?)", version); err != nil {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations(version) VALUES(?)", migration.version); err != nil {
 			return err
 		}
 	}

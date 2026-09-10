@@ -92,7 +92,7 @@ func restore(ctx context.Context, archivePath, targetDir string, options restore
 	if err := extractArchive(ctx, archivePath, stage, manifest); err != nil {
 		return RestoreResult{}, err
 	}
-	if err := prepareStagedInstallation(stage, targetDir); err != nil {
+	if err := prepareStagedInstallation(ctx, stage, targetDir); err != nil {
 		return RestoreResult{}, err
 	}
 
@@ -111,9 +111,9 @@ func restore(ctx context.Context, archivePath, targetDir string, options restore
 				_ = os.RemoveAll(safetyDir)
 			}
 		}()
-		existing, openErr := sqlite.Open(targetDir)
+		existing, openErr := sqlite.OpenContext(ctx, targetDir)
 		if openErr != nil {
-			return RestoreResult{}, errors.New("existing installation cannot be safely backed up")
+			return RestoreResult{}, fmt.Errorf("existing installation cannot be safely backed up: %w", openErr)
 		}
 		safety, backupErr := Create(ctx, Source{DB: existing, DataDir: targetDir, AppVersion: "pre-restore"}, Options{Destination: safetyDir})
 		closeErr := existing.Close()
@@ -242,10 +242,10 @@ func extractArchive(ctx context.Context, archivePath, stage string, manifest Man
 	return nil
 }
 
-func prepareStagedInstallation(stage, target string) error {
-	db, err := sqlite.Open(stage)
+func prepareStagedInstallation(ctx context.Context, stage, target string) error {
+	db, err := sqlite.OpenContext(ctx, stage)
 	if err != nil {
-		return errors.New("staged backup database cannot be migrated")
+		return fmt.Errorf("staged backup database cannot be migrated: %w", err)
 	}
 	segmentDir := filepath.Join(target, "segments")
 	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('playback_segment_dir',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, segmentDir); err != nil {
