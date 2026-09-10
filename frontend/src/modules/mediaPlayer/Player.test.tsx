@@ -1815,6 +1815,42 @@ it('labels audio tracks and preserves source time when changing tracks', async (
   expect(video.currentTime).toBe(2.5);
 });
 
+it('recovers an admitted external-audio version with the updated exact evidence', async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+  const embedded = { index: 1, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000, language: 'eng', default: true };
+  const external = { index: 2, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000, language: 'fra', external: true };
+  const capability_input = { container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio: [embedded] };
+  const version = { id: 'source-main', label: '1080p · H.264', edition_id: 'film-1', selected: true, available: true, capability_input };
+  const detail = { ...assessedItem, width: 1920, height: 1080, bitrate: 5_000_000, video_level: 40, audio: [embedded], versions: [version] };
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(detail));
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      const recovered = planBodies.length > 1;
+      return new Response(JSON.stringify({ plan: { kind: recovered ? 'remux' : 'direct', audio_stream_index: recovered ? 2 : 1, audio_external: recovered }, version, session_id: recovered ? 'session-3' : 'session-1', media_url: recovered ? '/recovered.m3u8' : '/original.mp4', heartbeat_url: recovered ? '/api/v1/playback/sessions/session-3/heartbeat' : '/api/v1/playback/sessions/session-1/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: [embedded, external] }));
+    }
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ plan: { kind: 'remux', audio_stream_index: 2, audio_external: true }, version, session_id: 'session-2', media_url: '/external.m3u8', heartbeat_url: '/api/v1/playback/sessions/session-2/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: [embedded, external] }));
+    if (path.endsWith('/session-2/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID="source-main" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'external:2' } });
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+
+  expect(planBodies[1].capabilities).toMatchObject({ supports_direct: false, supports_remux: true });
+  expect((planBodies[1].version_capabilities as Record<string, unknown>)['source-main']).toEqual(planBodies[1].capabilities);
+});
+
 it('enables Play after a paused HLS audio replacement without a new canplay event', async () => {
   vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
   const audioTracks = [

@@ -1281,13 +1281,15 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
         const controller = new AbortController();
         sourceRequestController.current = controller;
         const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, capabilities, controller.signal);
-        admittedCapabilities.current = capabilities;
-        if (admittedCapabilityInput.current && selected) admittedCapabilityInput.current = { ...admittedCapabilityInput.current, audio: [selected] };
         if (sourceRequestController.current === controller) sourceRequestController.current = null;
         if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) {
           void api.playbackStop(updated.session_id).catch(() => undefined);
           return;
         }
+        admittedCapabilities.current = capabilities;
+        const admittedVersionID = updated.version?.id ?? plan.version?.id;
+        if (admittedVersionID && measuredVersionCapabilities.current) measuredVersionCapabilities.current = { ...measuredVersionCapabilities.current, [admittedVersionID]: capabilities };
+        if (selected) admittedCapabilityInput.current = { ...(updated.version?.capability_input ?? admittedCapabilityInput.current), audio: [selected] };
         const resumeMS = Math.max(updated.resume_ms, currentPosition());
         if (seekingRef.current) autoStart.current = false;
         await attach({ ...updated, resume_ms: resumeMS });
