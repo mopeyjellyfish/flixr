@@ -147,7 +147,7 @@ it('posts independently measured evidence for mixed source versions', async () =
   expect(planBodies[1].version_capabilities).toEqual(planBodies[0].version_capabilities);
 });
 
-it('keeps an explicit source version through initial planning and lease recovery', async () => {
+it.each(['source-4k', 'auto'])('keeps %s version intent through initial planning and lease recovery', async (versionID) => {
   const planBodies: Array<Record<string, unknown>> = [];
   let plans = 0;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -162,12 +162,12 @@ it('keeps an explicit source version through initial planning and lease recovery
     return new Response(JSON.stringify(path.includes('/catalog/items/') ? assessedItem : { stopped: true }));
   });
 
-  render(<Player catalogID="film-1" versionID="source-4k" onExit={() => undefined} />);
+  render(<Player catalogID="film-1" versionID={versionID} onExit={() => undefined} />);
   const video = document.querySelector('video')!;
   await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
   fireEvent.pause(video);
   await waitFor(() => expect(planBodies).toHaveLength(2));
-  expect(planBodies.map((body) => body.version_id)).toEqual(['source-4k', 'source-4k']);
+  expect(planBodies.map((body) => body.version_id)).toEqual([versionID, versionID]);
 });
 
 it('requires a viewer action before using an alternative version', async () => {

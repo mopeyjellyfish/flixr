@@ -10,8 +10,8 @@ async function renderApp() {
 }
 
 describe('Flixr routes', () => {
-  it('keeps a playback version query separate from the catalog item ID', async () => {
-    window.history.replaceState({}, '', '/play/film-1?version=source-4k');
+  it.each(['source-4k', 'auto'])('keeps playback version intent %s separate from the catalog item ID', async (versionID) => {
+    window.history.replaceState({}, '', `/play/film-1?version=${versionID}`);
     const planBodies: Array<Record<string, unknown>> = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
       { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
@@ -22,7 +22,7 @@ describe('Flixr routes', () => {
     await renderApp();
 
     expect(await screen.findByRole('heading', { name: 'Signal' })).toBeVisible();
-    expect(planBodies[0]).toMatchObject({ catalog_id: 'film-1', version_id: 'source-4k' });
+    expect(planBodies[0]).toMatchObject({ catalog_id: 'film-1', version_id: versionID });
   });
 
   it('records an accepted fallback version in the route for later navigation', async () => {

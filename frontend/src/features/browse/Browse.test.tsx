@@ -39,6 +39,9 @@ describe('browse', () => {
     const cards = screen.getAllByTestId('card-film-1');
     expect(cards).toHaveLength(1);
     expect(within(cards[0]).getByText('Director’s cut')).toBeVisible();
+    fireEvent.change(version, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Play Signal/ }));
+    expect(navigate).toHaveBeenLastCalledWith('/play/film-1?version=auto');
     fireEvent.change(version, { target: { value: 'source-4k' } });
     fireEvent.click(screen.getByRole('button', { name: /Play Signal/ }));
     expect(navigate).toHaveBeenLastCalledWith('/play/film-1?version=source-4k');

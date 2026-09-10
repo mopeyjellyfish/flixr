@@ -216,7 +216,7 @@ function SeriesEpisodes({ detail, onPlay, onWatched }: { detail: SeriesDetail; o
 }
 function initialVersion(versions?: MediaVersion[]) { return versions?.find((version) => version.selected)?.id; }
 function VersionSelect({ versions, value, onChange, label }: { versions: MediaVersion[]; value?: string; onChange: (id: string) => void; label: string }) {
-  return <label className="version-select">{label}<select aria-label={label} value={value ?? ''} onChange={(event) => onChange(event.target.value)}><option value="">Auto</option>{versions.map((version) => <option key={version.id} value={version.id} disabled={!version.available && version.id !== value}>{version.label}{version.available ? '' : ' · unavailable'}</option>)}</select></label>;
+  return <label className="version-select">{label}<select aria-label={label} value={value === 'auto' ? '' : value ?? ''} onChange={(event) => onChange(event.target.value || 'auto')}><option value="">Auto</option>{versions.map((version) => <option key={version.id} value={version.id} disabled={!version.available && version.id !== value}>{version.label}{version.available ? '' : ' · unavailable'}</option>)}</select></label>;
 }
 function EpisodeRow({ episode, onPlay }: { episode: SeriesDetail['seasons'][number]['episodes'][number]; onPlay: Play }) {
   const [versionID, setVersionID] = useState(() => initialVersion(episode.versions));
