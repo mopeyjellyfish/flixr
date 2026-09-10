@@ -93,3 +93,9 @@ ranges within the bounded safety wait, FlixR uses a normal media reattachment so
 the seek target remains accurate. Standard container fullscreen remains active,
 but that exceptional fallback may leave native OS video fullscreen. Physical
 iPhone and iPad qualification must include this fallback before it is claimed.
+Switching an active compatibility stream to a directly playable Original source
+uses the same no-reset handoff and releases the retired MediaSource after the
+direct URL is active. A manual change in the other direction must attach a new
+MediaSource; browsers that require an explicit load for Managed Media Source may
+leave native OS fullscreen during that transition. Automatic quality changes do
+not start from direct playback.

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Player } from './Player';
 import { screenCoordinator } from '../screenCoordinator/runtime';
 
-const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: unknown) => void), frag: undefined as undefined | ((event: unknown, data: unknown) => void), manifest: undefined as undefined | ((event: unknown, data: unknown) => void), attached: 0, destroyed: 0, imported: 0, removed: 0, bufferedTransfer: false, configs: [] as Array<Record<string, unknown>>, supported: true, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
+const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: unknown) => void), frag: undefined as undefined | ((event: unknown, data: unknown) => void), manifest: undefined as undefined | ((event: unknown, data: unknown) => void), attached: 0, destroyed: 0, imported: 0, removed: 0, released: 0, ended: 0, bufferedTransfer: false, mediaSourceTransfer: false, configs: [] as Array<Record<string, unknown>>, supported: true, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
 vi.mock('hls.js', async () => {
   if (hls.waitForImport) await new Promise<void>((resolve) => { hls.releaseImport = resolve; });
   hls.imported += 1;
@@ -26,7 +26,13 @@ vi.mock('hls.js', async () => {
       this.media = null;
       let buffered = hls.bufferedTransfer;
       const buffer = { get updating() { return false; }, buffered: { get length() { return buffered ? 1 : 0; }, start: () => 0, end: () => 20 }, remove: () => { hls.removed += 1; buffered = false; } };
-      return media ? { media, mediaSource: null, tracks: hls.bufferedTransfer ? { video: { buffer } } : {} } : null;
+      const sourceBuffers = [buffer];
+      const mediaSource = hls.mediaSourceTransfer ? {
+        readyState: 'open', sourceBuffers,
+        removeSourceBuffer: (candidate: typeof buffer) => { sourceBuffers.splice(sourceBuffers.indexOf(candidate), 1); hls.released += 1; },
+        endOfStream: () => { hls.ended += 1; },
+      } : null;
+      return media ? { media, mediaSource, tracks: hls.bufferedTransfer ? { video: { buffer } } : {} } : null;
     }
     destroy() { hls.destroyed += 1; if (this.media) { this.media.removeAttribute('src'); this.media.load(); this.media = null; } }
   }
@@ -41,7 +47,10 @@ beforeEach(() => {
   hls.destroyed = 0;
   hls.imported = 0;
   hls.removed = 0;
+  hls.released = 0;
+  hls.ended = 0;
   hls.bufferedTransfer = false;
+  hls.mediaSourceTransfer = false;
   hls.configs = [];
   hls.supported = true;
   hls.waitForImport = false;
@@ -174,7 +183,9 @@ it('resumes at the latest position after quality preparation while the old sourc
   expect(video.currentTime).toBe(5);
 });
 
-it('honors Play and the latest quality intent while quality preparation is pending', async () => {
+it('hands pending HLS quality intent to direct playback without resetting fullscreen', async () => {
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  hls.mediaSourceTransfer = true;
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
   const pending: Array<(response: Response) => void> = [];
   const qualityBodies: Array<Record<string, unknown>> = [];
@@ -190,7 +201,10 @@ it('honors Play and the latest quality intent while quality preparation is pendi
   });
   render(<Player catalogID="film-1" onExit={() => undefined} />);
   const video = document.querySelector('video') as HTMLVideoElement;
-  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
   let paused = false;
   Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
   vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
@@ -208,10 +222,14 @@ it('honors Play and the latest quality intent while quality preparation is pendi
   await waitFor(() => expect(pending).toHaveLength(2));
   expect(qualityBodies[1]).toMatchObject({ quality: { mode: 'original' } });
   expect(Number(qualityBodies[1].observation)).toBeGreaterThan(Number(qualityBodies[0].observation));
+  play.mockClear();
   await act(async () => { pending[1](new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'original', media_url: '/original.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }))); });
   await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
   fireEvent.loadedMetadata(video);
-  expect(play).toHaveBeenCalledTimes(2);
+  expect(play).toHaveBeenCalledOnce();
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+  expect(hls.released).toBe(1);
+  expect(hls.ended).toBe(1);
 });
 
 it('aborts a pending quality request and bounds Back navigation', async () => {

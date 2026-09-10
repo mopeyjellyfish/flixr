@@ -50,6 +50,22 @@ async function clearTransferredBuffers(transfer: AttachMediaSourceData): Promise
   }))).every(Boolean);
 }
 
+async function releaseTransferredMedia(transfer: AttachMediaSourceData, objectURL: string): Promise<void> {
+  const source = transfer.mediaSource;
+  if (source?.readyState === 'open') {
+    const buffers = Array.from(source.sourceBuffers);
+    await Promise.all(buffers.map((buffer) => waitForSourceBuffer(buffer)));
+    for (const buffer of buffers) {
+      try { source.removeSourceBuffer(buffer); }
+      catch { /* the direct source is already active; release is best-effort */ }
+    }
+    try { if (source.readyState === 'open') source.endOfStream(); }
+    catch { /* a closing MediaSource no longer needs explicit completion */ }
+  }
+  try { if (objectURL.startsWith('blob:')) URL.revokeObjectURL(objectURL); }
+  catch { /* the browser may already have released the replaced object URL */ }
+}
+
 function supportsHlsMSE(): boolean {
   const managed = (globalThis as typeof globalThis & { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
   const source = typeof MediaSource !== 'undefined' ? MediaSource : managed;
@@ -313,10 +329,13 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     // fullscreen when the active media element is reset.
     const mse = supportsHlsMSE();
     if (plan.plan.kind === 'direct' || (!mse && element.canPlayType('application/vnd.apple.mpegurl'))) {
+      const objectURL = element.currentSrc || element.src;
+      const transferredMedia = hls.current?.transferMedia();
       hls.current?.destroy();
       hls.current = null;
       element.src = plan.media_url;
       attachedPlayback.current = plan;
+      if (transferredMedia) await releaseTransferredMedia(transferredMedia, objectURL);
       return;
     }
     let Hls: typeof import('hls.js').default;
