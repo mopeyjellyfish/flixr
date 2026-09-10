@@ -213,6 +213,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/heartbeat", s.playbackHeartbeat)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/seek", s.playbackSeek)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/audio", s.playbackAudio)
+	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/quality", s.playbackQuality)
 	s.mux.HandleFunc("POST /api/v1/playback/sessions/{id}/subtitle", s.playbackSubtitleSelection)
 	s.mux.HandleFunc("GET /api/v1/playback/input/{token}", s.playbackInput)
 	s.mux.HandleFunc("GET /api/v1/owner/settings/playback", s.playbackSettings)

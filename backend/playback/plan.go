@@ -16,7 +16,42 @@ var (
 	ErrRestartRequired     = errors.New("playback setting requires restart")
 	ErrInvalidCapabilities = errors.New("playback capabilities are invalid")
 	ErrUnknownCapability   = errors.New("playback capability is unknown")
+	ErrInvalidQuality      = errors.New("playback quality is invalid")
 )
+
+type QualityMode string
+
+const (
+	QualityAuto      QualityMode = "auto"
+	QualityDataSaver QualityMode = "data_saver"
+	QualityOriginal  QualityMode = "original"
+)
+
+// QualityRequest is a server-validated output ceiling. Numeric limits are
+// restricted to the renditions Flixr supports so clients cannot create
+// arbitrary encoder jobs.
+type QualityRequest struct {
+	Mode            QualityMode `json:"mode"`
+	MaxVideoBitrate int64       `json:"max_video_bitrate,omitempty"`
+	MaxWidth        int         `json:"max_width,omitempty"`
+	MaxHeight       int         `json:"max_height,omitempty"`
+}
+
+func (quality QualityRequest) Normalized() (QualityRequest, error) {
+	if quality.Mode == "" {
+		return QualityRequest{Mode: QualityOriginal}, nil
+	}
+	switch quality {
+	case QualityRequest{Mode: QualityOriginal}:
+		return quality, nil
+	case QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720},
+		QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480},
+		QualityRequest{Mode: QualityDataSaver, MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480}:
+		return quality, nil
+	default:
+		return QualityRequest{}, ErrInvalidQuality
+	}
+}
 
 // MediaProperties is the path-free media description consumed by the planner.
 type MediaProperties struct {
@@ -93,6 +128,11 @@ type Plan struct {
 	AudioChannels          int              `json:"audio_channels,omitempty"`
 	AudioSampleRate        int              `json:"audio_sample_rate,omitempty"`
 	AudioBitrate           int64            `json:"audio_bitrate,omitempty"`
+	Bandwidth              int64            `json:"bandwidth,omitempty"`
+	QualityMode            QualityMode      `json:"quality_mode,omitempty"`
+	QualityMaxVideoBitrate int64            `json:"quality_max_video_bitrate,omitempty"`
+	QualityMaxWidth        int              `json:"quality_max_width,omitempty"`
+	QualityMaxHeight       int              `json:"quality_max_height,omitempty"`
 	AudioStreamIndex       int              `json:"audio_stream_index"`
 	AudioSourceStreamIndex int              `json:"-"`
 	AudioExternal          bool             `json:"audio_external,omitempty"`
@@ -125,33 +165,47 @@ const (
 
 // PlanFor selects the least expensive compatible path from recorded plain values.
 func PlanFor(media MediaProperties, client ClientCapabilities, ready ServerReadiness) (Plan, error) {
+	return PlanForQuality(media, client, ready, QualityRequest{Mode: QualityOriginal})
+}
+
+// PlanForQuality selects a compatible path that obeys a validated output cap.
+func PlanForQuality(media MediaProperties, client ClientCapabilities, ready ServerReadiness, quality QualityRequest) (Plan, error) {
 	var err error
 	if client, err = client.Normalized(); err != nil {
 		return Plan{}, err
 	}
+	if quality, err = quality.Normalized(); err != nil {
+		return Plan{}, err
+	}
 	selection := sourcePlan(Unsupported, media)
-	if !media.RequiresAudioMapping && directCompatible(media, client) {
+	applyQualityIntent(&selection, quality)
+	copyWithinCap := sourceWithinQuality(media, quality)
+	if !media.RequiresAudioMapping && copyWithinCap && directCompatible(media, client) {
 		plan := sourcePlan(Direct, media)
 		plan.Description = "Original media"
+		applyQualityIntent(&plan, quality)
+		plan.Bandwidth = transportBandwidth(plan.VideoBitrate, plan.AudioBitrate)
 		return plan, nil
 	}
 	if !fallbackCompatible(client) {
 		selection.Kind = Unsupported
 		return selection, ErrUnsupported
 	}
-	if remuxCompatible(media, client) {
+	if copyWithinCap && remuxCompatible(media, client) {
 		if !ready.FFmpeg {
 			return Plan{}, ErrFFmpegUnavailable
 		}
 		plan := sourcePlan(Remux, media)
 		plan.Container, plan.Description = "fmp4-hls", "Stream-copy fMP4 HLS"
+		applyQualityIntent(&plan, quality)
+		plan.Bandwidth = transportBandwidth(plan.VideoBitrate, plan.AudioBitrate)
 		return plan, nil
 	}
 	if transcodeCompatible(media, client) {
 		if !ready.FFmpeg {
 			return Plan{}, ErrFFmpegUnavailable
 		}
-		return compatibilityPlan(media), nil
+		return compatibilityPlan(media, quality), nil
 	}
 	return selection, ErrUnsupported
 }
@@ -160,13 +214,71 @@ func sourcePlan(kind Kind, media MediaProperties) Plan {
 	return Plan{Kind: kind, Container: media.Container, VideoCodec: media.VideoCodec, VideoProfile: media.VideoProfile, VideoLevel: media.VideoLevel, Width: media.Width, Height: media.Height, VideoBitrate: media.VideoBitrate, FrameRateMilli: media.FrameRateMilli, BitDepth: media.BitDepth, HDR: media.HDR, AudioCodec: media.AudioCodec, AudioProfile: media.AudioProfile, AudioChannels: media.AudioChannels, AudioSampleRate: media.AudioSampleRate, AudioBitrate: media.AudioBitrate, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected}
 }
 
-func compatibilityPlan(media MediaProperties) Plan {
-	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: media.Width, Height: media.Height, VideoBitrate: compatibilityVideoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected, Description: "Bounded H.264/AAC compatibility stream"}
+func compatibilityPlan(media MediaProperties, quality QualityRequest) Plan {
+	width, height, videoBitrate, audioBitrate := media.Width, media.Height, int64(compatibilityVideoBitrate), int64(compatibilityAudioBitrate)
+	if quality.Mode != QualityOriginal {
+		width, height = fitDimensions(media.Width, media.Height, quality.MaxWidth, quality.MaxHeight)
+		videoBitrate = min(videoBitrate, quality.MaxVideoBitrate)
+		if quality.MaxVideoBitrate == 1_000_000 {
+			audioBitrate = 96_000
+		}
+	}
+	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: width, Height: height, VideoBitrate: videoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected, Description: "Bounded H.264/AAC compatibility stream"}
+	applyQualityIntent(&plan, quality)
 	if media.AudioCodec != "" {
 		plan.AudioCodec, plan.AudioProfile = "aac", "LC"
-		plan.AudioChannels, plan.AudioSampleRate, plan.AudioBitrate = compatibilityAudioChannels, compatibilityAudioSampleRate, compatibilityAudioBitrate
+		plan.AudioChannels, plan.AudioSampleRate, plan.AudioBitrate = compatibilityAudioChannels, compatibilityAudioSampleRate, audioBitrate
 	}
+	plan.Bandwidth = transportBandwidth(plan.VideoBitrate, plan.AudioBitrate)
 	return plan
+}
+
+func applyQualityIntent(plan *Plan, quality QualityRequest) {
+	plan.QualityMode = quality.Mode
+	plan.QualityMaxVideoBitrate = quality.MaxVideoBitrate
+	plan.QualityMaxWidth = quality.MaxWidth
+	plan.QualityMaxHeight = quality.MaxHeight
+}
+
+func sourceWithinQuality(media MediaProperties, quality QualityRequest) bool {
+	if quality.Mode == QualityOriginal {
+		return true
+	}
+	maxWidth, maxHeight := orientedLimits(media.Width, media.Height, quality.MaxWidth, quality.MaxHeight)
+	return media.Width > 0 && media.Height > 0 && media.VideoBitrate > 0 &&
+		media.Width <= maxWidth && media.Height <= maxHeight &&
+		media.VideoBitrate <= quality.MaxVideoBitrate &&
+		(media.AudioCodec == "" || (media.AudioBitrate > 0 && media.AudioBitrate <= qualityAudioBitrate(quality)))
+}
+
+func qualityAudioBitrate(quality QualityRequest) int64 {
+	if quality.MaxVideoBitrate == 1_000_000 {
+		return 96_000
+	}
+	return compatibilityAudioBitrate
+}
+
+func fitDimensions(width, height, maxWidth, maxHeight int) (int, int) {
+	maxWidth, maxHeight = orientedLimits(width, height, maxWidth, maxHeight)
+	if width <= maxWidth && height <= maxHeight {
+		return width, height
+	}
+	scale := min(float64(maxWidth)/float64(width), float64(maxHeight)/float64(height))
+	return max(2, int(float64(width)*scale)/2*2), max(2, int(float64(height)*scale)/2*2)
+}
+
+func orientedLimits(width, height, maxWidth, maxHeight int) (int, int) {
+	if height > width {
+		return maxHeight, maxWidth
+	}
+	return maxWidth, maxHeight
+}
+
+func transportBandwidth(video, audio int64) int64 {
+	if video <= 0 {
+		return 0
+	}
+	return ((video+audio)*11/10 + 9_999) / 10_000 * 10_000
 }
 
 func (client ClientCapabilities) Normalized() (ClientCapabilities, error) {

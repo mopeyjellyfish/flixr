@@ -179,9 +179,17 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	server.readyMu.Unlock()
 	handler := server.Handler()
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","quality":{"mode":"auto","max_video_bitrate":9000000,"max_width":1280,"max_height":720},"capabilities":{"video_codecs":["h264"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_transcode":true}}`))
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid quality cap = %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/playback/plans", bytes.NewBufferString(`{"catalog_id":"film","capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_remux":true,"max_width":320,"max_height":180,"max_frame_rate_milli":24000,"max_bit_depth":8,"max_audio_channels":2}}`))
+	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("plan = %d: %s", response.Code, response.Body.String())

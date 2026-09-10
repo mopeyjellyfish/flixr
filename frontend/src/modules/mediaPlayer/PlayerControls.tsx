@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import type { QualityPreference } from './quality';
 
 export type Chapter = { title: string; start_ms: number; end_ms: number };
 export function playerTime(ms: number): string {
@@ -22,8 +23,9 @@ type Props = {
   onSeek: (ms: number) => void; onToggle: () => void; onPrevious?: () => void; onNext?: () => void;
   video: RefObject<HTMLVideoElement | null>; stage: RefObject<HTMLElement | null>;
   chapters?: Chapter[]; sessionID?: string; playbackRate?: number; onPlaybackRateChange?: (rate: number) => void; children?: ReactNode;
+  quality?: QualityPreference; effectiveQuality?: string; bufferingFeedback?: string; onQualityChange?: (quality: QualityPreference) => void;
 };
-export function PlayerControls({ playing, durationMS, positionMS, disabled, seeking = false, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, playbackRate = 1, onPlaybackRateChange, children }: Props) {
+export function PlayerControls({ playing, durationMS, positionMS, disabled, seeking = false, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, playbackRate = 1, onPlaybackRateChange, quality, effectiveQuality, bufferingFeedback, onQualityChange, children }: Props) {
   const [scrub, setScrub] = useState<number>();
   const [hover, setHover] = useState<number>();
   const [preview, setPreview] = useState<{ key: string; url: string }>();
@@ -131,12 +133,13 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, seek
       {chapters.length > 0 && <details className="player-menu"><summary>Chapters</summary><div className="player-menu-panel">{chapters.map((c) => <button key={c.start_ms} disabled={disabled} onClick={(event) => { seek(c.start_ms); const details = event.currentTarget.closest('details'); if (details) { details.open = false; details.querySelector('summary')?.focus(); } }}><span>{c.title}</span><small>{playerTime(c.start_ms)}</small></button>)}</div></details>}
       <details className="player-menu"><summary aria-label="Playback settings">Settings</summary><div className="player-menu-panel">
         {children}
+        {quality && <label>Quality<select aria-label="Streaming quality" value={quality} onChange={(event) => onQualityChange?.(event.target.value as QualityPreference)}><option value="auto">Auto</option><option value="data_saver">Data saver</option><option value="original">Original</option></select><small>{quality === 'auto' ? 'Adjusts after sustained buffering.' : quality === 'data_saver' ? 'Uses less mobile data.' : 'Uses the source quality.'}</small>{effectiveQuality && <small>Actual: {effectiveQuality}</small>}</label>}
         <label>Speed<select aria-label="Playback speed" value={speed} onChange={(event) => { const value = Number(event.target.value); if (video.current) video.current.playbackRate = value; setSpeed(value); onPlaybackRateChange?.(value); }}>{[.5,.75,1,1.25,1.5,1.75,2].map((value) => <option key={value} value={value}>{value === 1 ? 'Normal' : `${value}×`}</option>)}</select></label>
         <button aria-pressed={fill} onClick={() => { if (video.current) video.current.style.objectFit = fill ? 'contain' : 'cover'; setFill(!fill); }}>{fill ? 'Fit picture' : 'Fill screen'}</button>
       </div></details>
       {document.pictureInPictureEnabled && <button aria-label="Picture in picture" onClick={() => { void (document.pictureInPictureElement ? document.exitPictureInPicture() : video.current?.requestPictureInPicture())?.catch(() => setNotice('Picture in picture is unavailable for this video.')); }}><Icon name="pip" /></button>}
       <button data-fullscreen aria-label={full ? 'Exit fullscreen' : 'Fullscreen'} title="Fullscreen (F)" onClick={() => { void fullscreen(); }}><Icon name="fullscreen" /></button>
     </div>
-    {notice && <p className="player-control-notice" role="status">{notice}</p>}
+    {(notice || bufferingFeedback) && <p className="player-control-notice" role="status">{notice || bufferingFeedback}</p>}
   </div>;
 }

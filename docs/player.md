@@ -8,11 +8,20 @@ buffering and keyboard focus keep the controls visible.
 
 The bottom controls let you pause, skip fifteen seconds, seek, change volume and enter
 fullscreen. Select the time display to switch between elapsed and remaining time.
-Settings contains audio tracks, subtitles, playback speed, fit/fill, episode
+Settings contains streaming quality, audio tracks, subtitles, playback speed, fit/fill, episode
 selection and title information. Previous and next episode buttons appear when
 those episodes are available. Picture in picture appears on supported browsers.
 Fullscreen stays an explicit choice; a browser that blocks automatic playback
 shows a Play button.
+
+Auto is the default streaming quality and is remembered on each device. It
+starts with a balanced 720p ceiling, then changes to the 480p Data saver ceiling
+after repeated buffering. Measured throughput headroom can restore balanced
+quality after three minutes. Data saver always uses the lower ceiling. Original uses a
+compatible source or stream copy when possible. The settings menu shows the
+actual resolution and video bitrate selected by the server. Quality changes
+prepare a replacement stream and restore source position, play/pause state and
+playback speed; they are not seamless multi-rendition switching.
 
 | Key | Action |
 | --- | --- |

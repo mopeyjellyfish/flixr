@@ -7,6 +7,7 @@ import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } fr
 import { screenCoordinator } from '../screenCoordinator/runtime';
 import { browserCapabilities } from './capabilities';
 import { PlayerControls, type Chapter } from './PlayerControls';
+import { AdaptiveQualityPolicy, loadQualityPreference, qualityRequest, saveQualityPreference, type AutoQualityTier, type QualityPreference } from './quality';
 import './player.css';
 
 const maxConsecutiveRecoveries = 3;
@@ -76,6 +77,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const [pendingSeekMS, setPendingSeekMS] = useState<number>();
   const [seekPlaying, setSeekPlaying] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [qualityPreference, setQualityPreference] = useState<QualityPreference>(loadQualityPreference);
+  const [bufferingFeedback, setBufferingFeedback] = useState('');
   const seekQueue = useRef<{ running: boolean; target?: number }>({ running: false });
   const [trackError, setTrackError] = useState<string>();
   const [switchingAudio, setSwitchingAudio] = useState(false);
@@ -108,6 +111,10 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const seekPlayingIntent = useRef(true);
   const keyboardInteraction = useRef(true);
   const playbackRateIntent = useRef(1);
+  const qualityPreferenceRef = useRef(qualityPreference);
+  const qualityPolicy = useRef(new AdaptiveQualityPolicy());
+  const qualitySwitching = useRef(false);
+  const qualityRateRef = useRef<(bitsPerSecond: number) => void>(() => undefined);
   const attachedPlayback = useRef<PlaybackPlan | null>(null);
   const seekSourceTransitioning = useRef(false);
   const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
@@ -230,7 +237,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       dispatch({ type: 'error', message: 'This browser cannot play the compatibility stream.' });
       return;
     }
-    const next = new Hls({ enableWorker: true, lowLatencyMode: false });
+    const next = new Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 32 * 1024 * 1024, backBufferLength: 30 });
     next.on(Hls.Events.ERROR, (_event, data) => {
       if (version !== sourceVersion.current || finalizing.current) return;
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -239,11 +246,91 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         dispatch({ type: 'error', message: 'The compatibility stream stopped unexpectedly.' });
       }
     });
+    next.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+      const stats = data.part?.stats ?? data.frag.stats;
+      const elapsed = stats.loading.end - stats.loading.start;
+      if (data.payload.byteLength >= 64 * 1024 && elapsed >= 100) qualityRateRef.current(data.payload.byteLength * 8 * 1000 / elapsed);
+    });
     next.loadSource(plan.media_url);
     next.attachMedia(video.current);
     hls.current = next;
     attachedPlayback.current = plan;
   }, []);
+
+  const replaceQuality = useCallback(async (preference: QualityPreference, tier: AutoQualityTier, feedback: string) => {
+    const current = playback.current;
+    const element = video.current;
+    if (!current || !element || qualitySwitching.current || finalizing.current || endedPlayback.current) return;
+    qualitySwitching.current = true;
+    const version = sourceVersion.current;
+    const position = currentPosition();
+    autoStart.current = initialPlayPending.current || !element.paused;
+    setBufferingFeedback(feedback);
+    try {
+      const detail = await api.item(catalogID);
+      const capabilities = await browserCapabilities(detail);
+      const updated = await api.playbackQuality(current.session_id, position, ++observation.current, capabilities, qualityRequest(preference, tier));
+      if (version !== sourceVersion.current || finalizing.current) {
+        void api.playbackStop(updated.session_id).catch(() => undefined);
+        return;
+      }
+      observation.current = 0;
+      await attach(updated);
+    } catch (error: unknown) {
+      if (version === sourceVersion.current && !finalizing.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change streaming quality.');
+    } finally {
+      qualitySwitching.current = false;
+      window.setTimeout(() => setBufferingFeedback(''), 4_000);
+    }
+  }, [attach, catalogID, currentPosition]);
+
+  qualityRateRef.current = (bitsPerSecond) => {
+    if (qualityPreferenceRef.current !== 'auto' || !video.current) return;
+    const element = video.current;
+    const bufferSeconds = element.buffered.length ? Math.max(0, element.buffered.end(element.buffered.length - 1) - element.currentTime) : 0;
+    const change = qualityPolicy.current.throughput(bitsPerSecond, bufferSeconds, Date.now());
+    if (change === 'down') void replaceQuality('auto', 'saver', 'Connection throughput is low; switching to Data saver…');
+    if (change === 'up') void replaceQuality('auto', 'balanced', 'Connection is stable; restoring balanced quality…');
+  };
+
+  useEffect(() => {
+    const element = video.current;
+    if (!element) return;
+    let prolongedTimer = 0;
+    const stalled = () => {
+      if (!playback.current || finalizing.current || element.paused) return;
+      dispatch({ type: 'buffering' });
+      setBufferingFeedback('Your connection is buffering…');
+      if (qualityPreferenceRef.current === 'auto' && qualityPolicy.current.stall(Date.now())) {
+        void replaceQuality('auto', qualityPolicy.current.tier, 'Connection slowed; switching to Data saver…');
+        return;
+      }
+      window.clearTimeout(prolongedTimer);
+      prolongedTimer = window.setTimeout(() => {
+        if (qualityPreferenceRef.current === 'auto' && qualityPolicy.current.prolongedStall(Date.now())) {
+          void replaceQuality('auto', 'saver', 'Buffering continued; switching to Data saver…');
+        }
+      }, 8_000);
+    };
+    const playing = () => { window.clearTimeout(prolongedTimer); qualityPolicy.current.playing(); };
+    element.addEventListener('waiting', stalled);
+    element.addEventListener('stalled', stalled);
+    element.addEventListener('playing', playing);
+    return () => {
+      window.clearTimeout(prolongedTimer);
+      element.removeEventListener('waiting', stalled);
+      element.removeEventListener('stalled', stalled);
+      element.removeEventListener('playing', playing);
+    };
+  }, [replaceQuality]);
+
+  const changeQuality = useCallback((preference: QualityPreference) => {
+    qualityPreferenceRef.current = preference;
+    setQualityPreference(preference);
+    saveQualityPreference(preference);
+    qualityPolicy.current = new AdaptiveQualityPolicy();
+    void replaceQuality(preference, 'balanced', preference === 'auto' ? 'Switching to Auto quality…' : preference === 'data_saver' ? 'Switching to Data saver…' : 'Switching to Original quality…');
+  }, [replaceQuality]);
 
   const recover = useCallback(async (failure: unknown) => {
     if (!isRetryablePlaybackFailure(failure)) {
@@ -280,7 +367,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     try {
       const next = await recovery.current.run(async () => {
         if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
-        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)), 'recovery');
+        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)), 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier));
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
       observation.current = 0;
@@ -349,7 +436,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         setItem(detail);
         const capabilities: PlaybackCapabilities = await browserCapabilities(detail);
         if (!active) throw new Error('player unmounted');
-        return api.playbackPlan(catalogID, capabilities, continueWatchingIntent);
+        return api.playbackPlan(catalogID, capabilities, continueWatchingIntent, qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier));
       },
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
     ).then(async (initial) => {
@@ -784,6 +871,10 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
 
   const episodeIndex = episodes.findIndex((episode) => episode.id === catalogID);
   const statusLabel = seeking && pendingSeekMS !== undefined ? `Seeking to ${Math.floor(pendingSeekMS / 1000)} seconds…` : state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
+  const effectivePlan = playback.current?.plan;
+  const effectiveQuality = effectivePlan
+    ? `${effectivePlan.height ? `${effectivePlan.height}p` : 'Original'}${effectivePlan.video_bitrate ? ` · ${(effectivePlan.video_bitrate / 1_000_000).toFixed(effectivePlan.video_bitrate % 1_000_000 ? 1 : 0)} Mbps` : ''}`
+    : undefined;
 
   return <main ref={stage} tabIndex={-1} className={`player player-immersive ${controlsVisible ? '' : 'controls-hidden'} ${keyboardControls ? 'keyboard-controls' : ''}`}>
     <header className="player-header">
@@ -861,7 +952,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         </div>
           <p role="status" className="player-status player-sr-only"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
         <div className="player-toolbar">
-          <PlayerControls seeking={seeking} playing={seeking ? seekPlaying : state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={pendingSeekMS ?? state.positionMs} disabled={(!playback.current && !seeking) || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={togglePlayback} video={video} stage={stage} chapters={chapters} sessionID={sessionID} playbackRate={playbackRate} onPlaybackRateChange={(rate) => { playbackRateIntent.current = rate; setPlaybackRate(rate); }}>
+          <PlayerControls seeking={seeking} playing={seeking ? seekPlaying : state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={pendingSeekMS ?? state.positionMs} disabled={(!playback.current && !seeking) || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={togglePlayback} video={video} stage={stage} chapters={chapters} sessionID={sessionID} playbackRate={playbackRate} onPlaybackRateChange={(rate) => { playbackRateIntent.current = rate; setPlaybackRate(rate); }} quality={qualityPreference} effectiveQuality={effectiveQuality} bufferingFeedback={bufferingFeedback} onQualityChange={changeQuality}>
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}

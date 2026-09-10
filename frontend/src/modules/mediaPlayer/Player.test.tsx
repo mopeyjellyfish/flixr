@@ -8,10 +8,10 @@ vi.mock('hls.js', async () => {
   if (hls.waitForImport) await new Promise<void>((resolve) => { hls.releaseImport = resolve; });
   hls.imported += 1;
   class FakeHls {
-    static Events = { ERROR: 'error' };
+    static Events = { ERROR: 'error', FRAG_LOADED: 'fragLoaded' };
     static ErrorTypes = { NETWORK_ERROR: 'networkError' };
     static isSupported() { return true; }
-    on(_event: string, handler: (event: unknown, data: { fatal: boolean; type?: string }) => void) { hls.error = handler; }
+    on(event: string, handler: (event: unknown, data: { fatal: boolean; type?: string }) => void) { if (event === 'error') hls.error = handler; }
     loadSource() { /* observable through attachment */ }
     attachMedia() { hls.attached += 1; }
     destroy() { hls.destroyed += 1; }
@@ -33,6 +33,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   vi.restoreAllMocks();
   vi.useRealTimers();
   Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: undefined });
@@ -63,6 +64,7 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   expect(posted).toEqual({
     catalog_id: 'film-1',
     continue_watching_intent: 'user',
+    quality: { mode: 'auto', max_video_bitrate: 2_500_000, max_width: 1280, max_height: 720 },
     capabilities: expect.objectContaining({
       supports_direct: true,
       supports_remux: true,
@@ -74,6 +76,33 @@ it('posts the exact per-title source and compatibility evidence', async () => {
       max_audio_channels: 2,
     }),
   });
+});
+
+it('changes quality through a prepared replacement while preserving position and rate intent', async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  const qualityBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, width: 1920, height: 1080, bitrate: 8_000_000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 720, video_bitrate: 2_500_000 }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) {
+      qualityBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 480, video_bitrate: 1_000_000 }, session_id: 'saver', media_url: '/saver.m3u8', resume_ms: 23_000, stream_offset_ms: 23_000, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  video.currentTime = 23;
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Playback speed' }), { target: { value: '1.5' } });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
+  await waitFor(() => expect(qualityBodies).toHaveLength(1));
+  expect(qualityBodies[0]).toMatchObject({ position_ms: 23_000, quality: { mode: 'data_saver', max_video_bitrate: 1_000_000, max_width: 854, max_height: 480 } });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/saver.m3u8'));
+  fireEvent.loadedMetadata(video);
+  expect(video.playbackRate).toBe(1.5);
 });
 
 it('does not create a playback session after unmount while capability assessment is pending', async () => {

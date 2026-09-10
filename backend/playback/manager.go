@@ -292,7 +292,7 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	if plan.AudioSelected {
 		audioSelectionIndex = plan.AudioStreamIndex
 	}
-	jobKey := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t", catalogID, plan.Kind, plan.VideoCodec, plan.AudioCodec, plan.SourceKey, audioSelectionIndex, plan.AudioExternal)
+	jobKey := generationJobKey(catalogID, plan, audioSelectionIndex)
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
@@ -465,6 +465,15 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 		return Session{}, ErrSessionInvalid
 	}
 	return session, nil
+}
+
+func generationJobKey(catalogID string, plan Plan, audioSelectionIndex int) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%d\x00%d\x00%t\x00%t\x00%d\x00%s\x00%d\x00%d\x00%d",
+		catalogID, plan.Kind, plan.Container, plan.VideoCodec, plan.VideoProfile, plan.VideoLevel,
+		plan.Width, plan.Height, plan.VideoBitrate, plan.FrameRateMilli, plan.BitDepth, plan.HDR,
+		plan.AudioCodec, plan.AudioProfile, plan.AudioChannels, plan.AudioSampleRate, plan.AudioBitrate,
+		plan.SourceKey, audioSelectionIndex, plan.AudioSourceStreamIndex, plan.AudioExternal, plan.AudioSelected, plan.Bandwidth, plan.QualityMode,
+		plan.QualityMaxVideoBitrate, plan.QualityMaxWidth, plan.QualityMaxHeight)
 }
 
 func (m *Manager) shareableGenerationLocked(jobKey string, positionMS int64) *generation {

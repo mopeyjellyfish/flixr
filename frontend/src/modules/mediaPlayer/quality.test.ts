@@ -1,0 +1,41 @@
+import { afterEach, expect, it } from 'vitest';
+import { AdaptiveQualityPolicy, loadQualityPreference, qualityRequest, saveQualityPreference } from './quality';
+
+afterEach(() => localStorage.clear());
+
+it('defaults to Auto and persists an explicit device preference', () => {
+  expect(loadQualityPreference()).toBe('auto');
+  saveQualityPreference('data_saver');
+  expect(loadQualityPreference()).toBe('data_saver');
+  localStorage.setItem('flixr.playback.quality', 'unbounded');
+  expect(loadQualityPreference()).toBe('auto');
+});
+
+it('maps controls to the supported server quality contract', () => {
+  expect(qualityRequest('auto', 'balanced')).toEqual({ mode: 'auto', max_video_bitrate: 2_500_000, max_width: 1280, max_height: 720 });
+  expect(qualityRequest('auto', 'saver')).toEqual({ mode: 'auto', max_video_bitrate: 1_000_000, max_width: 854, max_height: 480 });
+  expect(qualityRequest('data_saver', 'balanced')).toEqual({ mode: 'data_saver', max_video_bitrate: 1_000_000, max_width: 854, max_height: 480 });
+  expect(qualityRequest('original', 'balanced')).toEqual({ mode: 'original' });
+});
+
+it('requires sustained stalls, then applies cooldown and stable recovery hysteresis', () => {
+  const policy = new AdaptiveQualityPolicy();
+  expect(policy.stall(1_000)).toBe(false);
+  expect(policy.stall(8_000)).toBe(true);
+  expect(policy.stall(20_000)).toBe(false);
+  expect(policy.throughput(5_000_000, 12, 100_000)).toBeUndefined();
+  for (const now of [190_000, 210_000, 230_000]) policy.throughput(5_000_000, 12, now);
+  expect(policy.throughput(5_000_000, 12, 250_000)).toBe('up');
+  expect(policy.stall(310_000)).toBe(false);
+  expect(policy.stall(320_000)).toBe(true);
+});
+
+it('reduces after one prolonged stall and on measured insufficient throughput', () => {
+  const prolonged = new AdaptiveQualityPolicy();
+  expect(prolonged.stall(1_000)).toBe(false);
+  expect(prolonged.prolongedStall(9_100)).toBe(true);
+
+  const measured = new AdaptiveQualityPolicy();
+  for (const now of [1_000, 3_000, 5_000, 7_000]) expect(measured.throughput(2_000_000, 3, now)).toBeUndefined();
+  expect(measured.throughput(2_000_000, 3, 9_000)).toBe('down');
+});
