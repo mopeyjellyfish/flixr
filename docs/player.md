@@ -25,9 +25,10 @@ does not infer bandwidth from a LAN, private or VPN address.
 
 During playback, Auto measures completed fragments and in-flight fragment bytes.
 It compares delivery with the selected video plus audio bandwidth. Sustained
-insufficient delivery, a draining buffer or a six-second startup without usable
+insufficient delivery, a draining buffer or a three-second startup without usable
 media lowers the ceiling one step before the buffer is exhausted. Emergency
-downshifts can interrupt an upgrade cooldown. Raising quality requires sustained
+downshifts can interrupt an upgrade cooldown. Credible constrained fragment
+delivery during startup can select the 360p floor directly. Raising quality requires sustained
 headroom and uses a longer recovery delay after a downgrade. Native HLS does not
 provide fragment telemetry, so it uses the same bounded startup deadline plus
 sampled buffer growth and drain as a fallback. Data saver uses the 480p ceiling.

@@ -942,6 +942,7 @@ func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profi
 			return Handoff{}, err
 		}
 	}
+	plan = inheritReplacementState(plan, old.Plan)
 	leaseTTL := m.settings.LeaseTTL
 	preparationDeadline := time.Now().Add(leaseTTL + max(0, m.manifestWait))
 	if old.ExpiresAt.Before(preparationDeadline) {
@@ -1202,6 +1203,7 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 			return Session{}, err
 		}
 	}
+	plan = inheritReplacementState(plan, session.Plan)
 	leaseTTL := m.settings.LeaseTTL
 	preparationDeadline := time.Now().Add(leaseTTL + max(0, m.manifestWait))
 	if session.ExpiresAt.Before(preparationDeadline) {
@@ -1262,6 +1264,15 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 		m.retireGeneration(context.Background(), retire)
 	}
 	return candidate, nil
+}
+
+func inheritReplacementState(plan, current Plan) Plan {
+	plan.SourceKey = current.SourceKey
+	plan.SubtitleSources = current.SubtitleSources
+	plan.SubtitleSelectionIndex = current.SubtitleSelectionIndex
+	plan.SubtitleExternal = current.SubtitleExternal
+	plan.SubtitleSelected = current.SubtitleSelected
+	return plan
 }
 
 func (m *Manager) Stop(id, profileID string) bool {

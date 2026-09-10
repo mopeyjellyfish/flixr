@@ -377,6 +377,75 @@ it('aborts a pending quality request and bounds Back navigation', async () => {
   expect(onExit).toHaveBeenCalledOnce();
 });
 
+it('aborts a never-settling handoff resolution and bounds Back navigation', async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  let handoffSignal: AbortSignal | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'candidate', media_url: '/candidate.m3u8', handoff_url: '/api/v1/playback/handoffs/stalled', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/playback/handoffs/stalled')) {
+      handoffSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  const onExit = vi.fn();
+  render(<Player catalogID="film-1" onExit={onExit} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/candidate.m3u8'));
+  fireEvent.loadedData(video);
+  await waitFor(() => expect(handoffSignal).toBeDefined());
+
+  vi.useFakeTimers();
+  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
+  expect(handoffSignal?.aborted).toBe(true);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+  expect(onExit).toHaveBeenCalledOnce();
+});
+
+it('times out ambiguous handoff requests, restores the retained source, and releases queued seek', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  const handoffBodies: boolean[] = [];
+  const seekBodies: number[] = [];
+  const listen = vi.spyOn(screenCoordinator, 'onCommand');
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'candidate', media_url: '/candidate.m3u8', handoff_url: '/api/v1/playback/handoffs/ambiguous', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/playback/handoffs/ambiguous')) {
+      handoffBodies.push(JSON.parse(String(init?.body)).attached);
+      return new Promise<Response>(() => undefined);
+    }
+    if (path.endsWith('/seek')) {
+      seekBodies.push(JSON.parse(String(init?.body)).position_ms);
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'seek', media_url: '/seek.m3u8', resume_ms: 30_000, stream_offset_ms: 30_000, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/candidate.m3u8'));
+  fireEvent.loadedData(video);
+  await waitFor(() => expect(handoffBodies).toEqual([true]));
+  act(() => { listen.mock.calls[0][0]({ version: 1, type: 'seek', position_ms: 30_000 }); });
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(6_100); });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  fireEvent.loadedData(video);
+  await waitFor(() => expect(seekBodies).toEqual([30_000]));
+  expect(handoffBodies).toEqual([true, true, false]);
+});
+
 it('does not launch quality preparation after Back wins a pending capability check', async () => {
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
   let itemCalls = 0;
@@ -474,6 +543,37 @@ it('retries an adaptive ramp without resetting the active media pipeline', async
   expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
 });
 
+it('keeps Auto policy aligned with retained Data saver after a failed manual Auto change', async () => {
+  localStorage.setItem('flixr.playback.quality', 'data_saver');
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  const qualityBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, width: 1920, height: 1080, bitrate: 8_000_000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 480, video_bitrate: 1_000_000, audio_bitrate: 96_000 }, session_id: 'saver', media_url: '/saver.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) {
+      qualityBodies.push(JSON.parse(String(init?.body)));
+      if (qualityBodies.length === 1) return new Response(JSON.stringify({ error: { code: 'playback_prepare_failed' } }), { status: 503 });
+      return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 720, video_bitrate: 2_500_000, audio_bitrate: 128_000 }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ accepted: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'auto' } });
+  await waitFor(() => expect(qualityBodies).toHaveLength(1));
+
+  let now = 1_000;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  let fragmentID = 0;
+  const fragment = () => hls.frag?.({}, { frag: { url: `/healthy-${fragmentID += 1}.m4s`, stats: { loading: { start: 0, end: 160 } } }, payload: new Uint8Array(100_000) });
+  for (now of [1_000, 5_000, 9_000, 16_000]) fragment();
+
+  await waitFor(() => expect(qualityBodies).toHaveLength(2));
+  expect(qualityBodies[1]).toMatchObject({ quality: { mode: 'auto', max_height: 720, max_video_bitrate: 2_500_000 } });
+});
+
 it('downshifts a constrained HLS startup before the first playing event', async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
@@ -492,9 +592,37 @@ it('downshifts a constrained HLS startup before the first playing event', async 
   render(<Player catalogID="film-1" onExit={() => undefined} />);
   await waitFor(() => expect(hls.attached).toBe(1));
   expect(qualityBodies).toEqual([]);
-  await act(async () => { await vi.advanceTimersByTimeAsync(6_100); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
   await waitFor(() => expect(qualityBodies).toHaveLength(1));
   expect(qualityBodies[0]).toMatchObject({ smooth_handoff: true, quality: { max_height: 480, max_video_bitrate: 1_000_000 } });
+});
+
+it('uses measured constrained startup delivery to skip directly to the safe floor', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  const qualityBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, width: 1920, height: 1080, bitrate: 8_000_000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 720, video_bitrate: 2_500_000, audio_bitrate: 128_000 }, session_id: 'balanced', media_url: '/balanced.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) {
+      qualityBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 360, video_bitrate: 500_000, audio_bitrate: 64_000 }, session_id: 'low', media_url: '/low.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ accepted: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let progress: ((event: { loaded: number }) => void) | undefined;
+  const setup = hls.configs[0].xhrSetup as (xhr: { addEventListener: (event: string, listener: (event: { loaded: number }) => void) => void }, url: string, context: { type: string; url: string }) => void;
+  vi.spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValue(3_000);
+  setup({ addEventListener: (_event, listener) => { progress = listener; } }, '/initial.m4s', { type: 'media-fragment', url: '/initial.m4s' });
+  progress?.({ loaded: 300_000 });
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+
+  await waitFor(() => expect(qualityBodies).toHaveLength(1));
+  expect(qualityBodies[0]).toMatchObject({ quality: { max_height: 360, max_video_bitrate: 500_000 } });
 });
 
 it('measures in-flight HLS fragment delivery before the fragment completes', async () => {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -1597,5 +1598,42 @@ func TestHandoffCommitCallbackAndControlReservationAreAtomic(t *testing.T) {
 	close(releaseCandidate)
 	if err := <-result; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReplacementInheritsCurrentSubtitleState(t *testing.T) {
+	for _, smooth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("smooth=%t", smooth), func(t *testing.T) {
+			manager, _ := testManager(t, nil)
+			subtitles := []SubtitleSource{{Index: 2, SourceIndex: 2, SourceKey: "subtitle-key", Codec: "subrip"}}
+			initialPlan := Plan{Kind: Transcode, SourceKey: "video-key", VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000, SubtitleSources: subtitles}
+			initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", 2, false, true); err != nil {
+				t.Fatal(err)
+			}
+
+			stalePlan := initialPlan
+			stalePlan.Width, stalePlan.Height, stalePlan.VideoBitrate = 854, 480, 1_000_000
+			stalePlan.SubtitleSources = nil
+			var replacement Session
+			if smooth {
+				handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", stalePlan, 5_000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replacement = handoff.Session
+			} else {
+				replacement, err = manager.ReplaceContext(context.Background(), initial.ID, "profile-a", stalePlan, 5_000)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if replacement.Plan.SourceKey != "video-key" || !replacement.Plan.SubtitleSelected || replacement.Plan.SubtitleSelectionIndex != 2 || !reflect.DeepEqual(replacement.Plan.SubtitleSources, subtitles) {
+				t.Fatalf("replacement inherited stale source state: %#v", replacement.Plan)
+			}
+		})
 	}
 }

@@ -57,3 +57,9 @@ FLIXR_TEST_NETWORK_MBPS=8 FLIXR_TEST_DIP_MBPS=0.8 \
 above the given height. Set `FLIXR_TEST_OBSERVATION_SECONDS` to extend the run
 when using that assertion; Auto deliberately requires sustained recovery
 evidence after a downgrade.
+
+For a constrained cold start, keep the full run at 0.8 Mbps and set
+`FLIXR_TEST_EXPECT_MAX_STARTUP_MS` to the local comparison budget. The assertion
+uses route navigation through the first advancing frame, so it includes page
+assets, server rendition preparation and media transfer rather than isolating
+network throughput alone.

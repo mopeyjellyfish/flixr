@@ -88,9 +88,9 @@ export class AdaptiveQualityPolicy {
   beginStartup(now: number): void { this.startupAt = now; }
 
   startup(now: number): boolean {
-    return this.startupAt !== undefined && now - this.startupAt >= 6_000 && this.tier !== 'low' && this.canEmergency(now)
-      ? this.propose(this.lowerTier())
-      : false;
+    if (this.startupAt === undefined || now - this.startupAt < 3_000 || this.tier === 'low' || !this.canEmergency(now)) return false;
+    const measured = this.rates.filter((sample) => sample.sampleID !== undefined).map((sample) => sample.bitsPerSecond);
+    return this.propose(this.tier === 'balanced' && measured.length > 0 && Math.min(...measured) < 1_600_000 ? 'low' : this.lowerTier());
   }
 
   playing(): void { this.stalledAt = undefined; this.startupAt = undefined; }

@@ -142,9 +142,15 @@ it('does not let an upgrade cooldown block sustained insufficient throughput', (
 it('rescues a constrained startup before the first playing event', () => {
   const policy = new AdaptiveQualityPolicy('balanced');
   policy.beginStartup(1_000);
-  expect(policy.startup(6_999)).toBe(false);
-  expect(policy.startup(7_000)).toBe(true);
+  expect(policy.startup(3_999)).toBe(false);
+  expect(policy.startup(4_000)).toBe(true);
   expect(policy.proposedTier).toBe('saver');
+
+  const measured = new AdaptiveQualityPolicy('balanced');
+  measured.beginStartup(1_000);
+  measured.throughput(800_000, 0, 2_000, 2_628_000, 'initial-fragment');
+  expect(measured.startup(4_000)).toBe(true);
+  expect(measured.proposedTier).toBe('low');
 
   const started = new AdaptiveQualityPolicy('balanced');
   started.beginStartup(1_000);

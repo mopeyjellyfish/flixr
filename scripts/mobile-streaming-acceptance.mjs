@@ -14,6 +14,7 @@ const observationSeconds = Number(process.env.FLIXR_TEST_OBSERVATION_SECONDS ?? 
 const expectedInitialHeight = Number(process.env.FLIXR_TEST_EXPECT_INITIAL_HEIGHT ?? 0);
 const expectedMinHeight = Number(process.env.FLIXR_TEST_EXPECT_MIN_HEIGHT ?? 0);
 const expectedRecoveryHeight = Number(process.env.FLIXR_TEST_EXPECT_RECOVERY_HEIGHT ?? 0);
+const expectedMaxStartupMS = Number(process.env.FLIXR_TEST_EXPECT_MAX_STARTUP_MS ?? 0);
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
@@ -114,7 +115,8 @@ try {
   result.autoPolicy = { initial_height: heights[0] ?? 0, minimum_height: minimumHeight, recovered_height: recoveredHeight };
   const policyPass = (!expectedInitialHeight || result.autoPolicy.initial_height === expectedInitialHeight)
     && (!expectedMinHeight || result.autoPolicy.minimum_height <= expectedMinHeight)
-    && (!expectedRecoveryHeight || result.autoPolicy.recovered_height >= expectedRecoveryHeight);
+    && (!expectedRecoveryHeight || result.autoPolicy.recovered_height >= expectedRecoveryHeight)
+    && (!expectedMaxStartupMS || result.startupMS <= expectedMaxStartupMS);
   result.pass = result.decodedAdvancementSeconds >= observationSeconds - 15 && result.stalledSamples <= 10 && policyPass;
   if (!result.pass) process.exitCode = 1;
 } catch (error) {

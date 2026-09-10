@@ -16,6 +16,7 @@ const maxConsecutiveRecoveries = 3;
 const finalHeartbeatWaitMS = 2_000;
 const qualityRequestTimeoutMS = 15_000;
 const qualityReadinessTimeoutMS = 8_000;
+const handoffAttemptTimeoutMS = 1_500;
 const sourceBufferUpdateTimeoutMS = 1_000;
 
 async function waitForSourceBuffer(buffer: SourceBuffer): Promise<boolean> {
@@ -82,12 +83,27 @@ async function settleWithin(promise: Promise<unknown>, timeoutMS: number): Promi
   window.clearTimeout(timer);
 }
 
-async function commitQualityHandoff(url: string): Promise<'committed' | 'aborted' | 'unknown'> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try { await api.playbackHandoff(url, true); return 'committed'; }
-    catch { /* retry the idempotent outcome before resolving the ambiguity */ }
+async function handoffAttempt(url: string, attached: boolean, lifecycleSignal?: AbortSignal): Promise<void> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (lifecycleSignal?.aborted) throw new Error('handoff request aborted');
+  else lifecycleSignal?.addEventListener('abort', abort, { once: true });
+  const aborted = new Promise<never>((_resolve, reject) => controller.signal.addEventListener('abort', () => reject(new Error('handoff request aborted')), { once: true }));
+  const timer = window.setTimeout(abort, handoffAttemptTimeoutMS);
+  try { await Promise.race([api.playbackHandoff(url, attached, controller.signal), aborted]); }
+  finally {
+    window.clearTimeout(timer);
+    lifecycleSignal?.removeEventListener('abort', abort);
   }
-  try { await api.playbackHandoff(url, false); return 'aborted'; }
+}
+
+async function commitQualityHandoff(url: string, signal: AbortSignal): Promise<'committed' | 'aborted' | 'unknown'> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { await handoffAttempt(url, true, signal); return 'committed'; }
+    catch { /* retry the idempotent outcome before resolving the ambiguity */ }
+    if (signal.aborted) return 'unknown';
+  }
+  try { await handoffAttempt(url, false, signal); return 'aborted'; }
   catch (error: unknown) { return error instanceof ApiError && error.status === 409 ? 'committed' : 'unknown'; }
 }
 
@@ -186,7 +202,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const keyboardInteraction = useRef(true);
   const playbackRateIntent = useRef(1);
   const qualityPreferenceRef = useRef(qualityPreference);
-  const qualityPolicy = useRef(new AdaptiveQualityPolicy(initialAutoQualityTier(window.location.origin)));
+  const qualityPolicy = useRef(new AdaptiveQualityPolicy(qualityPreference === 'data_saver' ? 'saver' : initialAutoQualityTier(window.location.origin)));
   const qualitySwitching = useRef(false);
   const pendingQuality = useRef<{ preference: QualityPreference; tier: AutoQualityTier } | undefined>(undefined);
   const sourceOperations = useRef<Promise<void>>(Promise.resolve());
@@ -350,7 +366,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     window.clearTimeout(qualityStartupTimer.current);
     if (qualityPreferenceRef.current === 'auto' && plan.plan.kind !== 'direct') {
       qualityPolicy.current.beginStartup(Date.now());
-      qualityStartupTimer.current = window.setTimeout(() => qualityStartupRef.current(), 6_000);
+      qualityStartupTimer.current = window.setTimeout(() => qualityStartupRef.current(), 3_000);
     }
     dispatch({ type: 'load', source: plan.media_url, resumeMs: plan.resume_ms });
     element.playbackRate = playbackRateIntent.current;
@@ -446,7 +462,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return version;
   }, [activateAttachedSource, loadHls, positionAttachedSource]);
 
-  const waitForUsableSource = useCallback((version: number, timeoutMS = qualityReadinessTimeoutMS): Promise<boolean> => {
+  const waitForUsableSource = useCallback((version: number, timeoutMS = qualityReadinessTimeoutMS, signal?: AbortSignal): Promise<boolean> => {
     const element = video.current;
     if (!element || version !== sourceVersion.current) return Promise.resolve(false);
     const ready = () => {
@@ -465,14 +481,18 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         window.clearTimeout(timer);
         window.clearInterval(fenceTimer);
         for (const event of ['loadedmetadata', 'loadeddata', 'canplay', 'progress', 'error', 'abort']) element.removeEventListener(event, observed);
+        signal?.removeEventListener('abort', cancelled);
         resolve(usable);
       };
+      const cancelled = () => done(false);
       const observed = (event: Event) => {
         if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || video.current !== element) done(false);
         else if (event.type === 'error' || event.type === 'abort') done(false);
         else if (ready() || event.type === 'canplay' || (!hls.current && event.type === 'loadeddata')) done(true);
       };
       for (const event of ['loadedmetadata', 'loadeddata', 'canplay', 'progress', 'error', 'abort']) element.addEventListener(event, observed);
+      if (signal?.aborted) { done(false); return; }
+      signal?.addEventListener('abort', cancelled, { once: true });
       fenceTimer = window.setInterval(() => { if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) done(false); }, 100);
       timer = window.setTimeout(() => done(false), timeoutMS);
     });
@@ -497,6 +517,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           replacingSession.current = current.session_id;
           retainedPlayback.current = current;
           let requestTimeout = 0;
+          let lifecycleController: AbortController | undefined;
           try {
             const detail = await api.item(catalogID);
             const capabilities = await browserCapabilities(detail);
@@ -511,23 +532,27 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             window.clearTimeout(requestTimeout);
             if (sourceRequestController.current === controller) sourceRequestController.current = null;
             if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) {
-              if (updated.handoff_url) void api.playbackHandoff(updated.handoff_url, false).catch(() => undefined);
+              if (updated.handoff_url) void handoffAttempt(updated.handoff_url, false).catch(() => undefined);
               else void api.playbackStop(updated.session_id).catch(() => undefined);
               if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
               return;
             }
             const resumeMS = Math.max(updated.resume_ms, currentPosition());
             if (seekingRef.current) autoStart.current = false;
+            if (updated.handoff_url) {
+              lifecycleController = new AbortController();
+              sourceRequestController.current = lifecycleController;
+            }
             const attachedVersion = await attach({ ...updated, resume_ms: resumeMS }, !updated.handoff_url);
-            const usable = attachedVersion !== undefined && (!updated.handoff_url || await waitForUsableSource(attachedVersion));
+            const usable = attachedVersion !== undefined && (!updated.handoff_url || await waitForUsableSource(attachedVersion, qualityReadinessTimeoutMS, lifecycleController?.signal));
             let candidateWon = usable;
             let handoffOutcome: 'committed' | 'aborted' | 'unknown' = usable ? 'committed' : 'aborted';
             if (updated.handoff_url) {
               if (usable) {
-                handoffOutcome = await commitQualityHandoff(updated.handoff_url);
+                handoffOutcome = await commitQualityHandoff(updated.handoff_url, lifecycleController!.signal);
                 candidateWon = handoffOutcome === 'committed';
               } else {
-                try { await api.playbackHandoff(updated.handoff_url, false); handoffOutcome = 'aborted'; }
+                try { await handoffAttempt(updated.handoff_url, false, lifecycleController?.signal); handoffOutcome = 'aborted'; }
                 catch { handoffOutcome = 'unknown'; }
                 candidateWon = false;
               }
@@ -557,6 +582,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             if (adaptiveProposal) {
               if (candidateWon && attachedPlayback.current?.session_id === updated.session_id && attachedPlayback.current.media_url === updated.media_url) qualityPolicy.current.commit(intent.tier, Date.now());
               else qualityPolicy.current.reject(intent.tier, Date.now());
+            } else if (candidateWon && attachedPlayback.current?.session_id === updated.session_id && attachedPlayback.current.media_url === updated.media_url) {
+              if (intent.preference === 'auto') qualityPolicy.current = new AdaptiveQualityPolicy(intent.tier);
+              else if (intent.preference === 'data_saver') qualityPolicy.current = new AdaptiveQualityPolicy('saver');
             }
           } catch (error: unknown) {
             window.clearTimeout(requestTimeout);
@@ -564,6 +592,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
             if (version === sourceVersion.current && !finalizing.current && !endedPlayback.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change streaming quality.');
           } finally {
+            if (sourceRequestController.current === lifecycleController) sourceRequestController.current = null;
             if (replacingSession.current === current.session_id) replacingSession.current = undefined;
             if (retainedPlayback.current?.session_id === current.session_id) retainedPlayback.current = null;
           }
@@ -647,8 +676,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     qualityPreferenceRef.current = preference;
     setQualityPreference(preference);
     saveQualityPreference(preference);
-    qualityPolicy.current = new AdaptiveQualityPolicy(initialAutoQualityTier(window.location.origin));
-    void replaceQuality(preference, qualityPolicy.current.tier);
+    const tier = preference === 'auto' ? initialAutoQualityTier(window.location.origin) : preference === 'data_saver' ? 'saver' : qualityPolicy.current.tier;
+    void replaceQuality(preference, tier);
   }, [replaceQuality]);
 
   const recover = useCallback(async (failure: unknown) => {
