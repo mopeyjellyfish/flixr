@@ -338,6 +338,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   const latestFilmsScan = ownerPage.getByRole('region', { name: 'Scheduled scans' }).locator('article').filter({ hasText: 'Films · succeeded' }).first();
   await expect(latestFilmsScan).toContainText(/manual · \d+ scanned · \d+ unchanged · 0 failed · 2 total/i);
   await ownerPage.screenshot({path:testInfo.outputPath('production-scheduled-scan.png'),fullPage:true});
+  // Content access now lives in the profile's edit dialog.
+  await ownerPage.getByRole('button', { name: /edit production viewer/i }).click();
   const profilePolicy = ownerPage.getByRole('group', { name: /content access for production viewer/i });
   await expect(profilePolicy).toBeVisible();
   await profilePolicy.getByLabel(/only selected libraries/i).check();
