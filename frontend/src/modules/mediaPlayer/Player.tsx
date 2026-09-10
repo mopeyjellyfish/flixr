@@ -261,13 +261,14 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     let Hls: typeof import('hls.js').default;
     try { ({ default: Hls } = await loadHls()); }
     catch {
+      if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) return;
       if (element.canPlayType('application/vnd.apple.mpegurl')) {
         element.src = plan.media_url;
         attachedPlayback.current = plan;
       } else dispatch({ type: 'error', message: 'The compatibility player could not load. Try again.' });
       return;
     }
-    if (version !== sourceVersion.current || !video.current) return;
+    if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) return;
     if (!Hls.isSupported()) {
       if (element.canPlayType('application/vnd.apple.mpegurl')) {
         element.src = plan.media_url;
