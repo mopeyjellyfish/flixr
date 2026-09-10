@@ -12,7 +12,9 @@ Settings contains streaming quality, audio tracks, subtitles, playback speed, fi
 selection and title information. Previous and next episode buttons appear when
 those episodes are available. Picture in picture appears on supported browsers.
 Fullscreen stays an explicit choice; a browser that blocks automatic playback
-shows a Play button.
+shows a Play button. Seeking and automatic stream replacement keep the current
+fullscreen presentation active. Leaving fullscreen, returning to the library,
+finishing playback or closing the player cancels that presentation normally.
 
 Auto is the default streaming quality and is remembered on each device. It
 starts at a transport-safe 360p ceiling in browsers with Media Source or Managed
@@ -40,7 +42,9 @@ Shortcuts apply to the player. Focused form fields and buttons retain their
 normal keyboard behaviour. Dragging the timeline previews a target and seeks
 when released. Repeated fifteen-second presses accumulate from the latest requested position,
 even while an earlier seek finishes. During stream preparation, the timeline shows
-the requested source time and stale picture and audio remain paused. The player
+the requested source time and stale picture and audio remain paused. A spinner
+is the only visible loading indicator; assistive technology receives a Loading
+status, while playback failures still show an actionable error. The player
 coalesces pending requests and keeps the latest target.
 
 ## Chapters and preview pictures
@@ -67,8 +71,11 @@ session cancels extraction and prevents further access, including cached images.
 ## Validation scope
 
 Automated player checks cover desktop Chromium, Firefox and WebKit controls,
-plus real-media playback through the built server and internet-isolated Docker
+standard element fullscreen, WebKit's native video-presentation API and
+real-media playback through the built server and internet-isolated Docker
 acceptance. The production suite captures phone portrait/landscape, tablet,
-desktop, 4K and 8K viewports. Simulated viewports do not establish physical TV
-remote, mobile hardware, HDR or A/V-sync qualification. Those v1 qualification
-gates remain tracked in #112 and the related device issues.
+desktop, 4K and 8K viewports. Desktop WebKit automation exercises the native
+presentation contract but does not establish physical iPhone or iPad behavior.
+Simulated viewports also do not establish physical TV remote, mobile hardware,
+HDR or A/V-sync qualification. Those v1 qualification gates remain tracked in
+#112 and the related device issues.

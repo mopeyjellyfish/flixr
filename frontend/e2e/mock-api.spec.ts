@@ -485,6 +485,41 @@ test('mocked playback planning and capacity error states', async ({ page }, test
   await expect(page.getByRole('alert')).toContainText(/playback limit/i);
 });
 
+test('source replacement preserves standard element fullscreen', async ({ page }) => {
+  await mockMediaSource(page);
+  await mock(page, (path) => {
+    if (path.endsWith('/setup/status')) return { json: ready };
+    if (path.includes('/catalog/items/')) return { json: film };
+    if (path.endsWith('/playback/plans')) return { json: { plan: { kind: 'direct' }, session_id: 'session-1', media_url: 'data:video/mp4;base64,first', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+    if (path.endsWith('/quality')) return { json: { plan: { kind: 'direct' }, session_id: 'session-2', media_url: 'data:video/mp4;base64,second', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+    if (path.endsWith('/heartbeat')) return { json: { accepted: true, expires_at: 9999999999 } };
+    if (path.endsWith('/stop')) return { json: { stopped: true } };
+    return undefined;
+  });
+  await page.goto('/play/film-1');
+  const video = page.locator('video');
+  await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,first');
+  await video.evaluate((element) => {
+    element.dispatchEvent(new Event('loadedmetadata'));
+    element.dispatchEvent(new Event('canplay'));
+    element.dispatchEvent(new Event('playing'));
+  });
+  await page.getByRole('button', { name: 'Fullscreen' }).click();
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.matches('main.player'))).toBe(true);
+
+  // Headless browsers stop accepting pointer input once their native fullscreen
+  // surface owns the window. Invoke the mounted controls' DOM handlers directly.
+  await page.locator('summary[aria-label="Playback settings"]').evaluate((button) => (button as HTMLElement).click());
+  await page.getByRole('combobox', { name: 'Streaming quality' }).evaluate((select) => {
+    const quality = select as HTMLSelectElement;
+    quality.value = 'data_saver';
+    quality.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,second');
+  expect(await page.evaluate(() => document.fullscreenElement?.matches('main.player'))).toBe(true);
+});
+
 test('mocked playback heartbeat, buffering, cross-client resume, lease recovery, stop, and network recovery', async ({ page, context }) => {
   await mockMediaSource(page);
   let heartbeats = 0;
@@ -527,7 +562,9 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   // its source so this event exercises media buffering, not plan initialization.
   await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
   await firstVideo.dispatchEvent('waiting');
-  await expect(page.getByRole('status')).toContainText(/buffering/i);
+  await expect(page.locator('.player-loading')).toBeVisible();
+  await expect(page.locator('.player-loading')).toHaveText('');
+  await expect(page.locator('.player-status')).toHaveText('Loading');
   const seekedTo = await page.locator('video').evaluate((video) => {
     const media = video as HTMLVideoElement;
     media.currentTime = 5;

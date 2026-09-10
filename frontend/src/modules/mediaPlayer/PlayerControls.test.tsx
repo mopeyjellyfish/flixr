@@ -40,12 +40,11 @@ it('closes settings from a focused field with Escape and returns focus to the me
 });
 it('shows quality intent and the actual capped rendition', () => {
   const change = vi.fn();
-  render(<PlayerControls playing durationMS={120000} positionMS={0} onSeek={() => {}} onToggle={() => {}} video={{current:null}} stage={{current:null}} quality="auto" effectiveQuality="720p · 2.5 Mbps" bufferingFeedback="Connection slowed; switching to Data saver…" onQualityChange={change} />);
+  render(<PlayerControls playing durationMS={120000} positionMS={0} onSeek={() => {}} onToggle={() => {}} video={{current:null}} stage={{current:null}} quality="auto" effectiveQuality="720p · 2.5 Mbps" onQualityChange={change} />);
   fireEvent.click(screen.getByText('Settings'));
   expect(screen.getByText('Actual: 720p · 2.5 Mbps')).toBeVisible();
   fireEvent.change(screen.getByRole('combobox', {name:'Streaming quality'}), {target:{value:'data_saver'}});
   expect(change).toHaveBeenCalledWith('data_saver');
-  expect(screen.getByRole('status')).toHaveTextContent('switching to Data saver');
 });
 it('reports rejected fullscreen without interrupting playback', async () => {
   const root = document.createElement('main');
