@@ -252,6 +252,66 @@ it('honors a pause made while an HLS quality candidate waits for readiness', asy
   expect(play).toHaveBeenCalledTimes(1);
 });
 
+it('does not queue startup fallback while a paused Auto candidate waits for readiness', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  localStorage.setItem('flixr.playback.quality', 'data_saver');
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  const qualityBodies: Array<Record<string, unknown>> = [];
+  const listen = vi.spyOn(screenCoordinator, 'onCommand');
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, width: 1920, height: 1080, bitrate: 8_000_000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 480 }, session_id: 'saver', media_url: '/saver.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) {
+      qualityBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ plan: { kind: 'transcode', height: 720 }, session_id: 'candidate', media_url: '/candidate.m3u8', handoff_url: '/api/v1/playback/handoffs/paused-auto', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/playback/handoffs/paused-auto')) return new Response(JSON.stringify({ attached: JSON.parse(String(init?.body)).attached }));
+    return new Response(JSON.stringify({ accepted: true }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/saver.m3u8'));
+  fireEvent.loadedMetadata(video);
+  act(() => { listen.mock.calls[0][0]({ version: 1, type: 'pause' }); });
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'auto' } });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/candidate.m3u8'));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+  fireEvent.loadedData(video);
+
+  await waitFor(() => expect(qualityBodies).toHaveLength(1));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(qualityBodies).toHaveLength(1);
+});
+
+it('does not commit native handoff from stale readyState before the candidate source loads', async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  const handoffs: boolean[] = [];
+  let currentSource = new URL('/old.m3u8', window.location.href).href;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'old', media_url: '/old.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/quality')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'candidate', media_url: '/candidate.m3u8', handoff_url: '/api/v1/playback/handoffs/native-source', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/playback/handoffs/native-source')) handoffs.push(JSON.parse(String(init?.body)).attached);
+    return new Response(JSON.stringify({ attached: handoffs.at(-1) }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  Object.defineProperty(video, 'currentSrc', { configurable: true, get: () => currentSource });
+  Object.defineProperty(video, 'readyState', { configurable: true, value: video.HAVE_FUTURE_DATA });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/old.m3u8'));
+  fireEvent.click(screen.getByText('Settings'));
+  fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
+  await waitFor(() => expect(video).toHaveAttribute('src', '/candidate.m3u8'));
+  expect(handoffs).toEqual([]);
+
+  currentSource = new URL('/candidate.m3u8', window.location.href).href;
+  fireEvent.loadedData(video);
+  await waitFor(() => expect(handoffs).toEqual([true]));
+});
+
 it('positions a transferred HLS candidate before checking its source-relative buffer', async () => {
   vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
   hls.bufferedTransfer = true;

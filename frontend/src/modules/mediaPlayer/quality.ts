@@ -86,6 +86,7 @@ export class AdaptiveQualityPolicy {
   }
 
   beginStartup(now: number): void { this.startupAt = now; }
+  cancelStartup(): void { this.startupAt = undefined; }
 
   startup(now: number, unmeasuredFloor = false): boolean {
     if (this.startupAt === undefined || now - this.startupAt < 3_000 || this.tier === 'low' || !this.canEmergency(now)) return false;
@@ -93,7 +94,7 @@ export class AdaptiveQualityPolicy {
     return this.propose(this.tier === 'balanced' && (unmeasuredFloor || (measured.length > 0 && Math.min(...measured) < 1_600_000)) ? 'low' : this.lowerTier());
   }
 
-  playing(): void { this.stalledAt = undefined; this.startupAt = undefined; }
+  playing(): void { this.stalledAt = undefined; this.cancelStartup(); }
 
   buffer(bufferSeconds: number, playing: boolean, now: number): boolean {
     if (!playing) this.bufferSamples = [];

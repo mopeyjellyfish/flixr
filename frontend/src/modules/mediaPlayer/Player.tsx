@@ -349,6 +349,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       // again. The replacement is attached and intentionally paused, so expose
       // Play immediately; a later waiting event will report actual buffering.
       dispatch({ type: 'pause' });
+      window.clearTimeout(qualityStartupTimer.current);
+      qualityPolicy.current.cancelStartup();
     }
     seekSourceTransitioning.current = false;
   }, [positionAttachedSource]);
@@ -364,7 +366,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     playback.current = plan;
     attachedPlayback.current = null;
     window.clearTimeout(qualityStartupTimer.current);
-    if (qualityPreferenceRef.current === 'auto' && plan.plan.kind !== 'direct') {
+    if (qualityPreferenceRef.current === 'auto' && plan.plan.kind !== 'direct' && playIntent.current) {
       qualityPolicy.current.beginStartup(Date.now());
       qualityStartupTimer.current = window.setTimeout(() => qualityStartupRef.current(), 3_000);
     }
@@ -465,13 +467,20 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const waitForUsableSource = useCallback((version: number, timeoutMS = qualityReadinessTimeoutMS, signal?: AbortSignal): Promise<boolean> => {
     const element = video.current;
     if (!element || version !== sourceVersion.current) return Promise.resolve(false);
+    const expectedMediaURL = new URL(playback.current?.media_url ?? '', window.location.href).href;
+    const usesHls = hls.current !== null;
+    let nativeReadyObserved = false;
+    const sourceMatches = () => {
+      const selected = element.currentSrc || element.src;
+      return selected === expectedMediaURL;
+    };
     const ready = () => {
       if (version !== sourceVersion.current || video.current !== element) return false;
       let buffered = false;
       for (let index = 0; index < element.buffered.length; index += 1) {
         if (element.buffered.start(index) <= element.currentTime && element.buffered.end(index) > element.currentTime) { buffered = true; break; }
       }
-      return hls.current ? buffered : element.readyState >= element.HAVE_FUTURE_DATA;
+      return usesHls ? buffered : nativeReadyObserved && sourceMatches() && element.readyState >= element.HAVE_FUTURE_DATA;
     };
     if (ready()) return Promise.resolve(true);
     return new Promise((resolve) => {
@@ -488,7 +497,10 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       const observed = (event: Event) => {
         if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || video.current !== element) done(false);
         else if (event.type === 'error' || event.type === 'abort') done(false);
-        else if (ready() || event.type === 'canplay' || (!hls.current && event.type === 'loadeddata')) done(true);
+        else {
+          if (!usesHls && sourceMatches() && (event.type === 'loadedmetadata' || event.type === 'loadeddata' || event.type === 'canplay')) nativeReadyObserved = true;
+          if (ready() || (usesHls ? event.type === 'canplay' : sourceMatches() && (event.type === 'canplay' || event.type === 'loadeddata'))) done(true);
+        }
       };
       for (const event of ['loadedmetadata', 'loadeddata', 'canplay', 'progress', 'error', 'abort']) element.addEventListener(event, observed);
       if (signal?.aborted) { done(false); return; }
@@ -606,6 +618,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   }, [activateAttachedSource, attach, catalogID, currentPosition, enqueueSourceOperation, waitForUsableSource]);
 
   qualityStartupRef.current = () => {
+    if (!playIntent.current) { qualityPolicy.current.cancelStartup(); return; }
     if (qualityPreferenceRef.current !== 'auto' || !qualityPolicy.current.startup(Date.now(), !supportsHlsMSE())) return;
     const tier = qualityPolicy.current.proposedTier;
     if (tier) void replaceQuality('auto', tier);
