@@ -143,4 +143,43 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if err := db.QueryRow(`SELECT version_id FROM profile_media_version_preferences WHERE profile_id=?`, profile.ID).Scan(&preference); err != nil || preference != canonical.ID {
 		t.Fatalf("saved preference = %q, %v", preference, err)
 	}
+	for _, event := range []household.ViewingEvent{
+		{CatalogID: canonical.ID, Title: "Canonical history", Kind: "film", Type: household.EventCompleted, Provenance: household.ProvenanceLocal},
+		{CatalogID: member.ID, Title: "Member history", Kind: "film", Type: household.EventCompleted, Provenance: household.ProvenanceLocal},
+	} {
+		if err := h.RecordViewingEvent(profile.ID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history := request(http.MethodGet, "/api/v1/history", "", viewer)
+	if history.Code != http.StatusOK || !bytes.Contains(history.Body.Bytes(), []byte("Canonical history")) || bytes.Contains(history.Body.Bytes(), []byte("Member history")) {
+		t.Fatalf("grouped history = %d %s", history.Code, history.Body.String())
+	}
+	clear := request(http.MethodPost, "/api/v1/history/clear", "", viewer)
+	var clearAction struct {
+		ID string `json:"id"`
+	}
+	if clear.Code != http.StatusOK || json.Unmarshal(clear.Body.Bytes(), &clearAction) != nil || clearAction.ID == "" {
+		t.Fatalf("clear history = %d %s", clear.Code, clear.Body.String())
+	}
+	undo := request(http.MethodPost, "/api/v1/history/clear/"+clearAction.ID+"/undo", "", viewer)
+	if undo.Code != http.StatusOK {
+		t.Fatalf("undo history clear = %d %s", undo.Code, undo.Body.String())
+	}
+	history = request(http.MethodGet, "/api/v1/history", "", viewer)
+	if !bytes.Contains(history.Body.Bytes(), []byte("Canonical history")) || bytes.Contains(history.Body.Bytes(), []byte("Member history")) {
+		t.Fatalf("restored grouped history = %d %s", history.Code, history.Body.String())
+	}
+	ungroup := request(http.MethodDelete, "/api/v1/owner/media-version-groups/film/"+canonical.ID+"/members/"+member.ID, "", owner)
+	if ungroup.Code != http.StatusOK {
+		t.Fatalf("ungroup = %d %s", ungroup.Code, ungroup.Body.String())
+	}
+	history = request(http.MethodGet, "/api/v1/history", "", viewer)
+	if !bytes.Contains(history.Body.Bytes(), []byte("Canonical history")) || !bytes.Contains(history.Body.Bytes(), []byte("Member history")) {
+		t.Fatalf("ungrouped history = %d %s", history.Code, history.Body.String())
+	}
+	var eventRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM viewing_events WHERE profile_id=?`, profile.ID).Scan(&eventRows); err != nil || eventRows != 2 {
+		t.Fatalf("preserved history rows = %d, %v", eventRows, err)
+	}
 }

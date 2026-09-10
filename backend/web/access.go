@@ -94,6 +94,9 @@ func (s *Server) contentAllowed(r *http.Request, kind, id string) (bool, error) 
 }
 
 func (s *Server) itemAllowed(r *http.Request, id string) (bool, error) {
+	if item, ok := s.catalog.Item(id); ok && s.catalog.IsMediaVersionMember(item.Kind, id) {
+		return false, nil
+	}
 	policy, ok := s.requestPolicy(r)
 	if !ok {
 		return false, nil

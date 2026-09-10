@@ -47,6 +47,13 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		cursor = candidate.Next
+		if s.catalog.IsMediaVersionMember(candidate.Events[0].Kind, candidate.Events[0].CatalogID) {
+			if cursor == "" {
+				page.Next = ""
+				break
+			}
+			continue
+		}
 		allowed, err := s.itemAllowed(r, candidate.Events[0].CatalogID)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "catalog_query_failed")
