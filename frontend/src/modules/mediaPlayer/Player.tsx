@@ -149,7 +149,7 @@ type AutoplayState =
 
 const autoplaySeconds = 10;
 
-export function Player({ catalogID, versionID, startPositionMS, active = true, continueWatchingIntent = 'user', onAdvance, onExit }: { catalogID: string; versionID?: string; startPositionMS?: number; active?: boolean; continueWatchingIntent?: 'user' | 'automatic'; onAdvance?: (catalogID: string, intent: 'user' | 'automatic', versionID?: string) => void; onExit: () => void }) {
+export function Player({ catalogID, versionID, startPositionMS, active = true, continueWatchingIntent = 'user', onAdvance, onVersionAccepted, onExit }: { catalogID: string; versionID?: string; startPositionMS?: number; active?: boolean; continueWatchingIntent?: 'user' | 'automatic'; onAdvance?: (catalogID: string, intent: 'user' | 'automatic', versionID?: string) => void; onVersionAccepted?: (versionID: string) => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const stage = useRef<HTMLElement>(null);
   const [item, setItem] = useState<CatalogItem>();
@@ -219,6 +219,8 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
   const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
   const playerStatus = useRef(state.status);
   const versionIntent = useRef(versionID);
+  const versionAccepted = useRef(onVersionAccepted);
+  versionAccepted.current = onVersionAccepted;
   const versionProps = useRef({ catalogID, versionID });
   if (versionProps.current.catalogID !== catalogID || versionProps.current.versionID !== versionID) {
     versionProps.current = { catalogID, versionID };
@@ -822,6 +824,7 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
     ).then(async (initial) => {
       if (!initial) return;
       if (!active) { void api.playbackStop(initial.session_id); return; }
+      if (versionIntent.current && initial.version?.id === versionIntent.current) versionAccepted.current?.(initial.version.id);
       let plan = initial;
       playback.current = initial;
       observation.current = 0;

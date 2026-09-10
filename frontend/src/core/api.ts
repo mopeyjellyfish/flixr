@@ -53,7 +53,7 @@ export type MediaVersion = {
 };
 export type MediaVersionCandidate = Omit<MediaVersion, 'label' | 'selected' | 'available'> & { title: string; kind: 'film' | 'series' };
 export type MediaVersionGroup = { id: string; logical_title_id: string; title: string; kind: 'film' | 'series'; edition_id: string; edition_label?: string; members: MediaVersion[] };
-export type MediaVersionGroups = { groups: MediaVersionGroup[]; candidates: MediaVersionCandidate[] };
+export type MediaVersionGroups = { groups: MediaVersionGroup[]; candidates: MediaVersionCandidate[]; total: number; next_offset?: number };
 export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dismissed?: boolean };
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
 export type ViewerSection = { name: string; items: ViewerItem[] };

@@ -85,7 +85,7 @@ export const api = {
   identityRepairs: () => request<IdentityRepairs>('/owner/identity/repairs'),
   mergeIdentity: (kind: string, survivorID: string, sourceID: string) => request<IdentityMerge>('/owner/identity/merges', { method: 'POST', body: JSON.stringify({ kind, survivor_id: survivorID, source_id: sourceID }) }),
   unmergeIdentity: (mergeID: string) => request<IdentityMerge>(`/owner/identity/merges/${encodeURIComponent(mergeID)}/unmerge`, { method: 'POST' }),
-  mediaVersionGroups: () => request<MediaVersionGroups>('/owner/media-version-groups'),
+  mediaVersionGroups: (query = '', offset = 0, limit = 50) => request<MediaVersionGroups>(`/owner/media-version-groups?${new URLSearchParams({ q: query, offset: String(offset), limit: String(limit) })}`),
   createMediaVersionGroup: (kind: 'film' | 'series', canonicalID: string, memberIDs: string[]) => request<MediaVersionGroup>('/owner/media-version-groups', { method: 'POST', body: JSON.stringify({ kind, canonical_id: canonicalID, member_ids: memberIDs }) }),
   updateMediaVersionEdition: (kind: 'film' | 'series', canonicalID: string, editionLabel: string) => request<MediaVersionGroup>(`/owner/media-version-groups/${kind}/${encodeURIComponent(canonicalID)}`, { method: 'PATCH', body: JSON.stringify({ edition_label: editionLabel }) }),
   ungroupMediaVersion: (kind: 'film' | 'series', canonicalID: string, memberID: string) => request<{ group: MediaVersionGroup; ungrouped_id: string }>(`/owner/media-version-groups/${kind}/${encodeURIComponent(canonicalID)}/members/${encodeURIComponent(memberID)}`, { method: 'DELETE' }),

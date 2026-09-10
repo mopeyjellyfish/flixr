@@ -665,6 +665,9 @@ textarea:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 .preview-list, .decision-list { display: grid; gap: 0.35rem; margin: 0; padding-left: 1.2rem; font-size: 0.9rem; line-height: 1.45; }
 .identity-repair p { margin: 0; }
 .version-group { gap: 1rem; }
+.version-search { grid-template-columns: minmax(12rem, 1fr) auto; align-items: end; }
+.version-search button { min-height: 44px; }
+.version-results { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; color: var(--muted); font-size: 0.85rem; }
 .version-members { display: grid; gap: 0.5rem; margin: 0; padding: 0; list-style: none; }
 .version-members li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.65rem 0; border-top: 1px solid var(--hairline); }
 .version-members li > span { display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem; align-items: baseline; }

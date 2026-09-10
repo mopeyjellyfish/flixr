@@ -25,6 +25,28 @@ describe('Flixr routes', () => {
     expect(planBodies[0]).toMatchObject({ catalog_id: 'film-1', version_id: 'source-4k' });
   });
 
+  it('records an accepted fallback version in the route for later navigation', async () => {
+    window.history.replaceState({}, '', '/play/film-1?version=source-4k');
+    const planBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: '/api/v1/catalog/items/film-1', handle: () => ({ json: { id: 'film-1', title: 'Signal', kind: 'film', local_only: true } }) },
+      { path: '/api/v1/playback/plans', method: 'POST', handle: ({ body }) => {
+        const plan = body as Record<string, unknown>;
+        planBodies.push(plan);
+        if (plan.version_id === 'source-4k') return { status: 409, json: { error: { code: 'playback_version_unavailable', requested_version_id: 'source-4k', alternatives: [{ id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: false, available: true }] } } };
+        return { json: { plan: { kind: 'direct' }, version: { id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: true, available: true }, session_id: 'fallback', media_url: '/fallback.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+      } },
+    ]));
+
+    await renderApp();
+    fireEvent.click(await screen.findByRole('button', { name: /play 1080p.*instead/i }));
+    await waitFor(() => expect(window.location.search).toBe('?version=source-1080'));
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    await waitFor(() => expect(planBodies).toHaveLength(3));
+    expect(planBodies.at(-1)?.version_id).toBe('source-1080');
+  });
+
   it.each([false, true])('shows demo guidance only when the server enables demo mode (%s)', async (demo) => {
     window.history.replaceState({}, '', '/home');
     vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
