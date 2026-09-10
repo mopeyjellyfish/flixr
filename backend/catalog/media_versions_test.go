@@ -66,6 +66,15 @@ func TestMediaVersionGroupPreservesSeparateHistoryAcrossRestartAndUngroup(t *tes
 	if _, err := db.Exec(`INSERT INTO progress(profile_id,catalog_id,position_ms,updated_at,completed,completed_at,generation) VALUES('viewer',?,111,1,0,0,1),('viewer',?,222,2,1,2,1)`, canonical, member); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO profile_film_list(profile_id,catalog_id,added_at) VALUES('viewer',?,1),('viewer',?,2)`, canonical, member); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO profile_ratings(profile_id,catalog_id,rating,provenance,source_id,updated_at) VALUES('viewer',?,3,'local','',1),('viewer',?,5,'local','',2)`, canonical, member); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO viewing_events(event_id,profile_id,catalog_id,title,kind,event_type,provenance,source_id,recorded_at) VALUES('canonical-event','viewer',?,'Canonical','film','completed','local','canonical-source',1),('member-event','viewer',?,'Member','film','completed','local','member-source',2)`, canonical, member); err != nil {
+		t.Fatal(err)
+	}
 	group, err := c.CreateMediaVersionGroup(context.Background(), "film", canonical, []string{member})
 	if err != nil || len(group.Members) != 2 {
 		t.Fatalf("group = %#v, %v", group, err)
@@ -80,6 +89,16 @@ func TestMediaVersionGroupPreservesSeparateHistoryAcrossRestartAndUngroup(t *tes
 			var got int64
 			if err := db.QueryRow(`SELECT position_ms FROM progress WHERE profile_id='viewer' AND catalog_id=?`, id).Scan(&got); err != nil || got != want {
 				t.Fatalf("history %s = %d, %v; want %d", id, got, err, want)
+			}
+		}
+		for query, want := range map[string]int{
+			`SELECT COUNT(*) FROM profile_film_list WHERE profile_id='viewer'`:  2,
+			`SELECT SUM(rating) FROM profile_ratings WHERE profile_id='viewer'`: 8,
+			`SELECT COUNT(*) FROM viewing_events WHERE profile_id='viewer'`:     2,
+		} {
+			var got int
+			if err := db.QueryRow(query).Scan(&got); err != nil || got != want {
+				t.Fatalf("history query %q = %d, %v; want %d", query, got, err, want)
 			}
 		}
 	}
@@ -119,6 +138,15 @@ func TestMediaVersionGroupingRejectsEditionConflictAndIncompleteSeries(t *testin
 	c, db, _, _ := versionCatalogFixture(t)
 	defer db.Close()
 	films, _, _ := c.Browse("Film", 0, 0)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.CreateMediaVersionGroup(cancelled, "film", films[0].ID, []string{films[1].ID}); err == nil {
+		t.Fatal("cancelled group succeeded")
+	}
+	var memberships int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_film_version_memberships`).Scan(&memberships); err != nil || memberships != 0 {
+		t.Fatalf("cancelled film memberships = %d, %v", memberships, err)
+	}
 	if _, err := c.SetEditionLabel(context.Background(), "film", films[0].ID, "Theatrical"); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +156,6 @@ func TestMediaVersionGroupingRejectsEditionConflictAndIncompleteSeries(t *testin
 	if _, err := c.CreateMediaVersionGroup(context.Background(), "film", films[0].ID, []string{films[1].ID}); err != ErrMediaVersionConflict {
 		t.Fatalf("edition conflict = %v", err)
 	}
-	var memberships int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_film_version_memberships`).Scan(&memberships); err != nil || memberships != 0 {
 		t.Fatalf("film memberships = %d, %v", memberships, err)
 	}

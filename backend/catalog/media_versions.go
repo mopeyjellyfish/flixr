@@ -185,6 +185,21 @@ func (c *Catalog) anchorItem(kind, id string) (Item, bool) {
 	return Item{ID: series.ID, Title: series.Title, Kind: "series", Playable: series.Playable}, true
 }
 
+func (c *Catalog) versionAnchorEligible(kind, id string) bool {
+	if c.db == nil {
+		_, ok := c.anchorItem(kind, id)
+		return ok
+	}
+	query := `SELECT COUNT(*) FROM catalog_items WHERE id=? AND kind='film' AND series_id='' AND merged_into=''`
+	if kind == "series" {
+		query = `SELECT COUNT(*) FROM catalog_series WHERE id=? AND merged_into=''`
+	} else if kind != "film" {
+		return false
+	}
+	var count int
+	return c.db.QueryRow(query, id).Scan(&count) == nil && count == 1
+}
+
 func (c *Catalog) groupObject(kind, canonicalID string) (MediaVersionGroup, error) {
 	anchor, ok := c.anchorItem(kind, canonicalID)
 	if !ok {
@@ -290,7 +305,7 @@ func (c *Catalog) CreateMediaVersionGroup(ctx context.Context, kind, canonicalID
 		seen[id], ids = true, append(ids, id)
 	}
 	for _, id := range ids {
-		if _, ok := c.anchorItem(kind, id); !ok {
+		if !c.versionAnchorEligible(kind, id) {
 			return MediaVersionGroup{}, ErrCatalogNotFound
 		}
 		resolved, err := c.canonicalVersionID(kind, id)
@@ -335,7 +350,7 @@ func (c *Catalog) SetEditionLabel(ctx context.Context, kind, id, label string) (
 	if _, _, _, ok := membershipTable(kind); !ok || len(strings.TrimSpace(label)) > 80 {
 		return MediaVersionGroup{}, ErrMediaVersionConflict
 	}
-	if _, ok := c.anchorItem(kind, id); !ok {
+	if !c.versionAnchorEligible(kind, id) {
 		return MediaVersionGroup{}, ErrCatalogNotFound
 	}
 	canonicalID, err := c.canonicalVersionID(kind, id)
@@ -343,7 +358,7 @@ func (c *Catalog) SetEditionLabel(ctx context.Context, kind, id, label string) (
 		return MediaVersionGroup{}, ErrMediaVersionConflict
 	}
 	label = strings.TrimSpace(label)
-	if _, err := c.db.Exec(`INSERT INTO catalog_edition_labels(kind,catalog_id,label,updated_at) VALUES(?,?,?,?) ON CONFLICT(kind,catalog_id) DO UPDATE SET label=excluded.label,updated_at=excluded.updated_at`, kind, id, label, time.Now().Unix()); err != nil {
+	if _, err := c.db.Writer().ExecContext(ctx, `INSERT INTO catalog_edition_labels(kind,catalog_id,label,updated_at) VALUES(?,?,?,?) ON CONFLICT(kind,catalog_id) DO UPDATE SET label=excluded.label,updated_at=excluded.updated_at`, kind, id, label, time.Now().Unix()); err != nil {
 		return MediaVersionGroup{}, err
 	}
 	return c.groupObject(kind, id)
@@ -356,7 +371,7 @@ func (c *Catalog) UngroupMediaVersion(ctx context.Context, kind, canonicalID, me
 	if !ok || canonicalID == memberID {
 		return MediaVersionGroup{}, ErrMediaVersionConflict
 	}
-	result, err := c.db.Exec(`DELETE FROM `+table+` WHERE `+canonical+`=? AND `+member+`=?`, canonicalID, memberID)
+	result, err := c.db.Writer().ExecContext(ctx, `DELETE FROM `+table+` WHERE `+canonical+`=? AND `+member+`=?`, canonicalID, memberID)
 	if err != nil {
 		return MediaVersionGroup{}, err
 	}
@@ -497,6 +512,10 @@ func containsString(values []string, value string) bool {
 }
 
 func (c *Catalog) SavePlaybackVersion(profileID, catalogID, versionID string) error {
+	return c.SavePlaybackVersionContext(context.Background(), profileID, catalogID, versionID)
+}
+
+func (c *Catalog) SavePlaybackVersionContext(ctx context.Context, profileID, catalogID, versionID string) error {
 	if c.db == nil {
 		return nil
 	}
@@ -508,7 +527,7 @@ func (c *Catalog) SavePlaybackVersion(profileID, catalogID, versionID string) er
 	if err != nil {
 		return err
 	}
-	_, err = c.db.Exec(`INSERT INTO profile_media_version_preferences(profile_id,kind,catalog_id,version_id,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(profile_id,kind,catalog_id) DO UPDATE SET version_id=excluded.version_id,updated_at=excluded.updated_at`, profileID, kind, canonicalID, versionID, time.Now().Unix())
+	_, err = c.db.Writer().ExecContext(ctx, `INSERT INTO profile_media_version_preferences(profile_id,kind,catalog_id,version_id,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(profile_id,kind,catalog_id) DO UPDATE SET version_id=excluded.version_id,updated_at=excluded.updated_at`, profileID, kind, canonicalID, versionID, time.Now().Unix())
 	return err
 }
 
