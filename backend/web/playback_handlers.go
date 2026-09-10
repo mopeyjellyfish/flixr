@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -491,6 +492,18 @@ func (s *Server) servePlaybackAsset(w http.ResponseWriter, r *http.Request, name
 	switch filepath.Ext(name) {
 	case ".m3u8":
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		manifest, readErr := io.ReadAll(file)
+		if readErr != nil {
+			fail(w, http.StatusNotFound, "playback_asset_not_found")
+			return
+		}
+		// Native HLS otherwise defaults to the sliding playlist's live edge,
+		// downloading later fragments before seeking back to the session start.
+		manifest = bytes.Replace(manifest, []byte("#EXTM3U\n"), []byte("#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"), 1)
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(manifest)
+		return
 	case ".mp4", ".m4s":
 		w.Header().Set("Content-Type", "video/mp4")
 	}

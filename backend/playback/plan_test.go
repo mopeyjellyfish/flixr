@@ -226,6 +226,19 @@ func TestPlanForQualityUsesCopyOnlyWithCapEvidence(t *testing.T) {
 	}
 }
 
+func TestPlanForQualityAutoLowLeavesTransportHeadroom(t *testing.T) {
+	client := ClientCapabilities{VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}
+	quality := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 500_000, MaxWidth: 640, MaxHeight: 360}
+	media := MediaProperties{Container: "matroska", VideoCodec: "mpeg4", Width: 1280, Height: 720, VideoBitrate: 8_000_000, FrameRateMilli: 24000, AudioCodec: "aac", AudioBitrate: 128_000}
+	plan, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Kind != Transcode || plan.Width != 640 || plan.Height != 360 || plan.VideoBitrate != 500_000 || plan.AudioBitrate != 64_000 || plan.Bandwidth != 630_000 {
+		t.Fatalf("unexpected low Auto plan: %#v", plan)
+	}
+}
+
 func TestQualityRequestRejectsUnboundedOrMismatchedLimits(t *testing.T) {
 	for _, quality := range []QualityRequest{
 		{Mode: "fast", MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480},

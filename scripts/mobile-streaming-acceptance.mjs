@@ -6,6 +6,10 @@ const baseURL = process.env.FLIXR_TEST_BASE;
 const container = process.env.FLIXR_TEST_CONTAINER;
 const output = process.env.FLIXR_TEST_OUTPUT;
 if (!baseURL || !container || !output) throw new Error('The mobile acceptance environment is incomplete');
+const initialMbps = Number(process.env.FLIXR_TEST_NETWORK_MBPS ?? 2);
+const dipMbps = Number(process.env.FLIXR_TEST_DIP_MBPS ?? 1);
+const dipStart = Number(process.env.FLIXR_TEST_DIP_START ?? 20);
+const dipEnd = Number(process.env.FLIXR_TEST_DIP_END ?? 35);
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
@@ -16,6 +20,7 @@ const result = {
   plans: [],
   samples: [],
   errors: [],
+  network: { initial_mbps: initialMbps, dip_mbps: dipMbps, dip_start_second: dipStart, dip_end_second: dipEnd, latency_ms: 100 },
 };
 const post = async (path, data) => {
   const response = await page.request.post(`/api/v1/${path}`, { data, headers: { origin: baseURL } });
@@ -65,7 +70,7 @@ try {
   const cdp = await context.newCDPSession(page);
   await cdp.send('Network.enable');
   const network = (mbps) => cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 100, downloadThroughput: mbps * 1_000_000 / 8, uploadThroughput: 1_000_000 / 8 });
-  await network(2);
+  await network(initialMbps);
   await page.addInitScript(() => {
     window.__mobileEvents = [];
     for (const event of ['waiting', 'playing']) document.addEventListener(event, ({ target }) => {
@@ -82,8 +87,8 @@ try {
 
   const observed = Date.now();
   for (let second = 0; second < 70; second += 1) {
-    if (second === 20) await network(1);
-    if (second === 35) await network(2);
+    if (second === dipStart) await network(dipMbps);
+    if (second === dipEnd) await network(initialMbps);
     result.samples.push(await page.locator('video').evaluate((video) => ({
       time: video.currentTime,
       paused: video.paused,

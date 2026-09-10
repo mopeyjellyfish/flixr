@@ -209,7 +209,7 @@ func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	request.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" || !bytes.Contains(response.Body.Bytes(), []byte(`CODECS="avc1.640028,mp4a.40.2"`)) || !bytes.Contains(response.Body.Bytes(), []byte("index.m3u8")) {
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" || !bytes.Contains(response.Body.Bytes(), []byte(`CODECS="avc1.640028,mp4a.40.2"`)) || !bytes.Contains(response.Body.Bytes(), []byte("#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")) || !bytes.Contains(response.Body.Bytes(), []byte("index.m3u8")) {
 		t.Fatalf("manifest = %d: %s", response.Code, response.Body.String())
 	}
 	for _, asset := range []struct{ name, contentType string }{{"index.m3u8", "application/vnd.apple.mpegurl"}, {"init.mp4", "video/mp4"}, {"segment-000001.m4s", "video/mp4"}} {

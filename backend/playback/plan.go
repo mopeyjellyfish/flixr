@@ -46,6 +46,7 @@ func (quality QualityRequest) Normalized() (QualityRequest, error) {
 		return quality, nil
 	case QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720},
 		QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480},
+		QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 500_000, MaxWidth: 640, MaxHeight: 360},
 		QualityRequest{Mode: QualityDataSaver, MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480}:
 		return quality, nil
 	default:
@@ -219,9 +220,7 @@ func compatibilityPlan(media MediaProperties, quality QualityRequest) Plan {
 	if quality.Mode != QualityOriginal {
 		width, height = fitDimensions(media.Width, media.Height, quality.MaxWidth, quality.MaxHeight)
 		videoBitrate = min(videoBitrate, quality.MaxVideoBitrate)
-		if quality.MaxVideoBitrate == 1_000_000 {
-			audioBitrate = 96_000
-		}
+		audioBitrate = qualityAudioBitrate(quality)
 	}
 	plan := Plan{Kind: Transcode, Container: "fmp4-hls", VideoCodec: "h264", VideoProfile: "High", VideoLevel: 40, Width: width, Height: height, VideoBitrate: videoBitrate, FrameRateMilli: compatibilityMaxFrameRate, BitDepth: 8, AudioStreamIndex: media.AudioStreamIndex, AudioSourceStreamIndex: media.AudioSourceStreamIndex, AudioExternal: media.AudioExternal, AudioSelected: media.AudioSelected, Description: "Bounded H.264/AAC compatibility stream"}
 	applyQualityIntent(&plan, quality)
@@ -252,6 +251,9 @@ func sourceWithinQuality(media MediaProperties, quality QualityRequest) bool {
 }
 
 func qualityAudioBitrate(quality QualityRequest) int64 {
+	if quality.MaxVideoBitrate == 500_000 {
+		return 64_000
+	}
 	if quality.MaxVideoBitrate == 1_000_000 {
 		return 96_000
 	}
