@@ -53,8 +53,8 @@ it('ramps the conservative startup tier after measured fast-link headroom', () =
 
 it('uses sustained buffered headroom for native HLS without fragment telemetry', () => {
   const policy = new AdaptiveQualityPolicy('saver');
-  for (const now of [1_000, 11_000, 21_000]) expect(policy.buffer(15, true, now)).toBe(false);
-  expect(policy.buffer(15, true, 31_000)).toBe(true);
+  for (const [now, buffer] of [[1_000, 8.2], [11_000, 11.8], [21_000, 9.1]]) expect(policy.buffer(buffer, true, now)).toBe(false);
+  expect(policy.buffer(10.4, true, 31_000)).toBe(true);
   expect(policy.proposedTier).toBe('balanced');
 
   const interrupted = new AdaptiveQualityPolicy('saver');
@@ -64,6 +64,14 @@ it('uses sustained buffered headroom for native HLS without fragment telemetry',
 
   interrupted.stall(40_000);
   for (const now of [50_000, 60_000, 70_000, 80_000]) expect(interrupted.buffer(15, true, now)).toBe(false);
+
+  const recovered = new AdaptiveQualityPolicy('saver');
+  recovered.stall(1_000);
+  expect(recovered.stall(8_000)).toBe(true);
+  recovered.commit('low', 8_000);
+  for (let now = 60_000; now <= 180_000; now += 10_000) expect(recovered.buffer(10, true, now)).toBe(false);
+  expect(recovered.buffer(10, true, 190_000)).toBe(true);
+  expect(recovered.proposedTier).toBe('saver');
 });
 
 it('reduces after one prolonged stall and on measured insufficient throughput', () => {

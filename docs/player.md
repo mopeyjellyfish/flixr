@@ -19,7 +19,7 @@ starts at a transport-safe 360p ceiling in browsers with Media Source or Managed
 Media Source, then raises the ceiling to 480p and 720p after measured throughput
 shows enough headroom. Repeated or prolonged buffering lowers it one step. A
 native-only HLS browser starts at 480p because it does not expose fragment
-throughput; thirty seconds of uninterrupted playback with at least twelve
+throughput; thirty seconds of uninterrupted playback with at least eight
 seconds buffered can raise it, while buffering can lower it to 360p. Data saver
 uses the 480p ceiling. Original uses a compatible source or stream copy when
 possible. The settings menu shows the actual resolution and video bitrate

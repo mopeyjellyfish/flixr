@@ -60,13 +60,13 @@ export class AdaptiveQualityPolicy {
   playing(): void { this.stalledAt = undefined; }
 
   buffer(bufferSeconds: number, playing: boolean, now: number): boolean {
-    if (!playing || bufferSeconds < 12 || this.tier === 'balanced' || (this.lastStallAt !== undefined && now - this.lastStallAt < 30_000) || !this.outsideCooldown(now)) {
+    if (!playing || bufferSeconds < 8 || this.tier === 'balanced' || (this.lastStallAt !== undefined && now - this.lastStallAt < 30_000) || !this.outsideCooldown(now)) {
       this.bufferHeadroom = undefined;
       return false;
     }
     if (!this.bufferHeadroom || now - this.bufferHeadroom.last > 15_000) this.bufferHeadroom = { since: now, last: now, samples: 1 };
     else { this.bufferHeadroom.last = now; this.bufferHeadroom.samples += 1; }
-    return this.bufferHeadroom.samples >= 4 && now - this.bufferHeadroom.since >= 30_000
+    return now >= this.recoveryAfter && this.bufferHeadroom.samples >= 4 && now - this.bufferHeadroom.since >= 30_000
       ? this.propose(this.higherTier())
       : false;
   }
