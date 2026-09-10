@@ -38,6 +38,7 @@ export class AdaptiveQualityPolicy {
   private stalledAt?: number;
   private changedAt = 0;
   private rates: Array<{ now: number; bitsPerSecond: number }> = [];
+  private recoveryHeadroom?: { since: number; last: number; samples: number };
 
   stall(now: number): boolean {
     if (this.stalledAt === undefined) this.stalledAt = now;
@@ -63,9 +64,18 @@ export class AdaptiveQualityPolicy {
       const low = this.rates.filter((sample) => sample.bitsPerSecond < 2_900_000);
       if (low.length >= 5 && now - low[0].now >= 8_000 && this.change('saver', now)) return 'down';
     }
-    if (this.tier === 'saver' && now - this.changedAt >= 180_000) {
-      const high = this.rates.filter((sample) => sample.bitsPerSecond >= 3_900_000);
-      if (high.length >= 4 && now - high[0].now >= 60_000 && this.change('balanced', now)) return 'up';
+    if (this.tier === 'saver') {
+      if (bitsPerSecond < 3_900_000) {
+        this.recoveryHeadroom = undefined;
+        return undefined;
+      }
+      if (!this.recoveryHeadroom || now - this.recoveryHeadroom.last > 30_000) {
+        this.recoveryHeadroom = { since: now, last: now, samples: 1 };
+      } else {
+        this.recoveryHeadroom.last = now;
+        this.recoveryHeadroom.samples += 1;
+      }
+      if (now - this.changedAt >= 180_000 && this.recoveryHeadroom.samples >= 4 && now - this.recoveryHeadroom.since >= 60_000 && this.change('balanced', now)) return 'up';
     }
     return undefined;
   }
@@ -79,6 +89,7 @@ export class AdaptiveQualityPolicy {
     this.stalls = [];
     this.stalledAt = undefined;
     this.rates = [];
+    this.recoveryHeadroom = undefined;
     return true;
   }
 }

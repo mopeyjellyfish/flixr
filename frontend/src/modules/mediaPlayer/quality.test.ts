@@ -30,6 +30,16 @@ it('requires sustained stalls, then applies cooldown and stable recovery hystere
   expect(policy.stall(320_000)).toBe(true);
 });
 
+it('recovers after sustained headroom sampled at irregular fragment times', () => {
+  const policy = new AdaptiveQualityPolicy();
+  policy.stall(1_000);
+  expect(policy.stall(8_000)).toBe(true);
+  for (const now of [190_000, 211_000, 232_000]) {
+    expect(policy.throughput(5_000_000, 12, now)).toBeUndefined();
+  }
+  expect(policy.throughput(5_000_000, 12, 252_000)).toBe('up');
+});
+
 it('reduces after one prolonged stall and on measured insufficient throughput', () => {
   const prolonged = new AdaptiveQualityPolicy();
   expect(prolonged.stall(1_000)).toBe(false);

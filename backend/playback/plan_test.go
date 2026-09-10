@@ -237,3 +237,16 @@ func TestQualityRequestRejectsUnboundedOrMismatchedLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestOriginalKeepsCompatibleHighResolutionHDRDirectPlayback(t *testing.T) {
+	media := MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", Width: 3840, Height: 2160, VideoBitrate: 20_000_000, FrameRateMilli: 60000, BitDepth: 10, HDR: "smpte2084", AudioCodec: "aac", AudioChannels: 2, AudioBitrate: 128_000}
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, VideoProfiles: []string{"High"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, SupportsTranscode: true, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRateMilli: 60000, MaxBitDepth: 10, MaxAudioChannels: 2, HDR: []string{"smpte2084"}}
+	plan, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, QualityRequest{Mode: QualityOriginal})
+	if err != nil || plan.Kind != Direct {
+		t.Fatalf("compatible original plan = %#v, err=%v", plan, err)
+	}
+	auto := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720}
+	if _, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, auto); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("capped HDR error=%v, want unsupported so the client can offer explicit Original", err)
+	}
+}
