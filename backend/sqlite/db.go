@@ -37,11 +37,20 @@ var ErrIncompatibleSchema = errors.New("database schema is not supported")
 // not recognize. Starting a newer Flixr version or restoring a compatible
 // pre-upgrade backup is safe; attempting to downgrade the schema in place is not.
 type SchemaCompatibilityError struct {
-	FoundVersion     int
+	// FoundVersion is the unknown applied migration, or zero when migration
+	// history is absent from a database that already contains user objects.
+	FoundVersion int
+	// SupportedVersion is the latest migration embedded in this binary.
 	SupportedVersion int
+	// MissingMigrationHistory distinguishes an untracked nonempty database from
+	// an unsupported applied migration.
+	MissingMigrationHistory bool
 }
 
 func (e *SchemaCompatibilityError) Error() string {
+	if e.MissingMigrationHistory {
+		return fmt.Sprintf("database has user schema objects but no Flixr migration history; this Flixr binary supports empty databases and embedded migrations through %d; choose an empty data directory or stop Flixr and restore a compatible backup", e.SupportedVersion)
+	}
 	return fmt.Sprintf("database contains unsupported schema migration %d; this Flixr binary supports new databases and embedded migrations through %d; update Flixr or stop it and restore a compatible backup created before the unsupported upgrade", e.FoundVersion, e.SupportedVersion)
 }
 
@@ -272,6 +281,19 @@ func applyMigrations(ctx context.Context, db *sql.DB, source fs.FS, files []migr
 			return fmt.Errorf("inspect applied schema migrations: %w", rowsErr)
 		}
 		rows.Close()
+	} else {
+		var userObject string
+		err = tx.QueryRowContext(ctx, `SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1`).Scan(&userObject)
+		if err == nil {
+			return &SchemaCompatibilityError{
+				FoundVersion:            0,
+				SupportedVersion:        supportedVersion,
+				MissingMigrationHistory: true,
+			}
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("inspect database schema: %w", err)
+		}
 	}
 	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"); err != nil {
 		return err
