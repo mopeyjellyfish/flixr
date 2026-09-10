@@ -138,29 +138,36 @@ func (c *Catalog) refreshSourceProof(ctx context.Context, id string) error {
 // OpenSource refuses a source change instead of silently changing the media for
 // an admitted session. os.Root confines every reopen, including symlink races.
 func (c *Catalog) OpenSource(id, key string) (*os.File, error) {
+	x, ok := c.playbackSourceForKey(id, key)
+	return c.openSourceItemChecked(x, ok, key)
+}
+
+// playbackSourceForKey resolves the exact physical member admitted for a
+// logical title. Callers still validate their independently pinned sidecar.
+func (c *Catalog) playbackSourceForKey(id, key string) (Item, bool) {
 	c.mu.RLock()
 	x, ok := c.playbackSource(id)
 	c.mu.RUnlock()
-	if ok && key != "" {
-		root, rootErr := c.sourceRoot(x)
-		if rootErr == nil {
-			x.sourceRoot = root
-		}
-		if rootErr != nil || x.SourceKey() != key {
-			candidates, err := c.groupedPhysicalSources(id)
-			if err != nil {
-				return nil, os.ErrNotExist
-			}
-			ok = false
-			for _, candidate := range candidates {
-				if candidate.SourceKey() == key {
-					x, ok = candidate.Item, true
-					break
-				}
-			}
+	if !ok || key == "" {
+		return x, ok
+	}
+	root, rootErr := c.sourceRoot(x)
+	if rootErr == nil {
+		x.sourceRoot = root
+	}
+	if rootErr == nil && x.SourceKey() == key {
+		return x, true
+	}
+	candidates, err := c.groupedPhysicalSources(id)
+	if err != nil {
+		return Item{}, false
+	}
+	for _, candidate := range candidates {
+		if candidate.SourceKey() == key {
+			return candidate.Item, true
 		}
 	}
-	return c.openSourceItemChecked(x, ok, key)
+	return Item{}, false
 }
 
 func (c *Catalog) openSourceItem(x Item) (*os.File, error) {

@@ -171,8 +171,7 @@ func (c *Catalog) OpenAudioSource(id, sourceKey string, selectionIndex int, exte
 	if !external {
 		return c.OpenSource(id, sourceKey)
 	}
-	c.mu.RLock()
-	item, ok := c.playbackSource(id)
+	item, ok := c.playbackSourceForKey(id, sourceKey)
 	var relativePath string
 	for _, track := range item.Audio {
 		if track.External && track.Index == selectionIndex {
@@ -180,7 +179,6 @@ func (c *Catalog) OpenAudioSource(id, sourceKey string, selectionIndex int, exte
 			break
 		}
 	}
-	c.mu.RUnlock()
 	rootPath, err := c.sourceRoot(item)
 	if err != nil {
 		return nil, os.ErrNotExist

@@ -28,6 +28,14 @@ func planRank(kind playback.Kind) int {
 	}
 }
 
+func versionCapabilities(body playbackPlanRequest, versionID string) (playback.ClientCapabilities, bool) {
+	if body.VersionCapabilities == nil {
+		return body.Capabilities, true
+	}
+	capabilities, ok := body.VersionCapabilities[versionID]
+	return capabilities, ok
+}
+
 func compatibleAlternatives(choices []catalog.PlaybackVersion, requested string, body playbackPlanRequest, preferredLanguage string, readiness playback.ServerReadiness) []catalog.MediaVersion {
 	out, seen := []catalog.MediaVersion{}, map[string]bool{}
 	for _, choice := range choices {
@@ -38,7 +46,11 @@ func compatibleAlternatives(choices []catalog.PlaybackVersion, requested string,
 		if body.AudioStreamIndex != nil && !hasAudio {
 			continue
 		}
-		if _, err := playback.PlanForQuality(mediaProperties(choice.Item, track, hasAudio), body.Capabilities, readiness, body.Quality); err != nil {
+		capabilities, measured := versionCapabilities(body, choice.Version.ID)
+		if !measured {
+			continue
+		}
+		if _, err := playback.PlanForQuality(mediaProperties(choice.Item, track, hasAudio), capabilities, readiness, body.Quality); err != nil {
 			continue
 		}
 		choice.Version.Selected = false
@@ -70,6 +82,7 @@ func (s *Server) choosePlaybackVersion(r *http.Request, body playbackPlanRequest
 	found, available := false, false
 	best, hasBest := chosenPlaybackVersion{}, false
 	var planningErr error
+	missingMeasurement := false
 	for _, choice := range choices {
 		if explicit && choice.Version.ID != requested {
 			continue
@@ -79,11 +92,17 @@ func (s *Server) choosePlaybackVersion(r *http.Request, body playbackPlanRequest
 			continue
 		}
 		available = true
+		capabilities, measured := versionCapabilities(body, choice.Version.ID)
+		if !measured {
+			planningErr = playback.ErrInvalidCapabilities
+			missingMeasurement = true
+			continue
+		}
 		track, hasAudio := selectedAudio(choice.Item.Audio, body.AudioStreamIndex, body.AudioExternal, preferredLanguage)
 		if body.AudioStreamIndex != nil && !hasAudio {
 			continue
 		}
-		plan, planErr := playback.PlanForQuality(mediaProperties(choice.Item, track, hasAudio), body.Capabilities, readiness, body.Quality)
+		plan, planErr := playback.PlanForQuality(mediaProperties(choice.Item, track, hasAudio), capabilities, readiness, body.Quality)
 		if planErr != nil {
 			planningErr = planErr
 			continue
@@ -95,6 +114,9 @@ func (s *Server) choosePlaybackVersion(r *http.Request, body playbackPlanRequest
 	}
 	alternatives := compatibleAlternatives(choices, requested, body, preferredLanguage, readiness)
 	if !hasBest {
+		if missingMeasurement {
+			return chosenPlaybackVersion{}, "", alternatives, playback.ErrInvalidCapabilities
+		}
 		if explicit && (!found || !available) {
 			return chosenPlaybackVersion{}, "playback_version_unavailable", alternatives, catalog.ErrMediaVersionUnavailable
 		}
@@ -222,7 +244,13 @@ func (s *Server) mediaVersionMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func playbackMediaVersion(version catalog.MediaVersion) playback.MediaVersion {
-	return playback.MediaVersion{ID: version.ID, Label: version.Label, EditionID: version.EditionID, EditionLabel: version.EditionLabel, Width: version.Width, Height: version.Height, HDR: version.HDR, VideoCodec: version.VideoCodec, Container: version.Container, Bitrate: version.Bitrate, Selected: version.Selected, Available: version.Available}
+	audio := make([]playback.MediaAudioTrack, len(version.CapabilityInput.Audio))
+	for index, track := range version.CapabilityInput.Audio {
+		audio[index] = playback.MediaAudioTrack{Index: track.Index, Codec: track.Codec, Profile: track.Profile, Channels: track.Channels, SampleRate: track.SampleRate, Bitrate: track.Bitrate, Language: track.Language, Title: track.Title, Default: track.Default, Forced: track.Forced, External: track.External}
+	}
+	input := version.CapabilityInput
+	capabilityInput := playback.MediaCapabilityInput{Container: input.Container, VideoCodec: input.VideoCodec, VideoProfile: input.VideoProfile, VideoLevel: input.VideoLevel, Width: input.Width, Height: input.Height, Bitrate: input.Bitrate, FrameRateMilli: input.FrameRateMilli, BitDepth: input.BitDepth, HDR: input.HDR, Audio: audio}
+	return playback.MediaVersion{ID: version.ID, Label: version.Label, EditionID: version.EditionID, EditionLabel: version.EditionLabel, Width: version.Width, Height: version.Height, HDR: version.HDR, VideoCodec: version.VideoCodec, Container: version.Container, Bitrate: version.Bitrate, Selected: version.Selected, Available: version.Available, CapabilityInput: capabilityInput}
 }
 
 func (s *Server) detailVersions(r *http.Request, catalogID string) ([]catalog.MediaVersion, error) {
@@ -234,7 +262,26 @@ func (s *Server) detailVersions(r *http.Request, catalogID string) ([]catalog.Me
 	if !ok {
 		return nil, catalog.ErrAccessDenied
 	}
-	return s.catalog.MediaVersions(r.Context(), profile.ID, catalogID, policy)
+	versions, err := s.catalog.MediaVersions(r.Context(), profile.ID, catalogID, policy)
+	if err != nil {
+		return nil, err
+	}
+	preferredLanguage, err := s.house.AudioLanguage(profile.ID)
+	if err != nil {
+		return nil, err
+	}
+	return defaultVersionAudio(versions, preferredLanguage), nil
+}
+
+func defaultVersionAudio(versions []catalog.MediaVersion, preferredLanguage string) []catalog.MediaVersion {
+	for index := range versions {
+		track, found := selectedAudio(versions[index].CapabilityInput.Audio, nil, false, preferredLanguage)
+		versions[index].CapabilityInput.Audio = nil
+		if found {
+			versions[index].CapabilityInput.Audio = []catalog.AudioTrack{track}
+		}
+	}
+	return versions
 }
 
 type playbackVersionError struct {

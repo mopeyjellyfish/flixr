@@ -195,6 +195,71 @@ func (c *Catalog) physicalSources(id string) ([]physicalSource, error) {
 	return out, rows.Err()
 }
 
+func (c *Catalog) physicalSourcesMany(ctx context.Context, ids []string) (map[string][]physicalSource, error) {
+	out := make(map[string][]physicalSource, len(ids))
+	if c.db == nil || len(ids) == 0 {
+		return out, nil
+	}
+	if len(ids) > 500 {
+		for start := 0; start < len(ids); start += 500 {
+			end := min(start+500, len(ids))
+			batch, err := c.physicalSourcesMany(ctx, ids[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, sources := range batch {
+				out[id] = append(out[id], sources...)
+			}
+		}
+		return out, nil
+	}
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		args[index] = id
+	}
+	query := `SELECT f.catalog_id,f.location_id,x.library_id,x.root_path,f.root_kind,f.relative_path,f.full_digest,f.change_token,f.source_series_id,f.size_bytes,f.mtime_unix,f.selected,f.container,f.duration_ms,f.video_codec,f.video_profile,f.video_level,f.primary_video_stream_index,f.video_width,f.video_height,f.video_bitrate,f.video_frame_rate_milli,f.video_bit_depth,f.video_hdr,f.audio_json,f.subtitle_json,f.probe_revision FROM catalog_physical_files f JOIN library_locations x ON x.id=f.location_id WHERE f.catalog_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `) AND f.present=1`
+	rows, err := c.db.Reader().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load physical version sources: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var catalogID, audio, subtitles string
+		var selected int
+		x := physicalSource{}
+		if err := rows.Scan(&catalogID, &x.sourceLocationID, &x.libraryID, &x.sourceRoot, &x.rootKind, &x.path, &x.digest, &x.changeToken, &x.sourceSeriesID, &x.size, &x.mtime, &selected, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.VideoLevel, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.FrameRateMilli, &x.BitDepth, &x.HDR, &audio, &subtitles, &x.probeRevision); err != nil {
+			return nil, fmt.Errorf("scan physical version source: %w", err)
+		}
+		c.mu.RLock()
+		base, ok := c.items[catalogID]
+		c.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		physical := x.Item
+		x.Item = base
+		x.MediaProperties = physical.MediaProperties
+		x.sourceLocationID, x.sourceRoot, x.rootKind, x.path = physical.sourceLocationID, physical.sourceRoot, physical.rootKind, physical.path
+		x.digest, x.changeToken, x.sourceSeriesID = physical.digest, physical.changeToken, physical.sourceSeriesID
+		x.size, x.mtime, x.probeRevision = physical.size, physical.mtime, physical.probeRevision
+		embeddedAudio, embeddedSubtitles := []AudioTrack{}, []SubtitleTrack{}
+		if json.Unmarshal([]byte(audio), &embeddedAudio) != nil || json.Unmarshal([]byte(subtitles), &embeddedSubtitles) != nil {
+			return nil, errors.New("decode physical media properties")
+		}
+		x.Audio = append(embeddedAudio, externalAudioTracks(base.Audio)...)
+		x.Subtitles = append(embeddedSubtitles, externalSubtitleTracks(base.Subtitles)...)
+		x.selected = selected != 0
+		out[catalogID] = append(out[catalogID], x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for id := range out {
+		sort.SliceStable(out[id], func(i, j int) bool { return out[id][i].selected && !out[id][j].selected })
+	}
+	return out, nil
+}
+
 func withoutExternalAudio(tracks []AudioTrack) []AudioTrack {
 	out := tracks[:0:0]
 	for _, track := range tracks {

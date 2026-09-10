@@ -150,18 +150,47 @@ type Plan struct {
 }
 
 type MediaVersion struct {
-	ID           string `json:"id"`
-	Label        string `json:"label"`
-	EditionID    string `json:"edition_id"`
-	EditionLabel string `json:"edition_label,omitempty"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
-	HDR          string `json:"hdr,omitempty"`
-	VideoCodec   string `json:"video_codec,omitempty"`
-	Container    string `json:"container,omitempty"`
-	Bitrate      int64  `json:"bitrate,omitempty"`
-	Selected     bool   `json:"selected"`
-	Available    bool   `json:"available"`
+	ID              string               `json:"id"`
+	Label           string               `json:"label"`
+	EditionID       string               `json:"edition_id"`
+	EditionLabel    string               `json:"edition_label,omitempty"`
+	Width           int                  `json:"width,omitempty"`
+	Height          int                  `json:"height,omitempty"`
+	HDR             string               `json:"hdr,omitempty"`
+	VideoCodec      string               `json:"video_codec,omitempty"`
+	Container       string               `json:"container,omitempty"`
+	Bitrate         int64                `json:"bitrate,omitempty"`
+	Selected        bool                 `json:"selected"`
+	Available       bool                 `json:"available"`
+	CapabilityInput MediaCapabilityInput `json:"capability_input"`
+}
+
+type MediaCapabilityInput struct {
+	Container      string            `json:"container,omitempty"`
+	VideoCodec     string            `json:"video_codec,omitempty"`
+	VideoProfile   string            `json:"video_profile,omitempty"`
+	VideoLevel     int               `json:"video_level,omitempty"`
+	Width          int               `json:"width,omitempty"`
+	Height         int               `json:"height,omitempty"`
+	Bitrate        int64             `json:"bitrate,omitempty"`
+	FrameRateMilli int               `json:"frame_rate_milli,omitempty"`
+	BitDepth       int               `json:"bit_depth,omitempty"`
+	HDR            string            `json:"hdr,omitempty"`
+	Audio          []MediaAudioTrack `json:"audio,omitempty"`
+}
+
+type MediaAudioTrack struct {
+	Index      int    `json:"index"`
+	Codec      string `json:"codec"`
+	Profile    string `json:"profile,omitempty"`
+	Channels   int    `json:"channels,omitempty"`
+	SampleRate int    `json:"sample_rate,omitempty"`
+	Bitrate    int64  `json:"bitrate,omitempty"`
+	Language   string `json:"language,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Default    bool   `json:"default,omitempty"`
+	Forced     bool   `json:"forced,omitempty"`
+	External   bool   `json:"external,omitempty"`
 }
 
 // SubtitleSource is a path-free snapshot admitted with a playback session.
@@ -399,7 +428,11 @@ func codecCompatible(media MediaProperties, client ClientCapabilities) bool {
 	if !containsFold(client.VideoCodecs, media.VideoCodec) || media.AudioCodec != "" && !containsFold(client.AudioCodecs, media.AudioCodec) {
 		return false
 	}
-	return media.VideoProfile == "" || len(client.VideoProfiles) == 0 || containsFold(client.VideoProfiles, media.VideoProfile)
+	profile := media.VideoProfile
+	if strings.EqualFold(strings.TrimSpace(profile), "Constrained Baseline") {
+		profile = "Baseline"
+	}
+	return profile == "" || len(client.VideoProfiles) == 0 || containsFold(client.VideoProfiles, profile)
 }
 
 func fallbackCompatible(client ClientCapabilities) bool {

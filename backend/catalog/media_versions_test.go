@@ -2,9 +2,14 @@ package catalog
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/access"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
@@ -14,6 +19,14 @@ func versionCatalogFixture(t *testing.T) (*Catalog, *sqlite.DB, string, string) 
 	t.Helper()
 	data, films, tv := t.TempDir(), t.TempDir(), t.TempDir()
 	for name, body := range map[string]string{"Film 1080.mp4": "blue", "Film 4K.mp4": "red"} {
+		if err := os.WriteFile(filepath.Join(films, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		"Film 4K.fra.Commentary.m4a": "member-audio",
+		"Film 4K.eng.vtt":            "WEBVTT\n\n00:00.000 --> 00:01.000\nMember subtitle\n",
+	} {
 		if err := os.WriteFile(filepath.Join(films, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -39,6 +52,12 @@ func versionCatalogFixture(t *testing.T) (*Catalog, *sqlite.DB, string, string) 
 	}
 	c, err := OpenWithProber(db, ProberFunc(func(_ context.Context, file *os.File) (MediaProperties, error) {
 		info, _ := file.Stat()
+		switch filepath.Ext(info.Name()) {
+		case ".m4a":
+			return MediaProperties{Audio: []AudioTrack{{Index: 0, Codec: "aac", Language: "und"}}}, nil
+		case ".vtt":
+			return MediaProperties{Subtitles: []SubtitleTrack{{Index: 0, Codec: "webvtt", Language: "und"}}}, nil
+		}
 		width, height := 1920, 1080
 		if info.Name() == "Film 4K.mp4" {
 			width, height = 3840, 2160
@@ -50,6 +69,67 @@ func versionCatalogFixture(t *testing.T) (*Catalog, *sqlite.DB, string, string) 
 		t.Fatalf("scan fixture: %v", err)
 	}
 	return c, db, films, tv
+}
+
+func TestSeriesMediaVersionsBatchesLongSeriesWithoutReprobing(t *testing.T) {
+	data, tv := t.TempDir(), t.TempDir()
+	const seasons = 2
+	const episodesPerSeason = 10
+	for _, show := range []string{"Long A", "Long B"} {
+		for season := 1; season <= seasons; season++ {
+			for episode := 1; episode <= episodesPerSeason; episode++ {
+				relative := filepath.Join(show, fmt.Sprintf("Season %02d", season), fmt.Sprintf("%s S%02dE%02d.mp4", show, season, episode))
+				path := filepath.Join(tv, relative)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(relative), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	db, err := sqlite.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var probes atomic.Int64
+	c, err := OpenWithProber(db, ProberFunc(func(_ context.Context, _ *os.File) (MediaProperties, error) {
+		probes.Add(1)
+		return MediaProperties{Container: "mp4", VideoCodec: "h264", Width: 1920, Height: 1080}, nil
+	}))
+	if err != nil || c.SetRoots("", tv) != nil || c.Scan(t.Context(), 1) != nil {
+		t.Fatalf("scan long series: %v", err)
+	}
+	series, _, err := c.Browse("Long", 0, 10)
+	if err != nil || len(series) != 2 {
+		t.Fatalf("long series = %#v, %v", series, err)
+	}
+	group, err := c.CreateMediaVersionGroup(t.Context(), "series", series[0].ID, []string{series[1].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := probes.Load()
+	started := time.Now()
+	versions, err := c.SeriesMediaVersions(t.Context(), "", group.ID, access.Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("batched long-series lookup took %s", elapsed)
+	}
+	if probes.Load() != before {
+		t.Fatalf("detail lookup reprobed sources: %d -> %d", before, probes.Load())
+	}
+	if len(versions) != seasons*episodesPerSeason {
+		t.Fatalf("versioned episodes = %d", len(versions))
+	}
+	for episodeID, choices := range versions {
+		if len(choices) != 2 {
+			t.Fatalf("episode %s choices = %#v", episodeID, choices)
+		}
+	}
 }
 
 func TestMediaVersionGroupPreservesSeparateHistoryAcrossRestartAndUngroup(t *testing.T) {
@@ -82,6 +162,17 @@ func TestMediaVersionGroupPreservesSeparateHistoryAcrossRestartAndUngroup(t *tes
 	visible, _, err := c.Browse("Film", 0, 0)
 	if err != nil || len(visible) != 1 || visible[0].ID != canonical {
 		t.Fatalf("visible grouped films = %#v, %v", visible, err)
+	}
+	viewer, err := c.Viewer("viewer", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, section := range viewer.Sections {
+		for _, item := range section.Items {
+			if item.ID == member {
+				t.Fatalf("dormant member history appeared in %s", section.Name)
+			}
+		}
 	}
 	assertPositions := func() {
 		t.Helper()
@@ -123,6 +214,34 @@ func TestMediaVersionGroupPreservesSeparateHistoryAcrossRestartAndUngroup(t *tes
 	versions, err := reopened.PlaybackVersions(context.Background(), "viewer", canonical, access.Policy{})
 	if err != nil || len(versions) != 2 || versions[0].Item.Width == versions[1].Item.Width {
 		t.Fatalf("durable physical properties = %#v, %v", versions, err)
+	}
+	var memberSource PlaybackVersion
+	for _, version := range versions {
+		if version.Version.ID == member {
+			memberSource = version
+		}
+	}
+	if len(memberSource.Item.Audio) != 1 || !memberSource.Item.Audio[0].External || len(memberSource.Item.Subtitles) != 1 || !memberSource.Item.Subtitles[0].External {
+		t.Fatalf("member sidecars = audio %#v subtitles %#v", memberSource.Item.Audio, memberSource.Item.Subtitles)
+	}
+	audio, err := reopened.OpenAudioSource(canonical, memberSource.Item.SourceKey(), memberSource.Item.Audio[0].Index, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioBody, readErr := io.ReadAll(audio)
+	audio.Close()
+	if readErr != nil || string(audioBody) != "member-audio" {
+		t.Fatalf("member audio = %q, %v", audioBody, readErr)
+	}
+	subtitle := memberSource.Item.Subtitles[0]
+	subtitleFile, err := reopened.OpenSubtitleSource(canonical, memberSource.Item.SourceKey(), subtitle.SourceKey(), subtitle.Index, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subtitleBody, readErr := io.ReadAll(subtitleFile)
+	subtitleFile.Close()
+	if readErr != nil || !strings.Contains(string(subtitleBody), "Member subtitle") {
+		t.Fatalf("member subtitle = %q, %v", subtitleBody, readErr)
 	}
 	if _, err := reopened.UngroupMediaVersion(context.Background(), "film", canonical, member); err != nil {
 		t.Fatal(err)

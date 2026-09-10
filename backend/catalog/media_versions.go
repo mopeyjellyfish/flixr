@@ -18,18 +18,33 @@ var (
 )
 
 type MediaVersion struct {
-	ID           string `json:"id"`
-	Label        string `json:"label"`
-	EditionID    string `json:"edition_id"`
-	EditionLabel string `json:"edition_label,omitempty"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
-	HDR          string `json:"hdr,omitempty"`
-	VideoCodec   string `json:"video_codec,omitempty"`
-	Container    string `json:"container,omitempty"`
-	Bitrate      int64  `json:"bitrate,omitempty"`
-	Selected     bool   `json:"selected"`
-	Available    bool   `json:"available"`
+	ID              string               `json:"id"`
+	Label           string               `json:"label"`
+	EditionID       string               `json:"edition_id"`
+	EditionLabel    string               `json:"edition_label,omitempty"`
+	Width           int                  `json:"width,omitempty"`
+	Height          int                  `json:"height,omitempty"`
+	HDR             string               `json:"hdr,omitempty"`
+	VideoCodec      string               `json:"video_codec,omitempty"`
+	Container       string               `json:"container,omitempty"`
+	Bitrate         int64                `json:"bitrate,omitempty"`
+	Selected        bool                 `json:"selected"`
+	Available       bool                 `json:"available"`
+	CapabilityInput MediaCapabilityInput `json:"capability_input"`
+}
+
+type MediaCapabilityInput struct {
+	Container      string       `json:"container,omitempty"`
+	VideoCodec     string       `json:"video_codec,omitempty"`
+	VideoProfile   string       `json:"video_profile,omitempty"`
+	VideoLevel     int          `json:"video_level,omitempty"`
+	Width          int          `json:"width,omitempty"`
+	Height         int          `json:"height,omitempty"`
+	Bitrate        int64        `json:"bitrate,omitempty"`
+	FrameRateMilli int          `json:"frame_rate_milli,omitempty"`
+	BitDepth       int          `json:"bit_depth,omitempty"`
+	HDR            string       `json:"hdr,omitempty"`
+	Audio          []AudioTrack `json:"audio,omitempty"`
 }
 
 type MediaVersionGroup struct {
@@ -85,7 +100,8 @@ func versionLabel(item Item) string {
 }
 
 func mediaVersion(id, editionID, editionLabel string, item Item, available bool) MediaVersion {
-	return MediaVersion{ID: id, Label: versionLabel(item), EditionID: editionID, EditionLabel: editionLabel, Width: item.Width, Height: item.Height, HDR: item.HDR, VideoCodec: item.VideoCodec, Container: item.Container, Bitrate: item.Bitrate, Available: available}
+	input := MediaCapabilityInput{Container: item.Container, VideoCodec: item.VideoCodec, VideoProfile: item.VideoProfile, VideoLevel: item.VideoLevel, Width: item.Width, Height: item.Height, Bitrate: item.Bitrate, FrameRateMilli: item.FrameRateMilli, BitDepth: item.BitDepth, HDR: item.HDR, Audio: append([]AudioTrack(nil), item.Audio...)}
+	return MediaVersion{ID: id, Label: versionLabel(item), EditionID: editionID, EditionLabel: editionLabel, Width: item.Width, Height: item.Height, HDR: item.HDR, VideoCodec: item.VideoCodec, Container: item.Container, Bitrate: item.Bitrate, Available: available, CapabilityInput: input}
 }
 
 func (c *Catalog) editionLabel(kind, id string) string {
@@ -500,6 +516,84 @@ func (c *Catalog) MediaVersions(ctx context.Context, profileID, catalogID string
 		out = append(out, choice.Version)
 	}
 	return out, nil
+}
+
+// SeriesMediaVersions resolves every episode coordinate with each member series
+// loaded once. It deliberately uses persisted presence for detail rendering;
+// playback admission performs the confined reopen and current-file checks.
+func (c *Catalog) SeriesMediaVersions(ctx context.Context, profileID, seriesID string, policy access.Policy) (map[string][]MediaVersion, error) {
+	canonicalSeries, ok := c.Series(seriesID)
+	if !ok {
+		return nil, ErrCatalogNotFound
+	}
+	canonicalID, err := c.canonicalVersionID("series", seriesID)
+	if err != nil || canonicalID != seriesID {
+		return nil, ErrCatalogNotFound
+	}
+	anchors, err := c.groupMemberIDs("series", canonicalID)
+	if err != nil {
+		return nil, err
+	}
+	preference := ""
+	if c.db != nil {
+		_ = c.db.QueryRow(`SELECT version_id FROM profile_media_version_preferences WHERE profile_id=? AND kind='series' AND catalog_id=?`, profileID, canonicalID).Scan(&preference)
+	}
+	coordinates := make(map[string]map[string]Item, len(anchors))
+	sourceIDs := []string{}
+	for _, anchorID := range anchors {
+		member, found := c.Series(anchorID)
+		if !found {
+			continue
+		}
+		mapped := map[string]Item{}
+		for _, season := range member.Seasons {
+			for _, episode := range season.Episodes {
+				mapped[fmt.Sprintf("%d/%d", episode.Season, episode.Episode)] = episode
+				sourceIDs = append(sourceIDs, episode.ID)
+			}
+		}
+		coordinates[anchorID] = mapped
+	}
+	physicalByItem, err := c.physicalSourcesMany(ctx, sourceIDs)
+	if err != nil {
+		return nil, err
+	}
+	editionLabel := c.editionLabel("series", canonicalID)
+	out := make(map[string][]MediaVersion)
+	for _, season := range canonicalSeries.Seasons {
+		for _, logical := range season.Episodes {
+			versions, indexes := []MediaVersion{}, map[string]int{}
+			coordinate := fmt.Sprintf("%d/%d", logical.Season, logical.Episode)
+			for _, anchorID := range anchors {
+				source, found := coordinates[anchorID][coordinate]
+				if !found {
+					continue
+				}
+				sources := physicalByItem[source.ID]
+				if len(sources) == 0 {
+					sources = []physicalSource{{Item: source}}
+				}
+				for _, physical := range sources {
+					if policy.Restricted() {
+						content, found, contentErr := c.AccessContentForItem(source.ID)
+						if contentErr != nil || !found || !policy.Allows(content) || len(policy.LibraryIDs) > 0 && !containsString(policy.LibraryIDs, physical.libraryID) {
+							continue
+						}
+					}
+					version := mediaVersion(anchorID, canonicalID, editionLabel, physical.Item, physical.Playable)
+					version.Selected = anchorID == preference
+					if index, exists := indexes[anchorID]; exists {
+						versions[index].Available = versions[index].Available || version.Available
+						continue
+					}
+					indexes[anchorID] = len(versions)
+					versions = append(versions, version)
+				}
+			}
+			out[logical.ID] = versions
+		}
+	}
+	return out, ctx.Err()
 }
 
 func containsString(values []string, value string) bool {

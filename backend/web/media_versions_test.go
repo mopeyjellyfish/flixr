@@ -78,6 +78,10 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if created.Code != http.StatusCreated || bytes.Contains(created.Body.Bytes(), []byte(films)) || bytes.Contains(created.Body.Bytes(), []byte("relative_path")) {
 		t.Fatalf("owner group = %d %s", created.Code, created.Body.String())
 	}
+	viewerCatalog := request(http.MethodGet, "/api/v1/catalog/view?media=all", "", viewer)
+	if viewerCatalog.Code != http.StatusOK || bytes.Contains(viewerCatalog.Body.Bytes(), []byte(fmt.Sprintf(`"id":%q`, member.ID))) {
+		t.Fatalf("viewer catalog exposed grouped member = %d %s", viewerCatalog.Code, viewerCatalog.Body.String())
+	}
 	detail := request(http.MethodGet, "/api/v1/catalog/films/"+canonical.ID, "", viewer)
 	if detail.Code != http.StatusOK {
 		t.Fatalf("detail = %d %s", detail.Code, detail.Body.String())
@@ -86,13 +90,15 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if err := json.Unmarshal(detail.Body.Bytes(), &item); err != nil || len(item.Versions) != 2 {
 		t.Fatalf("detail versions = %#v, %v", item.Versions, err)
 	}
-	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true,"max_width":1920,"max_height":1080}`
-	auto := request(http.MethodPost, "/api/v1/playback/plans", `{"catalog_id":"`+canonical.ID+`",`+capabilities+`}`, viewer)
+	h264Capabilities := `{"containers":["mp4"],"video_codecs":["h264"],"audio_codecs":["aac"],"supports_direct":true,"max_width":1920,"max_height":1080}`
+	autoBody := fmt.Sprintf(`{"catalog_id":%q,"version_capabilities":{%q:%s,%q:%s}}`, canonical.ID, canonical.ID, h264Capabilities, member.ID, h264Capabilities)
+	auto := request(http.MethodPost, "/api/v1/playback/plans", autoBody, viewer)
 	if auto.Code != http.StatusCreated || !bytes.Contains(auto.Body.Bytes(), []byte(fmt.Sprintf(`"id":%q`, member.ID))) || !bytes.Contains(auto.Body.Bytes(), []byte(`"kind":"direct"`)) {
 		t.Fatalf("auto plan = %d %s", auto.Code, auto.Body.String())
 	}
 	var autoPlan struct {
-		MediaURL string `json:"media_url"`
+		MediaURL  string `json:"media_url"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(auto.Body.Bytes(), &autoPlan); err != nil {
 		t.Fatal(err)
@@ -101,7 +107,21 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if media.Code != http.StatusOK || media.Body.String() != "full-hd" {
 		t.Fatalf("pinned auto media = %d %q", media.Code, media.Body.String())
 	}
-	incompatible := request(http.MethodPost, "/api/v1/playback/plans", `{"catalog_id":"`+canonical.ID+`","version_id":"`+canonical.ID+`",`+capabilities+`}`, viewer)
+	qualityBody := fmt.Sprintf(`{"capabilities":%s,"quality":{"mode":"original"},"position_ms":123,"observation":1}`, h264Capabilities)
+	quality := request(http.MethodPost, "/api/v1/playback/sessions/"+autoPlan.SessionID+"/quality", qualityBody, viewer)
+	if quality.Code != http.StatusOK {
+		t.Fatalf("member quality = %d %s", quality.Code, quality.Body.String())
+	}
+	var canonicalPosition int64
+	if err := db.QueryRow(`SELECT position_ms FROM progress WHERE profile_id=? AND catalog_id=?`, profile.ID, canonical.ID).Scan(&canonicalPosition); err != nil || canonicalPosition != 123 {
+		t.Fatalf("canonical progress = %d, %v", canonicalPosition, err)
+	}
+	var memberProgress int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM progress WHERE profile_id=? AND catalog_id=?`, profile.ID, member.ID).Scan(&memberProgress); err != nil || memberProgress != 0 {
+		t.Fatalf("member progress rows = %d, %v", memberProgress, err)
+	}
+	incompatibleBody := fmt.Sprintf(`{"catalog_id":%q,"version_id":%q,"version_capabilities":{%q:%s}}`, canonical.ID, canonical.ID, canonical.ID, h264Capabilities)
+	incompatible := request(http.MethodPost, "/api/v1/playback/plans", incompatibleBody, viewer)
 	if incompatible.Code != http.StatusUnprocessableEntity || !bytes.Contains(incompatible.Body.Bytes(), []byte(`"code":"playback_version_incompatible"`)) || !bytes.Contains(incompatible.Body.Bytes(), []byte(`"alternatives"`)) {
 		t.Fatalf("incompatible plan = %d %s", incompatible.Code, incompatible.Body.String())
 	}
@@ -109,8 +129,13 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM profile_media_version_preferences`).Scan(&saved); err != nil || saved != 0 {
 		t.Fatalf("failed plan persisted preference: %d, %v", saved, err)
 	}
-	explicitCaps := `"capabilities":{"containers":["mp4"],"video_codecs":["hevc"],"audio_codecs":["aac"],"supports_direct":true,"max_width":3840,"max_height":2160}`
-	explicit := request(http.MethodPost, "/api/v1/playback/plans", `{"catalog_id":"`+canonical.ID+`","version_id":"`+canonical.ID+`",`+explicitCaps+`}`, viewer)
+	hevcCapabilities := `{"containers":["mp4"],"video_codecs":["hevc"],"audio_codecs":["aac"],"supports_direct":true,"max_width":3840,"max_height":2160}`
+	missingMeasurement := request(http.MethodPost, "/api/v1/playback/plans", fmt.Sprintf(`{"catalog_id":%q,"version_id":%q,"version_capabilities":{}}`, canonical.ID, canonical.ID), viewer)
+	if missingMeasurement.Code != http.StatusBadRequest {
+		t.Fatalf("missing version measurement = %d %s", missingMeasurement.Code, missingMeasurement.Body.String())
+	}
+	explicitBody := fmt.Sprintf(`{"catalog_id":%q,"version_id":%q,"version_capabilities":{%q:%s}}`, canonical.ID, canonical.ID, canonical.ID, hevcCapabilities)
+	explicit := request(http.MethodPost, "/api/v1/playback/plans", explicitBody, viewer)
 	if explicit.Code != http.StatusCreated || !bytes.Contains(explicit.Body.Bytes(), []byte(fmt.Sprintf(`"id":%q`, canonical.ID))) {
 		t.Fatalf("explicit plan = %d %s", explicit.Code, explicit.Body.String())
 	}

@@ -17,15 +17,16 @@ import (
 )
 
 type playbackPlanRequest struct {
-	CatalogID              string                      `json:"catalog_id"`
-	VersionID              string                      `json:"version_id,omitempty"`
-	ContinueWatchingIntent string                      `json:"continue_watching_intent,omitempty"`
-	Capabilities           playback.ClientCapabilities `json:"capabilities"`
-	Quality                playback.QualityRequest     `json:"quality"`
-	AudioStreamIndex       *int                        `json:"audio_stream_index"`
-	AudioExternal          bool                        `json:"audio_external,omitempty"`
-	SubtitleStreamIndex    *int                        `json:"subtitle_stream_index"`
-	SubtitleExternal       bool                        `json:"subtitle_external,omitempty"`
+	CatalogID              string                                 `json:"catalog_id"`
+	VersionID              string                                 `json:"version_id,omitempty"`
+	ContinueWatchingIntent string                                 `json:"continue_watching_intent,omitempty"`
+	Capabilities           playback.ClientCapabilities            `json:"capabilities"`
+	VersionCapabilities    map[string]playback.ClientCapabilities `json:"version_capabilities,omitempty"`
+	Quality                playback.QualityRequest                `json:"quality"`
+	AudioStreamIndex       *int                                   `json:"audio_stream_index"`
+	AudioExternal          bool                                   `json:"audio_external,omitempty"`
+	SubtitleStreamIndex    *int                                   `json:"subtitle_stream_index"`
+	SubtitleExternal       bool                                   `json:"subtitle_external,omitempty"`
 }
 
 type playbackAudioRequest struct {
@@ -724,7 +725,7 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 	profile, _ := s.house.Profile(s.session(r))
 	progressFailed := false
 	updated, err := s.playback.ReplaceContextWithCommit(r.Context(), session.ID, profile.ID, plan, body.PositionMS, func() error {
-		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
 		if progressErr != nil {
 			progressFailed = true
 			return progressErr
@@ -806,7 +807,7 @@ func (s *Server) playbackQuality(w http.ResponseWriter, r *http.Request) {
 	profile, _ := s.house.Profile(s.session(r))
 	progressFailed := false
 	commitProgress := func() error {
-		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, session.CatalogID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
 		if progressErr != nil {
 			progressFailed = true
 			return progressErr

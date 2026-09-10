@@ -628,6 +628,25 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "catalog_not_found")
 		return
 	}
+	profile, _ := s.house.Profile(s.session(r))
+	policy, policyOK := s.requestPolicy(r)
+	if !policyOK {
+		fail(w, http.StatusForbidden, "profile_required")
+		return
+	}
+	seriesVersions, err := s.catalog.SeriesMediaVersions(r.Context(), profile.ID, v.ID, policy)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	preferredLanguage, err := s.house.AudioLanguage(profile.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	for episodeID, versions := range seriesVersions {
+		seriesVersions[episodeID] = defaultVersionAudio(versions, preferredLanguage)
+	}
 	for seasonIndex := range v.Seasons {
 		episodes := v.Seasons[seasonIndex].Episodes[:0]
 		for _, episode := range v.Seasons[seasonIndex].Episodes {
@@ -637,12 +656,7 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if allowed {
-				versions, versionErr := s.detailVersions(r, episode.ID)
-				if versionErr != nil {
-					fail(w, http.StatusInternalServerError, "catalog_query_failed")
-					return
-				}
-				episode.Versions = versions
+				episode.Versions = seriesVersions[episode.ID]
 				episodes = append(episodes, episode)
 			}
 		}
