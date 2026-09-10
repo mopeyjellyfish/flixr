@@ -301,3 +301,69 @@ func TestMediaVersionGroupingRejectsEditionConflictAndIncompleteSeries(t *testin
 		t.Fatalf("episode version mapping = %#v, %v", versions, err)
 	}
 }
+
+func TestIdentityMergeRefusesActiveMediaVersionGroupsWithoutMutation(t *testing.T) {
+	c, db, _, _ := versionCatalogFixture(t)
+	defer db.Close()
+	films, _, err := c.Browse("Film", 0, 10)
+	if err != nil || len(films) != 2 {
+		t.Fatalf("films = %#v, %v", films, err)
+	}
+	if _, err := db.Exec(`INSERT INTO profiles(id,name) VALUES('viewer','Viewer')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO progress(profile_id,catalog_id,position_ms,generation) VALUES('viewer',?,111,1),('viewer',?,222,1)`, films[0].ID, films[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateMediaVersionGroup(t.Context(), "film", films[0].ID, []string{films[1].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path) VALUES('unrelated','film','Unrelated','Unrelated.mp4')`); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]string{{films[0].ID, "unrelated"}, {"unrelated", films[1].ID}, {films[0].ID, films[1].ID}} {
+		if _, err := c.MergeIdentity("film", pair[0], pair[1]); err != ErrIdentityConflict {
+			t.Fatalf("film identity merge %v = %v", pair, err)
+		}
+	}
+	series, _, err := c.Browse("Show", 0, 10)
+	if err != nil || len(series) != 3 {
+		t.Fatalf("series = %#v, %v", series, err)
+	}
+	if _, err := c.CreateMediaVersionGroup(t.Context(), "series", series[0].ID, []string{series[2].ID}); err != nil {
+		t.Fatal(err)
+	}
+	canonicalSeries, canonicalOK := c.Series(series[0].ID)
+	memberSeries, memberOK := c.Series(series[2].ID)
+	if !canonicalOK || !memberOK {
+		t.Fatal("grouped series missing")
+	}
+	canonicalEpisode := canonicalSeries.Seasons[0].Episodes[0].ID
+	memberEpisode := memberSeries.Seasons[0].Episodes[0].ID
+	if _, err := c.MergeIdentity("episode", canonicalEpisode, memberEpisode); err != ErrIdentityConflict {
+		t.Fatalf("episode identity merge = %v", err)
+	}
+	var merges, filmMemberships, seriesMemberships int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_identity_merges`).Scan(&merges); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_film_version_memberships`).Scan(&filmMemberships); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM catalog_series_version_memberships`).Scan(&seriesMemberships); err != nil {
+		t.Fatal(err)
+	}
+	if merges != 0 || filmMemberships != 1 || seriesMemberships != 1 {
+		t.Fatalf("state mutated: merges=%d film memberships=%d series memberships=%d", merges, filmMemberships, seriesMemberships)
+	}
+	for id, want := range map[string]int64{films[0].ID: 111, films[1].ID: 222} {
+		var position int64
+		if err := db.QueryRow(`SELECT position_ms FROM progress WHERE profile_id='viewer' AND catalog_id=?`, id).Scan(&position); err != nil || position != want {
+			t.Fatalf("progress %s = %d, %v; want %d", id, position, err, want)
+		}
+	}
+}

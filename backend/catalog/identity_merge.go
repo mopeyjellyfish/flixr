@@ -12,6 +12,8 @@ import (
 // progress wins when both exist; source-only progress is copied with provenance.
 // Current generations are fenced so a pre-repair player cannot overwrite it.
 func (c *Catalog) MergeIdentity(kind, survivorID, sourceID string) (IdentityMerge, error) {
+	c.mediaVersionsMu.Lock()
+	defer c.mediaVersionsMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.scanning {
@@ -38,6 +40,18 @@ func (c *Catalog) MergeIdentity(kind, survivorID, sourceID string) (IdentityMerg
 	}
 	defer tx.Rollback()
 	var count int
+	versionKind, versionSurvivor, versionSource := kind, survivorID, sourceID
+	if kind == "episode" {
+		versionKind, versionSurvivor, versionSource = "series", survivor.SeriesID, source.SeriesID
+	}
+	if table, canonical, member, valid := membershipTable(versionKind); valid {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE `+canonical+` IN (?,?) OR `+member+` IN (?,?)`, versionSurvivor, versionSource, versionSurvivor, versionSource).Scan(&count); err != nil {
+			return IdentityMerge{}, err
+		}
+		if count != 0 {
+			return IdentityMerge{}, ErrIdentityConflict
+		}
+	}
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM catalog_identity_merges WHERE state='active' AND (survivor_catalog_id IN (?,?) OR source_catalog_id IN (?,?))`, survivorID, sourceID, survivorID, sourceID).Scan(&count); err != nil {
 		return IdentityMerge{}, err
 	}
