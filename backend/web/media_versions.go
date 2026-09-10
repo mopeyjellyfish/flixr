@@ -70,7 +70,10 @@ func (s *Server) choosePlaybackVersion(r *http.Request, body playbackPlanRequest
 		return chosenPlaybackVersion{}, "", nil, err
 	}
 	requested := body.VersionID
-	if requested == "" {
+	explicitAuto := requested == "auto"
+	if explicitAuto {
+		requested = ""
+	} else if requested == "" {
 		for _, choice := range choices {
 			if choice.Version.Selected {
 				requested = choice.Version.ID
@@ -133,6 +136,8 @@ func (s *Server) choosePlaybackVersion(r *http.Request, body playbackPlanRequest
 	best.plan.VersionExplicit = explicit
 	if explicit {
 		best.version.Selected = true
+	} else if explicitAuto {
+		best.version.Selected = false
 	}
 	best.plan.Version = playbackMediaVersion(best.version)
 	return best, "", alternatives, nil

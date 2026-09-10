@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -317,6 +318,18 @@ func TestIdentityMergeRefusesActiveMediaVersionGroupsWithoutMutation(t *testing.
 	}
 	if _, err := c.CreateMediaVersionGroup(t.Context(), "film", films[0].ID, []string{films[1].ID}); err != nil {
 		t.Fatal(err)
+	}
+	if err := c.SavePlaybackVersion("viewer", films[0].ID, films[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := c.ClearPlaybackVersionContext(cancelled, "viewer", films[0].ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Auto reset = %v", err)
+	}
+	preference, err := c.PlaybackVersionPreference("viewer", films[0].ID)
+	if err != nil || preference != films[1].ID {
+		t.Fatalf("cancelled Auto changed preference = %q, %v", preference, err)
 	}
 	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path) VALUES('unrelated','film','Unrelated','Unrelated.mp4')`); err != nil {
 		t.Fatal(err)

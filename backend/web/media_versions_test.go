@@ -143,6 +143,25 @@ func TestMediaVersionOwnerAndPlaybackContracts(t *testing.T) {
 	if err := db.QueryRow(`SELECT version_id FROM profile_media_version_preferences WHERE profile_id=?`, profile.ID).Scan(&preference); err != nil || preference != canonical.ID {
 		t.Fatalf("saved preference = %q, %v", preference, err)
 	}
+	failedAuto := request(http.MethodPost, "/api/v1/playback/plans", fmt.Sprintf(`{"catalog_id":%q,"version_id":"auto","version_capabilities":{}}`, canonical.ID), viewer)
+	if failedAuto.Code != http.StatusBadRequest {
+		t.Fatalf("failed Auto reset = %d %s", failedAuto.Code, failedAuto.Body.String())
+	}
+	if err := db.QueryRow(`SELECT version_id FROM profile_media_version_preferences WHERE profile_id=?`, profile.ID).Scan(&preference); err != nil || preference != canonical.ID {
+		t.Fatalf("failed Auto changed preference = %q, %v", preference, err)
+	}
+	resetBody := fmt.Sprintf(`{"catalog_id":%q,"version_id":"auto","version_capabilities":{%q:%s,%q:%s}}`, canonical.ID, canonical.ID, h264Capabilities, member.ID, h264Capabilities)
+	reset := request(http.MethodPost, "/api/v1/playback/plans", resetBody, viewer)
+	if reset.Code != http.StatusCreated || !bytes.Contains(reset.Body.Bytes(), []byte(fmt.Sprintf(`"id":%q`, member.ID))) {
+		t.Fatalf("Auto reset plan = %d %s", reset.Code, reset.Body.String())
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM profile_media_version_preferences WHERE profile_id=?`, profile.ID).Scan(&saved); err != nil || saved != 0 {
+		t.Fatalf("Auto reset preference rows = %d, %v", saved, err)
+	}
+	omitted := request(http.MethodPost, "/api/v1/playback/plans", autoBody, viewer)
+	if omitted.Code != http.StatusCreated || !bytes.Contains(omitted.Body.Bytes(), []byte(fmt.Sprintf(`"id":%q`, member.ID))) {
+		t.Fatalf("omitted Auto plan = %d %s", omitted.Code, omitted.Body.String())
+	}
 	for _, event := range []household.ViewingEvent{
 		{CatalogID: canonical.ID, Title: "Canonical history", Kind: "film", Type: household.EventCompleted, Provenance: household.ProvenanceLocal},
 		{CatalogID: member.ID, Title: "Member history", Kind: "film", Type: household.EventCompleted, Provenance: household.ProvenanceLocal},

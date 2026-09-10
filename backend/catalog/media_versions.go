@@ -645,6 +645,22 @@ func (c *Catalog) PlaybackVersionPreference(profileID, catalogID string) (string
 	return versionID, err
 }
 
+func (c *Catalog) ClearPlaybackVersionContext(ctx context.Context, profileID, catalogID string) error {
+	if c.db == nil {
+		return nil
+	}
+	logical, ok := c.Item(catalogID)
+	if !ok {
+		return ErrCatalogNotFound
+	}
+	kind, canonicalID, _, err := c.versionAnchors(logical)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Writer().ExecContext(ctx, `DELETE FROM profile_media_version_preferences WHERE profile_id=? AND kind=? AND catalog_id=?`, profileID, kind, canonicalID)
+	return err
+}
+
 func (c *Catalog) PlaybackVersionSource(ctx context.Context, profileID, catalogID, versionID, sourceKey string, policy access.Policy) (Item, error) {
 	choices, err := c.PlaybackVersions(ctx, profileID, catalogID, policy)
 	if err != nil {

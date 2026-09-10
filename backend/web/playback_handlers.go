@@ -343,7 +343,13 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "playback_failed")
 		return
 	}
-	if body.VersionID != "" {
+	if body.VersionID == "auto" {
+		if err := s.catalog.ClearPlaybackVersionContext(r.Context(), profile.ID, body.CatalogID); err != nil {
+			s.playback.Stop(session.ID, profile.ID)
+			fail(w, http.StatusInternalServerError, "playback_failed")
+			return
+		}
+	} else if body.VersionID != "" {
 		if err := s.catalog.SavePlaybackVersionContext(r.Context(), profile.ID, body.CatalogID, chosen.version.ID); err != nil {
 			s.playback.Stop(session.ID, profile.ID)
 			fail(w, http.StatusInternalServerError, "playback_failed")

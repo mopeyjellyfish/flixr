@@ -53,7 +53,8 @@ the title, and the same version lineage is requested for the next episode. If a
 remembered choice is missing or cannot play on the current device, Flixr explains
 the problem and offers compatible alternatives; it does not silently substitute
 another file. Auto checks every available, authorized version and prefers a file
-the device can play directly before starting a conversion.
+the device can play directly before starting a conversion. Choosing Auto clears
+a remembered explicit version after the new playback session is admitted.
 
 Owners create version groups in **Server settings → Media versions**. Group only
 different encodings of the same cut. Give theatrical, extended, director's-cut
