@@ -108,6 +108,45 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   });
 });
 
+it('posts independently measured evidence for mixed source versions', async () => {
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+  vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+  const audio = [{ index: 1, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000 }];
+  const detail = { ...assessedItem, video_codec: 'hevc', width: 1920, height: 1080, versions: [
+    { id: 'source-hevc', label: '1080p · HEVC', edition_id: 'film-1', selected: false, available: true, capability_input: { container: 'mp4', video_codec: 'hevc', width: 1920, height: 1080, bitrate: 4_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio } },
+    { id: 'source-h264', label: '4K · H.264', edition_id: 'film-1', selected: false, available: true, capability_input: { container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 3840, height: 2160, bitrate: 12_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio } },
+  ] };
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(detail));
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      const session = `session-${planBodies.length}`;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: detail.versions[1], session_id: session, media_url: `/film-${planBodies.length}.mp4`, heartbeat_url: `/api/v1/playback/sessions/${session}/heartbeat`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/film-1.mp4'));
+
+  expect(planBodies[0].version_capabilities).toMatchObject({
+    'source-hevc': { supports_direct: false },
+    'source-h264': { supports_direct: true, max_width: 3840, max_height: 2160 },
+  });
+  expect(planBodies[0].capabilities).toMatchObject({ supports_direct: false });
+  expect(planBodies[0].capabilities).not.toHaveProperty('max_width');
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies[1].capabilities).toMatchObject({ supports_direct: true, max_width: 3840, max_height: 2160 });
+  expect(planBodies[1].version_capabilities).toEqual(planBodies[0].version_capabilities);
+});
+
 it('keeps an explicit source version through initial planning and lease recovery', async () => {
   const planBodies: Array<Record<string, unknown>> = [];
   let plans = 0;
@@ -553,34 +592,31 @@ it('times out ambiguous handoff requests, restores the retained source, and rele
   expect(handoffBodies).toEqual([true, true, false]);
 });
 
-it('does not launch quality preparation after Back wins a pending capability check', async () => {
+it('reuses the admitted source evidence for a quality change', async () => {
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
   let itemCalls = 0;
-  let qualityCalls = 0;
-  let resolveDetail: ((response: Response) => void) | undefined;
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  let qualityCapabilities: Record<string, unknown> | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const path = String(input);
     if (path.includes('/catalog/items/')) {
       itemCalls += 1;
-      if (itemCalls === 1) return new Response(JSON.stringify(assessedItem));
-      return new Promise<Response>((resolve) => { resolveDetail = resolve; });
+      return new Response(JSON.stringify(assessedItem));
     }
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'original', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
-    if (path.endsWith('/quality')) qualityCalls += 1;
+    if (path.endsWith('/quality')) {
+      qualityCapabilities = (JSON.parse(String(init?.body)) as { capabilities: Record<string, unknown> }).capabilities;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'quality', media_url: '/quality.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
     return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
   });
-  const onExit = vi.fn();
-  render(<Player catalogID="film-1" onExit={onExit} />);
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
   await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/film.mp4'));
   fireEvent.click(screen.getByText('Settings'));
   fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
-  await waitFor(() => expect(resolveDetail).toBeTypeOf('function'));
-  vi.useFakeTimers();
-  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
-  await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
-  expect(onExit).toHaveBeenCalledOnce();
-  await act(async () => { resolveDetail?.(new Response(JSON.stringify(assessedItem))); await Promise.resolve(); });
-  expect(qualityCalls).toBe(0);
+  await waitFor(() => expect(qualityCapabilities).toBeDefined());
+  expect(itemCalls).toBe(1);
+  expect(qualityCapabilities).toMatchObject({ max_width: 320, max_height: 180 });
 });
 
 it('discards a quality response that arrives after completion starts', async () => {

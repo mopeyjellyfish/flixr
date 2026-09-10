@@ -48,6 +48,7 @@ export type MediaVersion = {
   video_codec?: string;
   container?: string;
   bitrate?: number;
+  capability_input?: MediaCapabilityInput;
   selected: boolean;
   available: boolean;
 };
@@ -107,6 +108,8 @@ export type ApiErrorCode =
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type PlaybackQuality = { mode: 'auto' | 'data_saver' | 'original'; max_video_bitrate?: number; max_width?: number; max_height?: number };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
+export type MediaCapabilityInput = { container?: string; video_codec?: string; video_profile?: string; video_level?: number; width?: number; height?: number; bitrate?: number; frame_rate_milli?: number; bit_depth?: number; hdr?: string; audio?: AudioTrack[] };
+export type VersionCapabilities = Record<string, PlaybackCapabilities>;
 export type SubtitleTrack = { index: number; codec: string; language?: string; title?: string; default?: boolean; forced?: boolean; sdh?: boolean; external?: boolean };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean; width?: number; height?: number; video_bitrate?: number; audio_bitrate?: number; bandwidth?: number; quality_mode?: 'auto' | 'data_saver' | 'original' };

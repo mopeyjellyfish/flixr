@@ -2,11 +2,11 @@ import type Hls from 'hls.js';
 import type { AttachMediaSourceData } from 'hls.js';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type CatalogItem, type Episode, type MediaVersion, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
+import { ApiError, type CatalogItem, type Episode, type MediaCapabilityInput, type MediaVersion, type PlaybackCapabilities, type PlaybackPlan, type VersionCapabilities } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
-import { browserCapabilities } from './capabilities';
+import { browserCapabilities, browserVersionCapabilities } from './capabilities';
 import { PlayerControls, type Chapter } from './PlayerControls';
 import { AdaptiveQualityPolicy, initialAutoQualityTier, loadQualityPreference, qualityRequest, rememberAutoThroughput, saveQualityPreference, type AutoQualityTier, type QualityPreference } from './quality';
 import { retryableLazy } from './lazy';
@@ -219,6 +219,9 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
   const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
   const playerStatus = useRef(state.status);
   const versionIntent = useRef(versionID);
+  const admittedCapabilities = useRef<PlaybackCapabilities | undefined>(undefined);
+  const measuredVersionCapabilities = useRef<VersionCapabilities | undefined>(undefined);
+  const admittedCapabilityInput = useRef<MediaCapabilityInput | undefined>(undefined);
   const versionAccepted = useRef(onVersionAccepted);
   versionAccepted.current = onVersionAccepted;
   const versionProps = useRef({ catalogID, versionID });
@@ -541,8 +544,7 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
           let requestTimeout = 0;
           let lifecycleController: AbortController | undefined;
           try {
-            const detail = await api.item(catalogID);
-            const capabilities = await browserCapabilities(detail);
+            const capabilities = admittedCapabilities.current ?? await browserCapabilities(await api.item(catalogID));
             if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) {
               if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
               return;
@@ -736,9 +738,15 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
     try {
       const next = await recovery.current.run(async () => {
         if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
-        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)), 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current);
+        if (admittedCapabilities.current) return api.playbackPlan(catalogID, admittedCapabilities.current, 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, measuredVersionCapabilities.current);
+        const detail = await api.item(catalogID);
+        const evidence = await browserVersionCapabilities(detail, versionIntent.current);
+        measuredVersionCapabilities.current = evidence.versionCapabilities;
+        return api.playbackPlan(catalogID, evidence.capabilities, 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, evidence.versionCapabilities);
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
+      admittedCapabilities.current = next.version?.id ? measuredVersionCapabilities.current?.[next.version.id] ?? admittedCapabilities.current : admittedCapabilities.current;
+      admittedCapabilityInput.current = next.version?.capability_input ?? admittedCapabilityInput.current;
       observation.current = 0;
       autoStart.current = wasSeeking ? seekPlayingIntent.current : continuePlaying;
       if (wasSeeking && seekQueue.current.target !== undefined) {
@@ -807,6 +815,9 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
     setAudioLocked(false);
     setOriginalFallback(false);
     setVersionFallbacks([]);
+    admittedCapabilities.current = undefined;
+    measuredVersionCapabilities.current = undefined;
+    admittedCapabilityInput.current = undefined;
     setAutoplay({ kind: 'idle' });
     recoveryController.run(
       async () => {
@@ -816,14 +827,18 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
         // Keep HLS out of the main bundle while overlapping its lazy download
         // with capability assessment and rendition preparation on MSE browsers.
         if (supportsHlsMSE()) void loadHls();
-        const capabilities: PlaybackCapabilities = await browserCapabilities(detail);
+        const evidence = await browserVersionCapabilities(detail, versionIntent.current);
         if (!active) throw new Error('player unmounted');
-        return api.playbackPlan(catalogID, capabilities, continueWatchingIntent, qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current);
+        measuredVersionCapabilities.current = evidence.versionCapabilities;
+        admittedCapabilities.current = evidence.capabilities;
+        return api.playbackPlan(catalogID, evidence.capabilities, continueWatchingIntent, qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, evidence.versionCapabilities);
       },
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
     ).then(async (initial) => {
       if (!initial) return;
       if (!active) { void api.playbackStop(initial.session_id); return; }
+      admittedCapabilities.current = initial.version?.id ? measuredVersionCapabilities.current?.[initial.version.id] ?? admittedCapabilities.current : admittedCapabilities.current;
+      admittedCapabilityInput.current = initial.version?.capability_input;
       if (versionIntent.current && initial.version?.id === versionIntent.current) versionAccepted.current?.(initial.version.id);
       let plan = initial;
       playback.current = initial;
@@ -1256,13 +1271,18 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
       autoStart.current = playIntent.current;
       replacingSession.current = plan.session_id;
       try {
-        const item = await api.item(catalogID);
         const selected = plan.audio_tracks?.find((track) => track.index === streamIndex && Boolean(track.external) === (source === 'external'));
-        const capabilities = await browserCapabilities(selected ? { ...item, audio: [selected] } : item);
+        const fallbackItem = admittedCapabilityInput.current ? undefined : await api.item(catalogID);
+        const capabilityItem: CatalogItem = admittedCapabilityInput.current
+          ? { id: catalogID, title: '', kind: 'film', local_only: true, ...admittedCapabilityInput.current, ...(selected ? { audio: [selected] } : {}) }
+          : selected ? { ...fallbackItem!, audio: [selected] } : fallbackItem!;
+        const capabilities = await browserCapabilities(capabilityItem);
         if (finalizing.current || endedPlayback.current || version !== sourceVersion.current) return;
         const controller = new AbortController();
         sourceRequestController.current = controller;
         const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, capabilities, controller.signal);
+        admittedCapabilities.current = capabilities;
+        if (admittedCapabilityInput.current && selected) admittedCapabilityInput.current = { ...admittedCapabilityInput.current, audio: [selected] };
         if (sourceRequestController.current === controller) sourceRequestController.current = null;
         if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) {
           void api.playbackStop(updated.session_id).catch(() => undefined);

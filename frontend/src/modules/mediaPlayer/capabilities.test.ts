@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { CatalogItem } from '../../core/api';
-import { browserCapabilities } from './capabilities';
+import { browserCapabilities, browserVersionCapabilities } from './capabilities';
 
 const media: CatalogItem = {
 	id: 'film', title: 'Blue Horizon', kind: 'film', local_only: true,
@@ -34,6 +34,26 @@ it('assesses the exact H.264/AAC title separately for direct and fMP4 remux play
 		audio: { contentType: 'audio/mp4; codecs="mp4a.40.2"', channels: '2', bitrate: 2323, samplerate: 48000 },
 	});
 	expect(result).toMatchObject({ supports_direct: true, supports_remux: true, max_width: 320, max_audio_channels: 2 });
+});
+
+it('probes ffprobe Constrained Baseline H.264 as Baseline', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
+
+	await browserCapabilities({ ...media, video_profile: 'Constrained Baseline' });
+
+	expect(decodingInfo).toHaveBeenCalledWith(expect.objectContaining({ video: expect.objectContaining({ contentType: 'video/mp4; codecs="avc1.42e00c"' }) }));
+});
+
+it('requires mapped playback for an external default audio track', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+
+	const result = await browserCapabilities({ ...media, audio: [{ ...media.audio![0], external: true }] });
+
+	expect(result).toMatchObject({ supports_direct: false, supports_remux: true });
 });
 
 it('assesses the separately bounded H.264/AAC transcode output', async () => {
@@ -85,6 +105,33 @@ it('does not assess an output with dimensions the fixed encoder cannot produce',
 
 	expect(decodingInfo).not.toHaveBeenCalled();
 	expect(result.supports_transcode).toBe(false);
+});
+
+it('measures alternate sources independently without inheriting canonical limits', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+	const input = (video_codec: string, width: number, height: number) => ({ container: 'mp4', video_codec, video_profile: 'High', video_level: 40, width, height, bitrate: 8_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio: media.audio });
+
+	const result = await browserVersionCapabilities({ ...media, width: 1920, height: 1080, video_codec: 'hevc', versions: [
+		{ id: 'source-hevc', label: '1080p · HEVC', edition_id: 'film', selected: false, available: true, capability_input: input('hevc', 1920, 1080) },
+		{ id: 'source-h264', label: '4K · H.264', edition_id: 'film', selected: false, available: true, capability_input: input('h264', 3840, 2160) },
+	] });
+
+	expect(result.versionCapabilities?.['source-hevc']).toMatchObject({ supports_direct: false, max_width: undefined });
+	expect(result.versionCapabilities?.['source-h264']).toMatchObject({ supports_direct: true, max_width: 3840, max_height: 2160 });
+});
+
+it('measures an explicitly unavailable source alongside available fallback choices', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+	const input = { container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio: media.audio };
+	const result = await browserVersionCapabilities({ ...media, versions: [
+		{ id: 'missing', label: 'Missing', edition_id: 'film', selected: true, available: false, capability_input: input },
+		{ id: 'fallback', label: 'Fallback', edition_id: 'film', selected: false, available: true, capability_input: input },
+	] }, 'missing');
+
+	expect(Object.keys(result.versionCapabilities ?? {})).toEqual(['missing', 'fallback']);
 });
 
 it('assesses the rotated display geometry for a bounded portrait transcode', async () => {
