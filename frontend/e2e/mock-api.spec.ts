@@ -538,7 +538,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
     if (path.includes('/catalog/items/')) return { json: { ...film, id: path.split('/').at(-1) ?? film.id } };
     if (path.endsWith('/playback/plans')) {
       plans += 1;
-      return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: `session-${plans}`, media_url: 'data:video/mp4;base64,', heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/api/v1/playback/sessions/session-${plans}/seek`, stop_url: `/api/v1/playback/sessions/session-${plans}/stop`, resume_ms: plans > 1 ? 12_000 : 0, stream_offset_ms: 0, expires_at: 9999999999 } };
+      return { json: { plan: { kind: 'direct', description: 'Original media' }, session_id: `session-${plans}`, media_url: `data:video/mp4;base64,session-${plans}`, heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, seek_url: `/api/v1/playback/sessions/session-${plans}/seek`, stop_url: `/api/v1/playback/sessions/session-${plans}/stop`, resume_ms: plans > 1 ? 12_000 : 0, stream_offset_ms: 0, expires_at: 9999999999 } };
     }
     if (path.endsWith('/heartbeat')) {
       heartbeats += 1;
@@ -560,7 +560,7 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   await expect(firstVideo).toBeVisible();
   // The video element mounts before the playback-plan request finishes. Wait for
   // its source so this event exercises media buffering, not plan initialization.
-  await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
+  await expect(page.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,session-1');
   await firstVideo.dispatchEvent('waiting');
   await expect(page.locator('.player-loading')).toBeVisible();
   await expect(page.locator('.player-loading')).toHaveText('');
@@ -580,37 +580,47 @@ test('mocked playback heartbeat, buffering, cross-client resume, lease recovery,
   const secondClient = await context.newPage();
   observe(secondClient);
   await mock(secondClient, handler);
+  const activateMockedPlayback = async (session: number) => {
+    await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', `data:video/mp4;base64,session-${session}`);
+    return secondClient.locator('video').evaluate((video) => {
+      const media = video as HTMLVideoElement;
+      Object.defineProperty(media, 'readyState', { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA });
+      media.play = () => Promise.resolve();
+      media.dispatchEvent(new Event('loadedmetadata'));
+      media.dispatchEvent(new Event('canplay'));
+      media.dispatchEvent(new Event('playing'));
+      return media.currentTime;
+    });
+  };
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
-  await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
-  const resumedAt = await secondClient.locator('video').evaluate((video) => {
-    const media = video as HTMLVideoElement;
-    media.dispatchEvent(new Event('loadedmetadata'));
-    return media.currentTime;
-  });
+  const resumedAt = await activateMockedPlayback(2);
   expect(resumedAt).toBe(12);
   expired = true;
   const plansBeforeExpiry = plans;
   await secondClient.locator('video').dispatchEvent('pause');
   await expect.poll(() => plans).toBeGreaterThan(plansBeforeExpiry);
-  const recoveredFromExpiry = await secondClient.locator('video').evaluate((video) => {
-    const media = video as HTMLVideoElement;
-    media.dispatchEvent(new Event('loadedmetadata'));
-    return media.currentTime;
-  });
+  const recoveredFromExpiry = await activateMockedPlayback(plans);
   expect(recoveredFromExpiry).toBe(12);
   await expect(secondClient.getByRole('alert')).toHaveCount(0);
 
   expired = false;
+  const plansBeforeReload = plans;
   await secondClient.goto('/play/film-1');
   await expect(secondClient.locator('video')).toBeVisible();
-  await expect(secondClient.locator('html')).toHaveAttribute('data-mock-media-source', 'data:video/mp4;base64,');
+  await expect.poll(() => plans).toBeGreaterThan(plansBeforeReload);
+  await activateMockedPlayback(plans);
   interrupted = true;
   const plansBeforeInterruption = plans;
   await secondClient.locator('video').dispatchEvent('pause');
   await expect.poll(() => plans).toBeGreaterThan(plansBeforeInterruption);
+  const recoveredFromInterruption = await activateMockedPlayback(plans);
+  expect(recoveredFromInterruption).toBe(12);
   await expect(secondClient.getByRole('alert')).toHaveCount(0);
-  expect(errors.every((message) => message.includes('403') || message.includes('500'))).toBeTruthy();
+  expect(
+    errors.every((message) => message.includes('403') || message.includes('500')),
+    `unexpected browser errors: ${JSON.stringify(errors)}`,
+  ).toBeTruthy();
 
   interrupted = false;
   const stopsBeforeExit = stops;
