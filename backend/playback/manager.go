@@ -67,6 +67,39 @@ type generation struct {
 	segmentDuration map[uint64]int64
 }
 
+const (
+	maxPendingHandoffs   = 128
+	maxHandoffsPerViewer = 4
+	maxResolvedHandoffs  = 128
+)
+
+// Handoff is a prepared replacement whose predecessor remains usable until
+// the handoff is resolved or its fixed deadline expires.
+type Handoff struct {
+	ID        string
+	Session   Session
+	ExpiresAt time.Time
+}
+
+type pendingHandoff struct {
+	id                    string
+	oldID                 string
+	newID                 string
+	viewerID              string
+	profileID             string
+	expiresAt             time.Time
+	replacementGeneration string
+}
+
+type resolvedHandoff struct {
+	viewerID  string
+	profileID string
+	attached  bool
+	expiresAt time.Time
+	stoppedID string
+	keptID    string
+}
+
 type boundedLog struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -112,41 +145,49 @@ type Status struct {
 
 // Manager owns profile-bound sessions, FFmpeg generations, leases and temporary output.
 type Manager struct {
-	mu             sync.Mutex
-	settings       Settings
-	db             *sqlite.DB
-	files          afero.Afero
-	inputBase      string
-	executor       Executor
-	manifestWait   time.Duration
-	sessions       map[string]Session
-	generations    map[string]*generation
-	inputs         map[string]inputAuthority
-	revokedViewers map[string]struct{}
-	pendingViewers map[string]int
-	starting       int
-	pendingJobs    map[string]struct{}
-	replacements   map[string]struct{}
-	subtitleJobs   map[string]map[string]context.CancelFunc
-	startWG        sync.WaitGroup
-	cancel         context.CancelFunc
-	janitorDone    chan struct{}
-	closed         bool
+	mu                sync.Mutex
+	settings          Settings
+	db                *sqlite.DB
+	files             afero.Afero
+	inputBase         string
+	executor          Executor
+	manifestWait      time.Duration
+	sessions          map[string]Session
+	generations       map[string]*generation
+	inputs            map[string]inputAuthority
+	revokedViewers    map[string]struct{}
+	pendingViewers    map[string]int
+	starting          int
+	pendingJobs       map[string]struct{}
+	replacements      map[string]string
+	preparingHandoffs map[string]time.Time
+	handoffs          map[string]pendingHandoff
+	sessionHandoffs   map[string]string
+	resolvedHandoffs  map[string]resolvedHandoff
+	subtitleJobs      map[string]map[string]context.CancelFunc
+	startWG           sync.WaitGroup
+	cancel            context.CancelFunc
+	janitorDone       chan struct{}
+	closed            bool
 }
 
 // NewDirectManager creates a no-goroutine manager for direct-only tests and callers.
 func NewDirectManager() *Manager {
 	return &Manager{
-		settings:       DefaultSettings(os.TempDir()),
-		files:          afero.Afero{Fs: afero.NewOsFs()},
-		sessions:       map[string]Session{},
-		generations:    map[string]*generation{},
-		inputs:         map[string]inputAuthority{},
-		revokedViewers: map[string]struct{}{},
-		pendingViewers: map[string]int{},
-		pendingJobs:    map[string]struct{}{},
-		replacements:   map[string]struct{}{},
-		subtitleJobs:   map[string]map[string]context.CancelFunc{},
+		settings:          DefaultSettings(os.TempDir()),
+		files:             afero.Afero{Fs: afero.NewOsFs()},
+		sessions:          map[string]Session{},
+		generations:       map[string]*generation{},
+		inputs:            map[string]inputAuthority{},
+		revokedViewers:    map[string]struct{}{},
+		pendingViewers:    map[string]int{},
+		pendingJobs:       map[string]struct{}{},
+		replacements:      map[string]string{},
+		preparingHandoffs: map[string]time.Time{},
+		handoffs:          map[string]pendingHandoff{},
+		sessionHandoffs:   map[string]string{},
+		resolvedHandoffs:  map[string]resolvedHandoff{},
+		subtitleJobs:      map[string]map[string]context.CancelFunc{},
 	}
 }
 
@@ -176,22 +217,26 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := &Manager{
-		settings:       config.Settings,
-		db:             config.DB,
-		files:          files,
-		inputBase:      base,
-		executor:       config.Executor,
-		manifestWait:   config.ManifestWait,
-		sessions:       map[string]Session{},
-		generations:    map[string]*generation{},
-		inputs:         map[string]inputAuthority{},
-		revokedViewers: map[string]struct{}{},
-		pendingViewers: map[string]int{},
-		pendingJobs:    map[string]struct{}{},
-		replacements:   map[string]struct{}{},
-		subtitleJobs:   map[string]map[string]context.CancelFunc{},
-		cancel:         cancel,
-		janitorDone:    make(chan struct{}),
+		settings:          config.Settings,
+		db:                config.DB,
+		files:             files,
+		inputBase:         base,
+		executor:          config.Executor,
+		manifestWait:      config.ManifestWait,
+		sessions:          map[string]Session{},
+		generations:       map[string]*generation{},
+		inputs:            map[string]inputAuthority{},
+		revokedViewers:    map[string]struct{}{},
+		pendingViewers:    map[string]int{},
+		pendingJobs:       map[string]struct{}{},
+		replacements:      map[string]string{},
+		preparingHandoffs: map[string]time.Time{},
+		handoffs:          map[string]pendingHandoff{},
+		sessionHandoffs:   map[string]string{},
+		resolvedHandoffs:  map[string]resolvedHandoff{},
+		subtitleJobs:      map[string]map[string]context.CancelFunc{},
+		cancel:            cancel,
+		janitorDone:       make(chan struct{}),
 	}
 	go manager.janitor(ctx)
 	return manager, nil
@@ -229,15 +274,18 @@ func CleanupOrphans(fs afero.Fs, segmentDir string) error {
 }
 
 func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
-	return m.create("", profileID, catalogID, plan, positionMS, "", progressGeneration...)
+	return m.create(context.Background(), "", profileID, catalogID, plan, positionMS, "", false, progressGeneration...)
 }
 
 // CreateForViewer binds playback authority to one authenticated viewer session.
 func (m *Manager) CreateForViewer(viewerID, profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
-	return m.create(viewerID, profileID, catalogID, plan, positionMS, "", progressGeneration...)
+	return m.create(context.Background(), viewerID, profileID, catalogID, plan, positionMS, "", false, progressGeneration...)
 }
 
-func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, positionMS int64, replacingGeneration string, progressGeneration ...int64) (Session, error) {
+func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID string, plan Plan, positionMS int64, replacingGeneration string, retainReplacementCredit bool, progressGeneration ...int64) (Session, error) {
+	if err := ctx.Err(); err != nil {
+		return Session{}, err
+	}
 	if profileID == "" || catalogID == "" {
 		return Session{}, ErrSessionInvalid
 	}
@@ -311,12 +359,12 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	if gen := m.generations[replacingGeneration]; gen != nil && len(gen.leases) == 1 {
 		if _, replacing := m.replacements[replacingGeneration]; !replacing {
 			replacementCredit = 1
-			m.replacements[replacingGeneration] = struct{}{}
+			m.replacements[replacingGeneration] = sessionID
 		}
 	}
 	reserved := len(m.generations) + m.starting + 1 - replacementCredit
 	if reserved > m.settings.MaxGenerations || int64(reserved)*m.settings.GenerationBytes > m.settings.GlobalBytes {
-		if replacementCredit == 1 {
+		if replacementCredit == 1 && m.replacements[replacingGeneration] == sessionID {
 			delete(m.replacements, replacingGeneration)
 		}
 		m.mu.Unlock()
@@ -332,7 +380,7 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	releaseReservation := func(clearPending bool) {
 		m.mu.Lock()
 		m.starting--
-		if replacementCredit == 1 {
+		if replacementCredit == 1 && m.replacements[replacingGeneration] == sessionID {
 			delete(m.replacements, replacingGeneration)
 		}
 		if clearPending {
@@ -399,7 +447,7 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	}
 	m.mu.Unlock()
 	log := &boundedLog{}
-	process, err := m.executor.Start(name, args, log)
+	process, err := m.executor.StartContext(ctx, name, args, log)
 	if err != nil {
 		revokeInputs()
 		releaseReservation(true)
@@ -417,12 +465,15 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	go m.waitGeneration(gen, process)
 	m.mu.Lock()
 	m.starting--
-	if replacementCredit == 1 {
+	if replacementCredit == 1 && !retainReplacementCredit && m.replacements[replacingGeneration] == sessionID {
 		delete(m.replacements, replacingGeneration)
 	}
 	_, viewerRevoked = m.revokedViewers[viewerID]
 	if m.closed || (viewerID != "" && viewerRevoked) {
 		delete(m.pendingJobs, jobKey)
+		if m.replacements[replacingGeneration] == sessionID {
+			delete(m.replacements, replacingGeneration)
+		}
 		m.mu.Unlock()
 		revokeInputs()
 		m.retireGeneration(context.Background(), gen)
@@ -441,6 +492,9 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 		if err := waitForFile(m.files.Fs, filepath.Join(dir, "master.m3u8"), gen.done, m.manifestWait); err != nil {
 			_ = m.StopForViewer(session.ID, viewerID, profileID)
 			m.mu.Lock()
+			if m.replacements[replacingGeneration] == sessionID {
+				delete(m.replacements, replacingGeneration)
+			}
 			_, viewerRevoked = m.revokedViewers[viewerID]
 			delete(m.pendingJobs, jobKey)
 			m.mu.Unlock()
@@ -462,6 +516,11 @@ func (m *Manager) create(viewerID, profileID, catalogID string, plan Plan, posit
 	m.mu.Unlock()
 	if !admitted {
 		_ = m.StopForViewer(session.ID, viewerID, profileID)
+		m.mu.Lock()
+		if m.replacements[replacingGeneration] == sessionID {
+			delete(m.replacements, replacingGeneration)
+		}
+		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
 	return session, nil
@@ -589,6 +648,7 @@ func (m *Manager) Lookup(id, profileID string, touch bool) (Session, bool) {
 // LookupForViewer requires both the viewer session and profile authority.
 func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (Session, bool) {
 	now := time.Now()
+	m.expireHandoffForSession(id, now)
 	m.mu.Lock()
 	session, ok := m.sessions[id]
 	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || !now.Before(session.ExpiresAt) {
@@ -604,6 +664,12 @@ func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (S
 			ttl = m.settings.LeaseTTL
 		}
 		session.ExpiresAt = now.Add(ttl)
+		if handoff, exists := m.handoffs[m.sessionHandoffs[id]]; exists && session.ExpiresAt.After(handoff.expiresAt) {
+			session.ExpiresAt = handoff.expiresAt
+		}
+		if deadline, preparing := m.preparingHandoffs[id]; preparing {
+			session.ExpiresAt = deadline
+		}
 		m.sessions[id] = session
 		if gen := m.generations[session.GenerationID]; gen != nil {
 			gen.leases[id] = session.ExpiresAt
@@ -616,11 +682,20 @@ func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (S
 
 // SelectSubtitle updates native text-track state without replacing video or FFmpeg work.
 func (m *Manager) SelectSubtitle(id, viewerID, profileID string, index int, external, selected bool) (Session, error) {
+	return m.SelectSubtitleWithCommit(id, viewerID, profileID, index, external, selected, nil)
+}
+
+// SelectSubtitleWithCommit serializes durable preference changes with the
+// playback session mutation that accepts them.
+func (m *Manager) SelectSubtitleWithCommit(id, viewerID, profileID string, index int, external, selected bool, commit func() error) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, ok := m.sessions[id]
 	if !ok || session.ViewerID != viewerID || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
 		return Session{}, ErrSessionInvalid
+	}
+	if m.handoffControlBlockedLocked(id) {
+		return Session{}, ErrPreparing
 	}
 	if selected {
 		found := false
@@ -632,6 +707,11 @@ func (m *Manager) SelectSubtitle(id, viewerID, profileID string, index int, exte
 		}
 		if !found {
 			return Session{}, ErrSessionInvalid
+		}
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return Session{}, err
 		}
 	}
 	session.Plan.SubtitleSelectionIndex = index
@@ -686,11 +766,16 @@ func (m *Manager) Heartbeat(id, profileID string, positionMS int64) (Session, er
 }
 
 func (m *Manager) HeartbeatForViewer(id, viewerID, profileID string, positionMS int64) (Session, error) {
+	m.expireHandoffForSession(id, time.Now())
 	m.mu.Lock()
 	session, ok := m.sessions[id]
 	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || !time.Now().Before(session.ExpiresAt) {
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
+	}
+	if handoff, exists := m.handoffs[m.sessionHandoffs[id]]; exists && handoff.newID == id {
+		m.mu.Unlock()
+		return Session{}, ErrPreparing
 	}
 	if positionMS >= 0 {
 		session.PositionMS = positionMS
@@ -700,6 +785,12 @@ func (m *Manager) HeartbeatForViewer(id, viewerID, profileID string, positionMS 
 		ttl = m.settings.LeaseTTL
 	}
 	session.ExpiresAt = time.Now().Add(ttl)
+	if handoff, exists := m.handoffs[m.sessionHandoffs[id]]; exists && session.ExpiresAt.After(handoff.expiresAt) {
+		session.ExpiresAt = handoff.expiresAt
+	}
+	if deadline, preparing := m.preparingHandoffs[id]; preparing {
+		session.ExpiresAt = deadline
+	}
 	m.sessions[id] = session
 	if gen := m.generations[session.GenerationID]; gen != nil {
 		gen.leases[id] = session.ExpiresAt
@@ -735,6 +826,10 @@ func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewer
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
+	if m.handoffControlBlockedLocked(id) {
+		m.mu.Unlock()
+		return Session{}, ErrPreparing
+	}
 	gen := m.generations[session.GenerationID]
 	start, end, retained := m.retainedRangeLocked(gen)
 	if retained && positionMS >= start && positionMS <= end {
@@ -753,7 +848,7 @@ func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewer
 	}
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
-	replacement, err := m.create(viewerID, profileID, catalogID, plan, positionMS, session.GenerationID, session.ProgressGeneration)
+	replacement, err := m.create(ctx, viewerID, profileID, catalogID, plan, positionMS, session.GenerationID, false, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
@@ -800,9 +895,295 @@ func (m *Manager) Replace(id, profileID string, plan Plan, positionMS int64) (Se
 	return m.ReplaceContext(context.Background(), id, profileID, plan, positionMS)
 }
 
+// PrepareHandoffContext creates a replacement while retaining the current
+// session behind a fixed, non-renewable handoff deadline.
+func (m *Manager) PrepareHandoffContext(ctx context.Context, id, profileID string, plan Plan, positionMS int64) (Handoff, error) {
+	return m.PrepareHandoffContextWithCommit(ctx, id, profileID, plan, positionMS, nil)
+}
+
+// PrepareHandoffContextWithCommit reserves the source and commits related
+// durable state at one ordering point before slow candidate preparation.
+func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profileID string, plan Plan, positionMS int64, commit func() error) (Handoff, error) {
+	if err := ctx.Err(); err != nil {
+		return Handoff{}, err
+	}
+	handoffID, err := randomToken()
+	if err != nil {
+		return Handoff{}, err
+	}
+	m.mu.Lock()
+	old, ok := m.sessions[id]
+	if !ok || old.ProfileID != profileID || !time.Now().Before(old.ExpiresAt) {
+		m.mu.Unlock()
+		return Handoff{}, ErrSessionInvalid
+	}
+	if _, pending := m.preparingHandoffs[id]; pending || m.sessionHandoffs[id] != "" {
+		m.mu.Unlock()
+		return Handoff{}, ErrPreparing
+	}
+	viewerPending := 0
+	for _, item := range m.handoffs {
+		if item.viewerID == old.ViewerID {
+			viewerPending++
+		}
+	}
+	for sessionID := range m.preparingHandoffs {
+		if preparing, exists := m.sessions[sessionID]; exists && preparing.ViewerID == old.ViewerID {
+			viewerPending++
+		}
+	}
+	if len(m.handoffs)+len(m.preparingHandoffs) >= maxPendingHandoffs || viewerPending >= maxHandoffsPerViewer {
+		m.mu.Unlock()
+		return Handoff{}, ErrCapacity
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			m.mu.Unlock()
+			return Handoff{}, err
+		}
+	}
+	plan = inheritReplacementState(plan, old.Plan)
+	leaseTTL := m.settings.LeaseTTL
+	preparationDeadline := time.Now().Add(leaseTTL + max(0, m.manifestWait))
+	if old.ExpiresAt.Before(preparationDeadline) {
+		old.ExpiresAt = preparationDeadline
+		m.sessions[id] = old
+		if gen := m.generations[old.GenerationID]; gen != nil {
+			gen.leases[id] = old.ExpiresAt
+			m.renewInputsLocked(gen, old.ExpiresAt)
+		}
+	}
+	m.preparingHandoffs[id] = preparationDeadline
+	m.mu.Unlock()
+
+	activated := false
+	replacementID := ""
+	defer func() {
+		m.mu.Lock()
+		delete(m.preparingHandoffs, id)
+		if !activated {
+			if old.GenerationID != "" && m.replacements[old.GenerationID] == replacementID {
+				delete(m.replacements, old.GenerationID)
+			}
+			if current, ok := m.sessions[id]; ok {
+				ttl := directSessionTTL
+				if current.GenerationID != "" {
+					ttl = m.settings.LeaseTTL
+				}
+				current.ExpiresAt = time.Now().Add(ttl)
+				m.sessions[id] = current
+				if gen := m.generations[current.GenerationID]; gen != nil {
+					gen.leases[id] = current.ExpiresAt
+					m.renewInputsLocked(gen, current.ExpiresAt)
+				}
+			}
+		}
+		m.mu.Unlock()
+	}()
+	prepareCtx, cancelPrepare := context.WithDeadline(ctx, preparationDeadline)
+	defer cancelPrepare()
+	replacement, err := m.create(prepareCtx, old.ViewerID, profileID, old.CatalogID, plan, positionMS, old.GenerationID, true, old.ProgressGeneration)
+	if err != nil {
+		return Handoff{}, err
+	}
+	replacementID = replacement.ID
+
+	now := time.Now()
+	deadline := now.Add(leaseTTL)
+	m.mu.Lock()
+	current, oldValid := m.sessions[id]
+	candidate, candidateValid := m.sessions[replacement.ID]
+	_, viewerRevoked := m.revokedViewers[old.ViewerID]
+	oldValid = oldValid && current.ViewerID == old.ViewerID && current.ProfileID == profileID && current.GenerationID == old.GenerationID && current.ProgressGeneration == old.ProgressGeneration && now.Before(current.ExpiresAt)
+	candidateValid = candidateValid && candidate.ViewerID == old.ViewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
+	if ctx.Err() != nil || !oldValid || !candidateValid || m.sessionHandoffs[id] != "" || (old.ViewerID != "" && viewerRevoked) {
+		contextErr := ctx.Err()
+		m.mu.Unlock()
+		_ = m.StopForViewer(replacement.ID, old.ViewerID, profileID)
+		if contextErr != nil {
+			return Handoff{}, contextErr
+		}
+		return Handoff{}, ErrSessionInvalid
+	}
+	current.ExpiresAt = deadline
+	candidate.ExpiresAt = deadline
+	m.sessions[id] = current
+	m.sessions[replacement.ID] = candidate
+	if gen := m.generations[current.GenerationID]; gen != nil {
+		gen.leases[id] = deadline
+		m.renewInputsLocked(gen, deadline)
+	}
+	if gen := m.generations[candidate.GenerationID]; gen != nil {
+		gen.leases[candidate.ID] = deadline
+		m.renewInputsLocked(gen, deadline)
+	}
+	replacementGeneration := ""
+	if m.replacements[old.GenerationID] == candidate.ID {
+		replacementGeneration = old.GenerationID
+	}
+	record := pendingHandoff{id: handoffID, oldID: id, newID: candidate.ID, viewerID: old.ViewerID, profileID: profileID, expiresAt: deadline, replacementGeneration: replacementGeneration}
+	m.handoffs[handoffID] = record
+	m.sessionHandoffs[id] = handoffID
+	m.sessionHandoffs[candidate.ID] = handoffID
+	activated = true
+	m.mu.Unlock()
+	return Handoff{ID: handoffID, Session: candidate, ExpiresAt: deadline}, nil
+}
+
+// IsHandoffCandidate reports whether a session may fetch media for attachment
+// but must not yet become playback/progress authority.
+func (m *Manager) IsHandoffCandidate(id, viewerID, profileID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	handoffID := m.sessionHandoffs[id]
+	record, ok := m.handoffs[handoffID]
+	return ok && record.newID == id && record.viewerID == viewerID && record.profileID == profileID
+}
+
+// IsHandoffControlBlocked reports whether source-changing or track-changing
+// controls must wait for a preparation or active handoff to resolve.
+func (m *Manager) IsHandoffControlBlocked(id, viewerID, profileID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, ok := m.sessions[id]
+	return ok && session.ViewerID == viewerID && session.ProfileID == profileID && m.handoffControlBlockedLocked(id)
+}
+
+func (m *Manager) handoffControlBlockedLocked(id string) bool {
+	_, preparing := m.preparingHandoffs[id]
+	return preparing || m.sessionHandoffs[id] != ""
+}
+
+// ResolveHandoff promotes an attached candidate or restores its predecessor.
+// Repeating the same outcome is idempotent until the handoff deadline.
+func (m *Manager) ResolveHandoff(id, viewerID, profileID string, attached bool) error {
+	var retire []*generation
+	requestedAttached := attached
+	m.mu.Lock()
+	now := time.Now()
+	m.pruneResolvedHandoffsLocked(now)
+	record, ok := m.handoffs[id]
+	if !ok {
+		resolved, exists := m.resolvedHandoffs[id]
+		m.mu.Unlock()
+		if !exists || resolved.viewerID != viewerID || resolved.profileID != profileID {
+			return ErrSessionInvalid
+		}
+		if resolved.attached != attached {
+			return ErrHandoffConflict
+		}
+		return nil
+	}
+	if record.viewerID != viewerID || record.profileID != profileID {
+		m.mu.Unlock()
+		return ErrSessionInvalid
+	}
+	if !now.Before(record.expiresAt) {
+		attached = false
+	}
+	retire = m.resolveHandoffLocked(record, attached, now)
+	m.mu.Unlock()
+	for _, gen := range retire {
+		m.retireGeneration(context.Background(), gen)
+	}
+	if !now.Before(record.expiresAt) && requestedAttached {
+		return ErrHandoffConflict
+	}
+	return nil
+}
+
+func (m *Manager) resolveHandoffLocked(record pendingHandoff, attached bool, now time.Time) []*generation {
+	delete(m.handoffs, record.id)
+	delete(m.sessionHandoffs, record.oldID)
+	delete(m.sessionHandoffs, record.newID)
+	if record.replacementGeneration != "" {
+		if m.replacements[record.replacementGeneration] == record.newID {
+			delete(m.replacements, record.replacementGeneration)
+		}
+	}
+	keepID, stopID := record.newID, record.oldID
+	if !attached {
+		keepID, stopID = record.oldID, record.newID
+	}
+	if keep, ok := m.sessions[keepID]; ok {
+		ttl := directSessionTTL
+		if keep.GenerationID != "" {
+			ttl = m.settings.LeaseTTL
+		}
+		keep.ExpiresAt = now.Add(ttl)
+		m.sessions[keepID] = keep
+		if gen := m.generations[keep.GenerationID]; gen != nil {
+			gen.leases[keepID] = keep.ExpiresAt
+			m.renewInputsLocked(gen, keep.ExpiresAt)
+		}
+	}
+	retire := m.stopSessionLocked(stopID)
+	m.resolvedHandoffs[record.id] = resolvedHandoff{viewerID: record.viewerID, profileID: record.profileID, attached: attached, expiresAt: now.Add(m.settings.LeaseTTL), stoppedID: stopID, keptID: keepID}
+	m.pruneResolvedHandoffsLocked(now)
+	if retire == nil {
+		return nil
+	}
+	return []*generation{retire}
+}
+
+func (m *Manager) expireHandoffForSession(id string, now time.Time) {
+	var retire []*generation
+	m.mu.Lock()
+	handoffID := m.sessionHandoffs[id]
+	record, ok := m.handoffs[handoffID]
+	if ok && !now.Before(record.expiresAt) {
+		retire = m.resolveHandoffLocked(record, false, now)
+	}
+	m.mu.Unlock()
+	for _, gen := range retire {
+		m.retireGeneration(context.Background(), gen)
+	}
+}
+
+func (m *Manager) pruneResolvedHandoffsLocked(now time.Time) {
+	for id, record := range m.resolvedHandoffs {
+		if !now.Before(record.expiresAt) {
+			delete(m.resolvedHandoffs, id)
+		}
+	}
+	for len(m.resolvedHandoffs) > maxResolvedHandoffs {
+		m.deleteEarliestResolvedHandoffLocked("")
+	}
+	counts := make(map[string]int)
+	for _, record := range m.resolvedHandoffs {
+		counts[record.viewerID]++
+	}
+	for viewerID, count := range counts {
+		for count > maxHandoffsPerViewer {
+			m.deleteEarliestResolvedHandoffLocked(viewerID)
+			count--
+		}
+	}
+}
+
+func (m *Manager) deleteEarliestResolvedHandoffLocked(viewerID string) {
+	earliestID := ""
+	var earliest time.Time
+	for id, record := range m.resolvedHandoffs {
+		if viewerID != "" && record.viewerID != viewerID {
+			continue
+		}
+		if earliestID == "" || record.expiresAt.Before(earliest) {
+			earliestID, earliest = id, record.expiresAt
+		}
+	}
+	delete(m.resolvedHandoffs, earliestID)
+}
+
 // ReplaceContext creates a new rendition and preserves the existing session if
 // preparation fails or the caller leaves before the replacement is committed.
 func (m *Manager) ReplaceContext(ctx context.Context, id, profileID string, plan Plan, positionMS int64) (Session, error) {
+	return m.ReplaceContextWithCommit(ctx, id, profileID, plan, positionMS, nil)
+}
+
+// ReplaceContextWithCommit reserves the source and commits related durable
+// state before preparing a replacement.
+func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID string, plan Plan, positionMS int64, commit func() error) (Session, error) {
 	if err := ctx.Err(); err != nil {
 		return Session{}, err
 	}
@@ -812,21 +1193,86 @@ func (m *Manager) ReplaceContext(ctx context.Context, id, profileID string, plan
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
-	catalogID := session.CatalogID
+	if m.handoffControlBlockedLocked(id) {
+		m.mu.Unlock()
+		return Session{}, ErrPreparing
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			m.mu.Unlock()
+			return Session{}, err
+		}
+	}
+	plan = inheritReplacementState(plan, session.Plan)
+	leaseTTL := m.settings.LeaseTTL
+	preparationDeadline := time.Now().Add(leaseTTL + max(0, m.manifestWait))
+	if session.ExpiresAt.Before(preparationDeadline) {
+		session.ExpiresAt = preparationDeadline
+		m.sessions[id] = session
+		if gen := m.generations[session.GenerationID]; gen != nil {
+			gen.leases[id] = session.ExpiresAt
+			m.renewInputsLocked(gen, session.ExpiresAt)
+		}
+	}
+	m.preparingHandoffs[id] = preparationDeadline
 	m.mu.Unlock()
-	replacement, err := m.create(session.ViewerID, profileID, catalogID, plan, positionMS, session.GenerationID, session.ProgressGeneration)
+	accepted := false
+	defer func() {
+		m.mu.Lock()
+		delete(m.preparingHandoffs, id)
+		if !accepted {
+			if current, ok := m.sessions[id]; ok {
+				ttl := directSessionTTL
+				if current.GenerationID != "" {
+					ttl = m.settings.LeaseTTL
+				}
+				current.ExpiresAt = time.Now().Add(ttl)
+				m.sessions[id] = current
+				if gen := m.generations[current.GenerationID]; gen != nil {
+					gen.leases[id] = current.ExpiresAt
+					m.renewInputsLocked(gen, current.ExpiresAt)
+				}
+			}
+		}
+		m.mu.Unlock()
+	}()
+	prepareCtx, cancelPrepare := context.WithDeadline(ctx, preparationDeadline)
+	defer cancelPrepare()
+	replacement, err := m.create(prepareCtx, session.ViewerID, profileID, session.CatalogID, plan, positionMS, session.GenerationID, false, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	m.mu.Lock()
+	current, oldValid := m.sessions[id]
+	candidate, candidateValid := m.sessions[replacement.ID]
+	oldValid = oldValid && current.ViewerID == session.ViewerID && current.ProfileID == profileID && current.GenerationID == session.GenerationID && current.ProgressGeneration == session.ProgressGeneration
+	candidateValid = candidateValid && candidate.ViewerID == session.ViewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
+	if ctx.Err() != nil || !oldValid || !candidateValid {
+		contextErr := ctx.Err()
+		m.mu.Unlock()
 		_ = m.StopForViewer(replacement.ID, session.ViewerID, profileID)
-		return Session{}, err
-	}
-	if !m.StopForViewer(id, session.ViewerID, profileID) {
-		_ = m.StopForViewer(replacement.ID, session.ViewerID, profileID)
+		if contextErr != nil {
+			return Session{}, contextErr
+		}
 		return Session{}, ErrSessionInvalid
 	}
-	return replacement, nil
+	delete(m.preparingHandoffs, id)
+	retire := m.stopSessionLocked(id)
+	accepted = true
+	m.mu.Unlock()
+	if retire != nil {
+		m.retireGeneration(context.Background(), retire)
+	}
+	return candidate, nil
+}
+
+func inheritReplacementState(plan, current Plan) Plan {
+	plan.SourceKey = current.SourceKey
+	plan.SubtitleSources = current.SubtitleSources
+	plan.SubtitleSelectionIndex = current.SubtitleSelectionIndex
+	plan.SubtitleExternal = current.SubtitleExternal
+	plan.SubtitleSelected = current.SubtitleSelected
+	return plan
 }
 
 func (m *Manager) Stop(id, profileID string) bool {
@@ -834,24 +1280,49 @@ func (m *Manager) Stop(id, profileID string) bool {
 }
 
 func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {
-	var retire *generation
+	var retire []*generation
 	m.mu.Lock()
+	m.pruneResolvedHandoffsLocked(time.Now())
 	session, ok := m.sessions[id]
+	if !ok {
+		for _, resolved := range m.resolvedHandoffs {
+			if resolved.stoppedID == id && resolved.profileID == profileID && (viewerID == "" || resolved.viewerID == viewerID) {
+				id = resolved.keptID
+				session, ok = m.sessions[id]
+				break
+			}
+		}
+	}
 	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID {
 		m.mu.Unlock()
 		return false
 	}
-	delete(m.sessions, id)
-	m.cancelSubtitleJobsLocked(id)
-	if gen := m.generations[session.GenerationID]; gen != nil {
-		delete(gen.leases, id)
-		if len(gen.leases) == 0 {
-			retire = m.detachGenerationLocked(gen.id)
+	ids := []string{id}
+	if handoffID := m.sessionHandoffs[id]; handoffID != "" {
+		if record, exists := m.handoffs[handoffID]; exists {
+			ids = []string{record.oldID, record.newID}
+			delete(m.handoffs, handoffID)
+			delete(m.sessionHandoffs, record.oldID)
+			delete(m.sessionHandoffs, record.newID)
+			if record.replacementGeneration != "" {
+				if m.replacements[record.replacementGeneration] == record.newID {
+					delete(m.replacements, record.replacementGeneration)
+				}
+			}
+		}
+	}
+	seen := make(map[string]struct{})
+	for _, sessionID := range ids {
+		if gen := m.stopSessionLocked(sessionID); gen != nil {
+			if _, exists := seen[gen.id]; !exists {
+				retire = append(retire, gen)
+				seen[gen.id] = struct{}{}
+			}
 		}
 	}
 	m.mu.Unlock()
-	if retire != nil {
-		m.retireGeneration(context.Background(), retire)
+	for _, gen := range retire {
+		m.retireGeneration(context.Background(), gen)
 	}
 	return true
 }
@@ -927,6 +1398,7 @@ func (m *Manager) detachGenerationLocked(id string) *generation {
 		return nil
 	}
 	delete(m.generations, id)
+	delete(m.replacements, id)
 	for _, token := range gen.inputs {
 		delete(m.inputs, token)
 	}
@@ -935,6 +1407,22 @@ func (m *Manager) detachGenerationLocked(id string) *generation {
 		m.cancelSubtitleJobsLocked(sessionID)
 	}
 	return gen
+}
+
+func (m *Manager) stopSessionLocked(id string) *generation {
+	session, ok := m.sessions[id]
+	if !ok {
+		return nil
+	}
+	delete(m.sessions, id)
+	m.cancelSubtitleJobsLocked(id)
+	if gen := m.generations[session.GenerationID]; gen != nil {
+		delete(gen.leases, id)
+		if len(gen.leases) == 0 {
+			return m.detachGenerationLocked(gen.id)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) retireGeneration(ctx context.Context, gen *generation) {
@@ -1123,6 +1611,12 @@ func (m *Manager) Sweep(now time.Time) {
 	var expired []Session
 	var measured []measurement
 	m.mu.Lock()
+	m.pruneResolvedHandoffsLocked(now)
+	for _, handoff := range m.handoffs {
+		if !now.Before(handoff.expiresAt) {
+			retire = append(retire, m.resolveHandoffLocked(handoff, false, now)...)
+		}
+	}
 	for id, session := range m.sessions {
 		if !now.Before(session.ExpiresAt) {
 			expired = append(expired, session)

@@ -36,10 +36,15 @@ type playbackAudioRequest struct {
 }
 
 type playbackQualityRequest struct {
-	Capabilities playback.ClientCapabilities `json:"capabilities"`
-	Quality      playback.QualityRequest     `json:"quality"`
-	PositionMS   int64                       `json:"position_ms"`
-	Observation  int64                       `json:"observation"`
+	Capabilities  playback.ClientCapabilities `json:"capabilities"`
+	Quality       playback.QualityRequest     `json:"quality"`
+	PositionMS    int64                       `json:"position_ms"`
+	Observation   int64                       `json:"observation"`
+	SmoothHandoff bool                        `json:"smooth_handoff,omitempty"`
+}
+
+type playbackHandoffRequest struct {
+	Attached *bool `json:"attached"`
 }
 
 type playbackSubtitleRequest struct {
@@ -410,6 +415,22 @@ func (s *Server) playbackSession(w http.ResponseWriter, r *http.Request, touch b
 	return session, true
 }
 
+func (s *Server) rejectHandoffCandidate(w http.ResponseWriter, session playback.Session) bool {
+	if !s.playback.IsHandoffCandidate(session.ID, session.ViewerID, session.ProfileID) {
+		return false
+	}
+	playbackFailure(w, playback.ErrPreparing)
+	return true
+}
+
+func (s *Server) rejectHandoffControl(w http.ResponseWriter, session playback.Session) bool {
+	if !s.playback.IsHandoffControlBlocked(session.ID, session.ViewerID, session.ProfileID) {
+		return false
+	}
+	playbackFailure(w, playback.ErrPreparing)
+	return true
+}
+
 func (s *Server) playbackMedia(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.playbackSession(w, r, true)
 	if !ok {
@@ -519,6 +540,9 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.rejectHandoffCandidate(w, session) {
+		return
+	}
 	var body playbackPositionRequest
 	if !decode(r, &body) || body.PositionMS < 0 || body.Observation < 0 {
 		fail(w, http.StatusBadRequest, "invalid_request")
@@ -551,6 +575,9 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.playbackSession(w, r, false)
 	if !ok {
+		return
+	}
+	if s.rejectHandoffControl(w, session) {
 		return
 	}
 	var body playbackPositionRequest
@@ -604,6 +631,9 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.rejectHandoffControl(w, session) {
+		return
+	}
 	var body playbackAudioRequest
 	if !decode(r, &body) || body.AudioStreamIndex == nil || body.PositionMS < 0 || body.Observation < 0 {
 		fail(w, http.StatusBadRequest, "invalid_request")
@@ -637,18 +667,28 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 	plan.SubtitleExternal = session.Plan.SubtitleExternal
 	plan.SubtitleSelected = session.Plan.SubtitleSelected
 	profile, _ := s.house.Profile(s.session(r))
-	accepted, err := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "progress_failed")
-		return
-	}
-	if !accepted {
-		fail(w, http.StatusConflict, "progress_conflict")
-		return
-	}
-	updated, err := s.playback.ReplaceContext(r.Context(), session.ID, profile.ID, plan, body.PositionMS)
+	progressFailed := false
+	updated, err := s.playback.ReplaceContextWithCommit(r.Context(), session.ID, profile.ID, plan, body.PositionMS, func() error {
+		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+		if progressErr != nil {
+			progressFailed = true
+			return progressErr
+		}
+		if !accepted {
+			return household.ErrProgressConflict
+		}
+		return nil
+	})
 	if err != nil {
 		if r.Context().Err() != nil {
+			return
+		}
+		if progressFailed {
+			fail(w, http.StatusInternalServerError, "progress_failed")
+			return
+		}
+		if errors.Is(err, household.ErrProgressConflict) {
+			fail(w, http.StatusConflict, "progress_conflict")
 			return
 		}
 		playbackFailure(w, err)
@@ -670,6 +710,9 @@ func (s *Server) playbackQuality(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.playbackSession(w, r, false)
 	if !ok {
+		return
+	}
+	if s.rejectHandoffControl(w, session) {
 		return
 	}
 	var body playbackQualityRequest
@@ -706,24 +749,80 @@ func (s *Server) playbackQuality(w http.ResponseWriter, r *http.Request) {
 	plan.SubtitleExternal = session.Plan.SubtitleExternal
 	plan.SubtitleSelected = session.Plan.SubtitleSelected
 	profile, _ := s.house.Profile(s.session(r))
-	accepted, err := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "progress_failed")
-		return
+	progressFailed := false
+	commitProgress := func() error {
+		accepted, progressErr := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+		if progressErr != nil {
+			progressFailed = true
+			return progressErr
+		}
+		if !accepted {
+			return household.ErrProgressConflict
+		}
+		return nil
 	}
-	if !accepted {
-		fail(w, http.StatusConflict, "progress_conflict")
-		return
+	updated := playback.Session{}
+	handoffID := ""
+	if body.SmoothHandoff {
+		handoff, handoffErr := s.playback.PrepareHandoffContextWithCommit(r.Context(), session.ID, profile.ID, plan, body.PositionMS, commitProgress)
+		err = handoffErr
+		updated, handoffID = handoff.Session, handoff.ID
+	} else {
+		updated, err = s.playback.ReplaceContextWithCommit(r.Context(), session.ID, profile.ID, plan, body.PositionMS, commitProgress)
 	}
-	updated, err := s.playback.ReplaceContext(r.Context(), session.ID, profile.ID, plan, body.PositionMS)
 	if err != nil {
 		if r.Context().Err() != nil {
+			return
+		}
+		if progressFailed {
+			fail(w, http.StatusInternalServerError, "progress_failed")
+			return
+		}
+		if errors.Is(err, household.ErrProgressConflict) {
+			fail(w, http.StatusConflict, "progress_conflict")
 			return
 		}
 		playbackFailure(w, err)
 		return
 	}
-	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
+	if r.Context().Err() != nil {
+		if handoffID != "" {
+			_ = s.playback.ResolveHandoff(handoffID, session.ViewerID, profile.ID, false)
+		}
+		return
+	}
+	response := playbackResponse(updated, item.Audio, item.Subtitles)
+	if handoffID != "" {
+		response["handoff_url"] = "/api/v1/playback/handoffs/" + handoffID
+	}
+	write(w, http.StatusOK, response)
+}
+
+func (s *Server) playbackHandoff(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) || !s.profile(w, r) {
+		return
+	}
+	profile, _ := s.house.Profile(s.session(r))
+	viewerID, ok := s.house.SessionIdentity(s.session(r))
+	if !ok {
+		fail(w, http.StatusForbidden, "profile_required")
+		return
+	}
+	var body playbackHandoffRequest
+	if !decode(r, &body) || body.Attached == nil {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	err := s.playback.ResolveHandoff(r.PathValue("id"), viewerID, profile.ID, *body.Attached)
+	if errors.Is(err, playback.ErrHandoffConflict) {
+		fail(w, http.StatusConflict, "playback_handoff_conflict")
+		return
+	}
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	write(w, http.StatusOK, map[string]bool{"attached": *body.Attached})
 }
 
 func (s *Server) playbackSubtitleSelection(w http.ResponseWriter, r *http.Request) {
@@ -732,6 +831,9 @@ func (s *Server) playbackSubtitleSelection(w http.ResponseWriter, r *http.Reques
 	}
 	session, ok := s.playbackSession(w, r, false)
 	if !ok {
+		return
+	}
+	if s.rejectHandoffControl(w, session) {
 		return
 	}
 	var body playbackSubtitleRequest
@@ -772,11 +874,9 @@ func (s *Server) playbackSubtitleSelection(w http.ResponseWriter, r *http.Reques
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err := s.house.SaveSubtitlePreference(session.ProfileID, preference); err != nil {
-		fail(w, http.StatusInternalServerError, "playback_failed")
-		return
-	}
-	updated, err := s.playback.SelectSubtitle(session.ID, session.ViewerID, session.ProfileID, track.Index, track.External, selected)
+	updated, err := s.playback.SelectSubtitleWithCommit(session.ID, session.ViewerID, session.ProfileID, track.Index, track.External, selected, func() error {
+		return s.house.SaveSubtitlePreference(session.ProfileID, preference)
+	})
 	if err != nil {
 		playbackFailure(w, err)
 		return

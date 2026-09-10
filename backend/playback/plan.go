@@ -11,6 +11,7 @@ var (
 	ErrFFmpegUnavailable   = errors.New("ffmpeg is unavailable")
 	ErrCapacity            = errors.New("playback capacity is unavailable")
 	ErrPreparing           = errors.New("matching playback generation is preparing")
+	ErrHandoffConflict     = errors.New("playback handoff is already resolved differently")
 	ErrSessionInvalid      = errors.New("playback session is invalid")
 	ErrInvalidSettings     = errors.New("playback settings are invalid")
 	ErrRestartRequired     = errors.New("playback setting requires restart")

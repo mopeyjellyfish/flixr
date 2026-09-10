@@ -10,6 +10,11 @@ const initialMbps = Number(process.env.FLIXR_TEST_NETWORK_MBPS ?? 2);
 const dipMbps = Number(process.env.FLIXR_TEST_DIP_MBPS ?? 1);
 const dipStart = Number(process.env.FLIXR_TEST_DIP_START ?? 20);
 const dipEnd = Number(process.env.FLIXR_TEST_DIP_END ?? 35);
+const observationSeconds = Number(process.env.FLIXR_TEST_OBSERVATION_SECONDS ?? 70);
+const expectedInitialHeight = Number(process.env.FLIXR_TEST_EXPECT_INITIAL_HEIGHT ?? 0);
+const expectedMinHeight = Number(process.env.FLIXR_TEST_EXPECT_MIN_HEIGHT ?? 0);
+const expectedRecoveryHeight = Number(process.env.FLIXR_TEST_EXPECT_RECOVERY_HEIGHT ?? 0);
+const expectedMaxStartupMS = Number(process.env.FLIXR_TEST_EXPECT_MAX_STARTUP_MS ?? 0);
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
@@ -86,7 +91,7 @@ try {
   result.startupMS = Date.now() - started;
 
   const observed = Date.now();
-  for (let second = 0; second < 70; second += 1) {
+  for (let second = 0; second < observationSeconds; second += 1) {
     if (second === dipStart) await network(dipMbps);
     if (second === dipEnd) await network(initialMbps);
     result.samples.push(await page.locator('video').evaluate((video) => ({
@@ -103,7 +108,16 @@ try {
   result.advancedSeconds = result.samples.at(-1).time - result.samples[0].time;
   result.stalledSamples = result.samples.slice(1).filter((sample, index) => sample.time - result.samples[index].time < 0.2).length;
   result.decodedAdvancementSeconds = result.samples.slice(1).reduce((sum, sample, index) => sum + Math.max(0, Math.min(1.5, sample.time - result.samples[index].time)), 0);
-  result.pass = result.decodedAdvancementSeconds >= 55 && result.stalledSamples <= 10;
+  const heights = result.plans.map((plan) => plan.height).filter(Number.isFinite);
+  const minimumHeight = heights.length ? Math.min(...heights) : 0;
+  const minimumIndex = heights.indexOf(minimumHeight);
+  const recoveredHeight = minimumIndex >= 0 ? Math.max(...heights.slice(minimumIndex + 1), 0) : 0;
+  result.autoPolicy = { initial_height: heights[0] ?? 0, minimum_height: minimumHeight, recovered_height: recoveredHeight };
+  const policyPass = (!expectedInitialHeight || result.autoPolicy.initial_height === expectedInitialHeight)
+    && (!expectedMinHeight || result.autoPolicy.minimum_height <= expectedMinHeight)
+    && (!expectedRecoveryHeight || result.autoPolicy.recovered_height >= expectedRecoveryHeight)
+    && (!expectedMaxStartupMS || result.startupMS <= expectedMaxStartupMS);
+  result.pass = result.decodedAdvancementSeconds >= observationSeconds - 15 && result.stalledSamples <= 10 && policyPass;
   if (!result.pass) process.exitCode = 1;
 } catch (error) {
   result.error = String(error).slice(0, 250);

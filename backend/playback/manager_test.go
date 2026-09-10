@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type fakeExecutor struct {
 	ignoreSignal bool
 	skipManifest bool
 	onStart      func()
+	startBlock   <-chan struct{}
 	inspectStart func([]string)
 	startErr     error
 }
@@ -73,7 +75,7 @@ func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
 	return info, err
 }
 
-func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, error) {
+func (e *fakeExecutor) StartContext(ctx context.Context, name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
 	}
@@ -82,6 +84,13 @@ func (e *fakeExecutor) Start(name string, args []string, _ io.Writer) (Process, 
 	}
 	if e.onStart != nil {
 		e.onStart()
+	}
+	if e.startBlock != nil {
+		select {
+		case <-e.startBlock:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	process := newFakeProcess(e.ignoreSignal)
 	e.mu.Lock()
@@ -622,6 +631,9 @@ func TestCanceledOutOfWindowSeekKeepsSession(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStart := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseStart()
 	executor.onStart = func() { close(started); <-release }
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -631,7 +643,7 @@ func TestCanceledOutOfWindowSeekKeepsSession(t *testing.T) {
 	}()
 	<-started
 	cancel()
-	close(release)
+	releaseStart()
 	if err = <-result; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled seek error = %v", err)
 	}
@@ -873,7 +885,7 @@ func TestFFmpegFeatureProbeIsTimeBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if detectFFmpegReadrateCatchup(probe, 50*time.Millisecond) {
+	if detectFFmpegReadrateCatchup(context.Background(), probe, 50*time.Millisecond) {
 		t.Fatal("hanging feature probe reported support")
 	}
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
@@ -1163,5 +1175,465 @@ func TestQualityParametersSeparateGenerations(t *testing.T) {
 	}
 	if first.GenerationID == second.GenerationID {
 		t.Fatal("different quality parameters shared a generation")
+	}
+}
+
+func TestQualityHandoffKeepsOriginalUntilAttached(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("preparing a handoff revoked the working session")
+	}
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("prepared replacement is unavailable")
+	}
+
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("attached handoff retained the old session")
+	}
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("attached handoff revoked the replacement")
+	}
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", true); err != nil {
+		t.Fatalf("same handoff result was not idempotent: %v", err)
+	}
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", false); !errors.Is(err, ErrHandoffConflict) {
+		t.Fatalf("conflicting handoff result = %v, want conflict", err)
+	}
+}
+
+func TestQualityHandoffAbortRestoresOriginalAndAllowsAnotherHandoff(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", false); err != nil {
+		t.Fatalf("same abort result was not idempotent: %v", err)
+	}
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("aborted handoff retained the replacement")
+	}
+	if _, err := manager.HeartbeatForViewer(initial.ID, "viewer-a", "profile-a", 6_000); err != nil {
+		t.Fatalf("aborted handoff did not restore original: %v", err)
+	}
+	if _, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 6_000); err != nil {
+		t.Fatalf("resolved handoff blocked a later quality change: %v", err)
+	}
+}
+
+func TestQualityHandoffIsBoundedAndCannotChainWhilePending(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 6_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("second handoff from original = %v, want preparing", err)
+	}
+	if _, err := manager.PrepareHandoffContext(context.Background(), handoff.Session.ID, "profile-a", initialPlan, 6_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("chained handoff from replacement = %v, want preparing", err)
+	}
+	if candidate, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", true); !ok || candidate.ExpiresAt.After(handoff.ExpiresAt) {
+		t.Fatalf("candidate asset lookup renewed beyond deadline: %#v, %v", candidate, ok)
+	}
+	if _, err := manager.HeartbeatForViewer(handoff.Session.ID, "viewer-a", "profile-a", 6_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("candidate heartbeat = %v, want preparing", err)
+	}
+	if _, err := manager.SeekForViewer(handoff.Session.ID, "viewer-a", "profile-a", 6_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("candidate seek = %v, want preparing", err)
+	}
+	if _, err := manager.ReplaceContext(context.Background(), handoff.Session.ID, "profile-a", initialPlan, 6_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("candidate replacement = %v, want preparing", err)
+	}
+	if _, err := manager.SelectSubtitle(handoff.Session.ID, "viewer-a", "profile-a", -1, false, false); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("candidate subtitle mutation = %v, want preparing", err)
+	}
+	updated, err := manager.HeartbeatForViewer(initial.ID, "viewer-a", "profile-a", 6_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ExpiresAt.After(handoff.ExpiresAt) {
+		t.Fatalf("old heartbeat extended grace to %v beyond %v", updated.ExpiresAt, handoff.ExpiresAt)
+	}
+
+	manager.Sweep(handoff.ExpiresAt.Add(time.Nanosecond))
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("unacknowledged candidate survived the handoff deadline")
+	}
+	if _, err := manager.HeartbeatForViewer(initial.ID, "viewer-a", "profile-a", 7_000); err != nil {
+		t.Fatalf("handoff timeout did not restore original: %v", err)
+	}
+}
+
+func TestStoppingHandoffViewerRevokesThePair(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StopViewer("viewer-a")
+	for _, id := range []string{initial.ID, handoff.Session.ID} {
+		if _, ok := manager.LookupForViewer(id, "viewer-a", "profile-a", false); ok {
+			t.Fatalf("viewer stop retained %s", id)
+		}
+	}
+}
+
+func TestStopRacingWithHandoffResolutionRevokesTheSurvivor(t *testing.T) {
+	for _, attached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attached=%t", attached), func(t *testing.T) {
+			manager, _ := testManager(t, nil)
+			initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+			initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacementPlan := initialPlan
+			replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+			handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", attached); err != nil {
+				t.Fatal(err)
+			}
+			stoppedID, survivorID := handoff.Session.ID, initial.ID
+			if attached {
+				stoppedID, survivorID = initial.ID, handoff.Session.ID
+			}
+			if !manager.StopForViewer(stoppedID, "viewer-a", "profile-a") {
+				t.Fatal("stop arriving after resolution was not applied")
+			}
+			if _, ok := manager.LookupForViewer(survivorID, "viewer-a", "profile-a", false); ok {
+				t.Fatal("stop racing with resolution left the survivor authorized")
+			}
+		})
+	}
+}
+
+func TestStoppingEitherHandoffSessionRevokesThePair(t *testing.T) {
+	for _, stopReplacement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replacement=%t", stopReplacement), func(t *testing.T) {
+			manager, _ := testManager(t, nil)
+			initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+			initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacementPlan := initialPlan
+			replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+			handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stopID := initial.ID
+			if stopReplacement {
+				stopID = handoff.Session.ID
+			}
+			if !manager.StopForViewer(stopID, "viewer-a", "profile-a") {
+				t.Fatal("stop failed")
+			}
+			for _, id := range []string{initial.ID, handoff.Session.ID} {
+				if _, ok := manager.LookupForViewer(id, "viewer-a", "profile-a", false); ok {
+					t.Fatalf("stopping a pending handoff retained %s", id)
+				}
+			}
+		})
+	}
+}
+
+func TestExpiredQualityHandoffLookupAbortsCandidateBeforeExpiringOriginal(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	record := manager.handoffs[handoff.ID]
+	record.expiresAt = time.Now().Add(-time.Second)
+	manager.handoffs[handoff.ID] = record
+	old := manager.sessions[initial.ID]
+	old.ExpiresAt = record.expiresAt
+	manager.sessions[initial.ID] = old
+	manager.mu.Unlock()
+
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", true); !ok {
+		t.Fatal("deadline lookup expired the original instead of aborting the candidate")
+	}
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); ok {
+		t.Fatal("deadline lookup retained the unacknowledged candidate")
+	}
+}
+
+func TestCanceledQualityHandoffPreservesOriginalAndRevokesCandidateInputs(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	ctx, cancel := context.WithCancel(context.Background())
+	executor.onStart = cancel
+	if _, err := manager.PrepareHandoffContext(ctx, initial.ID, "profile-a", replacementPlan, 5_000); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled handoff = %v, want canceled", err)
+	}
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("canceled handoff revoked original")
+	}
+	if generations := manager.Status().Generations; len(generations) != 1 || generations[0].ID != initial.GenerationID {
+		t.Fatalf("canceled handoff generations = %#v", generations)
+	}
+	executor.mu.Lock()
+	commands := append([][]string(nil), executor.commands...)
+	executor.mu.Unlock()
+	if len(commands) != 2 {
+		t.Fatalf("started commands = %d, want original and candidate", len(commands))
+	}
+	for _, token := range commandInputTokens(commands[0]) {
+		if _, _, _, _, ok := manager.InputFile(token); !ok {
+			t.Fatal("canceled handoff revoked original input")
+		}
+	}
+	for _, token := range commandInputTokens(commands[1]) {
+		if _, _, _, _, ok := manager.InputFile(token); ok {
+			t.Fatal("canceled handoff retained candidate input")
+		}
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.handoffs) != 0 || len(manager.replacements) != 0 || len(manager.preparingHandoffs) != 0 {
+		t.Fatalf("canceled handoff retained state: active=%d replacements=%d preparing=%d", len(manager.handoffs), len(manager.replacements), len(manager.preparingHandoffs))
+	}
+}
+
+func TestQualityHandoffProtectsSourceDuringPreparation(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	nearExpiry := time.Now().Add(10 * time.Millisecond)
+	executor.mu.Lock()
+	initialToken := commandInputTokens(executor.commands[0])[0]
+	executor.mu.Unlock()
+	old := manager.sessions[initial.ID]
+	old.ExpiresAt = nearExpiry
+	manager.sessions[initial.ID] = old
+	manager.generations[initial.GenerationID].leases[initial.ID] = nearExpiry
+	authority := manager.inputs[initialToken]
+	authority.expiresAt = nearExpiry
+	manager.inputs[initialToken] = authority
+	manager.mu.Unlock()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor.onStart = func() { close(started) }
+	executor.startBlock = release
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000)
+		result <- err
+	}()
+	<-started
+
+	manager.mu.Lock()
+	protected := manager.sessions[initial.ID]
+	lease := manager.generations[initial.GenerationID].leases[initial.ID]
+	inputExpiry := manager.inputs[initialToken].expiresAt
+	manager.mu.Unlock()
+	if !protected.ExpiresAt.After(nearExpiry) || lease != protected.ExpiresAt || inputExpiry != protected.ExpiresAt {
+		t.Fatalf("preparation protection session=%v lease=%v input=%v old=%v", protected.ExpiresAt, lease, inputExpiry, nearExpiry)
+	}
+	manager.Sweep(nearExpiry.Add(time.Nanosecond))
+	if _, ok := manager.LookupForViewer(initial.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("lease sweep retired the source during candidate preparation")
+	}
+	if _, err := manager.SeekForViewer(initial.ID, "viewer-a", "profile-a", 9_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("seek during preparation = %v, want preparing", err)
+	}
+	if _, err := manager.ReplaceContext(context.Background(), initial.ID, "profile-a", replacementPlan, 9_000); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("replace during preparation = %v, want preparing", err)
+	}
+	if _, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", -1, false, false); !errors.Is(err, ErrPreparing) {
+		t.Fatalf("subtitle mutation during preparation = %v, want preparing", err)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQualityHandoffCancellationFencesHungCandidateCompletion(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	executor.onStart = func() { close(started) }
+	executor.startBlock = release
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.PrepareHandoffContextWithCommit(ctx, initial.ID, "profile-a", replacementPlan, 5_000, nil)
+		result <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled hung preparation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled hung preparation did not return")
+	}
+	if _, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", -1, false, false); err != nil {
+		t.Fatalf("canceled preparation retained its control reservation: %v", err)
+	}
+	close(release)
+	executor.mu.Lock()
+	processes := len(executor.processes)
+	executor.mu.Unlock()
+	if processes != 1 || len(manager.Status().Generations) != 1 {
+		t.Fatalf("canceled candidate started late: processes=%d generations=%#v", processes, manager.Status().Generations)
+	}
+}
+
+func TestHandoffCommitCallbackAndControlReservationAreAtomic(t *testing.T) {
+	manager, executor := testManager(t, nil)
+	initialPlan := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000}
+	initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitEntered := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	candidateStarted := make(chan struct{})
+	releaseCandidate := make(chan struct{})
+	executor.onStart = func() { close(candidateStarted); <-releaseCandidate }
+	replacementPlan := initialPlan
+	replacementPlan.Width, replacementPlan.Height, replacementPlan.VideoBitrate = 854, 480, 1_000_000
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.PrepareHandoffContextWithCommit(context.Background(), initial.ID, "profile-a", replacementPlan, 5_000, func() error {
+			close(commitEntered)
+			<-releaseCommit
+			return nil
+		})
+		result <- err
+	}()
+	<-commitEntered
+	mutation := make(chan error, 1)
+	go func() {
+		_, err := manager.SelectSubtitleWithCommit(initial.ID, "viewer-a", "profile-a", -1, false, false, func() error { return nil })
+		mutation <- err
+	}()
+	select {
+	case err := <-mutation:
+		t.Fatalf("control passed an in-flight durable callback: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseCommit)
+	<-candidateStarted
+	if err := <-mutation; !errors.Is(err, ErrPreparing) {
+		t.Fatalf("control after handoff reservation = %v, want preparing", err)
+	}
+	close(releaseCandidate)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplacementInheritsCurrentSubtitleState(t *testing.T) {
+	for _, smooth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("smooth=%t", smooth), func(t *testing.T) {
+			manager, _ := testManager(t, nil)
+			subtitles := []SubtitleSource{{Index: 2, SourceIndex: 2, SourceKey: "subtitle-key", Codec: "subrip"}}
+			initialPlan := Plan{Kind: Transcode, SourceKey: "video-key", VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000, SubtitleSources: subtitles}
+			initial, err := manager.CreateForViewer("viewer-a", "profile-a", "film", initialPlan, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.SelectSubtitle(initial.ID, "viewer-a", "profile-a", 2, false, true); err != nil {
+				t.Fatal(err)
+			}
+
+			stalePlan := initialPlan
+			stalePlan.Width, stalePlan.Height, stalePlan.VideoBitrate = 854, 480, 1_000_000
+			stalePlan.SubtitleSources = nil
+			var replacement Session
+			if smooth {
+				handoff, err := manager.PrepareHandoffContext(context.Background(), initial.ID, "profile-a", stalePlan, 5_000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replacement = handoff.Session
+			} else {
+				replacement, err = manager.ReplaceContext(context.Background(), initial.ID, "profile-a", stalePlan, 5_000)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if replacement.Plan.SourceKey != "video-key" || !replacement.Plan.SubtitleSelected || replacement.Plan.SubtitleSelectionIndex != 2 || !reflect.DeepEqual(replacement.Plan.SubtitleSources, subtitles) {
+				t.Fatalf("replacement inherited stale source state: %#v", replacement.Plan)
+			}
+		})
 	}
 }

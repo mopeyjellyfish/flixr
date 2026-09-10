@@ -94,6 +94,7 @@ export type PlaybackPlan = {
   heartbeat_url: string;
   seek_url: string;
   stop_url: string;
+  handoff_url?: string;
   resume_ms: number;
   stream_offset_ms: number;
   expires_at: number;
