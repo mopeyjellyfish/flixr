@@ -18,6 +18,7 @@ import (
 
 type playbackPlanRequest struct {
 	CatalogID              string                      `json:"catalog_id"`
+	VersionID              string                      `json:"version_id,omitempty"`
 	ContinueWatchingIntent string                      `json:"continue_watching_intent,omitempty"`
 	Capabilities           playback.ClientCapabilities `json:"capabilities"`
 	Quality                playback.QualityRequest     `json:"quality"`
@@ -231,8 +232,8 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 	if !s.playableItem(w, r, body.CatalogID) {
 		return
 	}
-	item, err := s.playbackCatalogItem(r.Context(), r, body.CatalogID)
-	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (item.Kind != "film" && item.Kind != "episode")) {
+	logical, err := s.playbackCatalogItem(r.Context(), r, body.CatalogID)
+	if errors.Is(err, catalog.ErrCatalogNotFound) || (err == nil && (logical.Kind != "film" && logical.Kind != "episode")) {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
 	}
@@ -253,17 +254,32 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "playback_failed")
 		return
 	}
-	track, hasAudio := selectedAudio(item.Audio, body.AudioStreamIndex, body.AudioExternal, preferredLanguage)
-	if body.AudioStreamIndex != nil && !hasAudio {
-		fail(w, http.StatusBadRequest, "invalid_request")
-		return
+	requestedVersionID := body.VersionID
+	if requestedVersionID == "" {
+		requestedVersionID, err = s.catalog.PlaybackVersionPreference(profile.ID, body.CatalogID)
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "playback_failed")
+			return
+		}
 	}
-	plan, err := playback.PlanForQuality(mediaProperties(item, track, hasAudio), body.Capabilities, readiness, body.Quality)
+	chosen, versionCode, alternatives, err := s.choosePlaybackVersion(r, body, profile.ID, preferredLanguage, readiness)
 	if err != nil {
+		if versionCode != "" {
+			status := http.StatusConflict
+			if versionCode == "playback_version_incompatible" {
+				status = http.StatusUnprocessableEntity
+			}
+			writePlaybackVersionError(w, status, versionCode, requestedVersionID, alternatives)
+			return
+		}
+		if body.AudioStreamIndex != nil {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
 		playbackFailure(w, err)
 		return
 	}
-	plan.SourceKey = item.SourceKey()
+	item, track, plan := chosen.item, chosen.track, chosen.plan
 	preference, err := s.house.SubtitlePreference(profile.ID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "playback_failed")
@@ -284,12 +300,12 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "profile_required")
 		return
 	}
-	position, generation, err := s.house.ProgressState(s.session(r), item.ID)
+	position, generation, err := s.house.ProgressState(s.session(r), body.CatalogID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "progress_failed")
 		return
 	}
-	session, err := s.playback.CreateForViewer(viewerID, profile.ID, item.ID, plan, position, generation+1)
+	session, err := s.playback.CreateForViewer(viewerID, profile.ID, body.CatalogID, plan, position, generation+1)
 	if err != nil {
 		playbackFailure(w, err)
 		return
@@ -301,7 +317,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 	// Only an admitted session may claim progress. A manual action or another
 	// admitted plan during preparation wins the compare-and-swap and revokes
 	// this candidate before its unguessable session ID is exposed to the client.
-	if _, _, err := s.house.BeginPlayback(profile.ID, item.ID, generation); err != nil {
+	if _, _, err := s.house.BeginPlayback(profile.ID, body.CatalogID, generation); err != nil {
 		s.playback.Stop(session.ID, profile.ID)
 		if errors.Is(err, household.ErrProgressConflict) {
 			fail(w, http.StatusConflict, "progress_conflict")
@@ -321,10 +337,17 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		s.playback.Stop(session.ID, profile.ID)
 		return
 	}
-	if err := s.catalog.AcceptContinueWatching(profile.ID, item.ID, body.ContinueWatchingIntent == "user"); err != nil {
+	if err := s.catalog.AcceptContinueWatching(profile.ID, body.CatalogID, body.ContinueWatchingIntent == "user"); err != nil {
 		s.playback.Stop(session.ID, profile.ID)
 		fail(w, http.StatusInternalServerError, "playback_failed")
 		return
+	}
+	if body.VersionID != "" {
+		if err := s.catalog.SavePlaybackVersion(profile.ID, body.CatalogID, chosen.version.ID); err != nil {
+			s.playback.Stop(session.ID, profile.ID)
+			fail(w, http.StatusInternalServerError, "playback_failed")
+			return
+		}
 	}
 	s.playback.StopSupersededPlans(session)
 	write(w, http.StatusCreated, playbackResponse(session, item.Audio, item.Subtitles))
@@ -357,6 +380,7 @@ func playbackResponse(session playback.Session, tracks []catalog.AudioTrack, sub
 		"expires_at":          session.ExpiresAt.Unix(),
 		"audio_tracks":        tracks,
 		"subtitle_tracks":     subtitles,
+		"version":             session.Plan.Version,
 	}
 	if session.Plan.SubtitleSelected {
 		for index := range subtitles {
@@ -479,6 +503,37 @@ func (s *Server) playbackNext(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
 		return
 	}
+	if next.State == catalog.EpisodeSequenceNext && next.Episode != nil && session.Plan.VersionExplicit {
+		policy, policyOK := s.requestPolicy(r)
+		if !policyOK {
+			fail(w, http.StatusForbidden, "profile_required")
+			return
+		}
+		versions, versionErr := s.catalog.MediaVersions(r.Context(), session.ProfileID, next.Episode.ID, policy)
+		if versionErr != nil {
+			fail(w, http.StatusInternalServerError, "catalog_query_failed")
+			return
+		}
+		found := false
+		alternatives := []catalog.MediaVersion{}
+		for _, version := range versions {
+			if version.ID == session.Plan.VersionID && version.Available {
+				found = true
+				continue
+			}
+			if version.Available {
+				version.Selected = false
+				alternatives = append(alternatives, version)
+			}
+		}
+		if found {
+			next.SelectedVersionID = session.Plan.VersionID
+		} else {
+			next.State = catalog.EpisodeSequenceVersionUnavailable
+			next.RequestedVersionID = session.Plan.VersionID
+			next.Alternatives = alternatives
+		}
+	}
 	write(w, http.StatusOK, next)
 }
 
@@ -548,7 +603,7 @@ func (s *Server) playbackHeartbeat(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, itemErr := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	item, itemErr := s.sessionPlaybackCatalogItem(r.Context(), r, session)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
 	unlock := s.lockPlaybackProgress(session.ProfileID, session.CatalogID)
 	defer unlock()
@@ -585,7 +640,7 @@ func (s *Server) playbackSeek(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, itemErr := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	item, itemErr := s.sessionPlaybackCatalogItem(r.Context(), r, session)
 	completed := body.Ended || (itemErr == nil && item.DurationMS > 0 && body.PositionMS >= item.DurationMS-item.DurationMS/10)
 	unlock := s.lockPlaybackProgress(session.ProfileID, session.CatalogID)
 	defer unlock()
@@ -639,7 +694,7 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	item, err := s.sessionPlaybackCatalogItem(r.Context(), r, session)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -720,7 +775,7 @@ func (s *Server) playbackQuality(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	item, err := s.sessionPlaybackCatalogItem(r.Context(), r, session)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return
@@ -841,7 +896,7 @@ func (s *Server) playbackSubtitleSelection(w http.ResponseWriter, r *http.Reques
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	item, err := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	item, err := s.sessionPlaybackCatalogItem(r.Context(), r, session)
 	if err != nil {
 		fail(w, http.StatusNotFound, "catalog_not_found")
 		return

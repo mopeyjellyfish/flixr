@@ -56,7 +56,7 @@ func TestCreateUsesOnlineSnapshotAndOnlyReferencedArtwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.FormatVersion != 1 || manifest.AppVersion != "v0.test" || manifest.SchemaVersion != 29 {
+	if manifest.FormatVersion != 1 || manifest.AppVersion != "v0.test" || manifest.SchemaVersion != sqlite.LatestSchemaVersion {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 	want := map[string]bool{"database/flixr.db": true, "artwork/objects/kept-image": true}

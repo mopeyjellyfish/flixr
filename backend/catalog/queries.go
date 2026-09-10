@@ -23,18 +23,18 @@ func (c *Catalog) Browse(query string, offset, limit int) ([]Item, int, error) {
 	needle := likeLiteral(query)
 	var total int
 	if err := c.db.QueryRow(`SELECT COUNT(*) FROM (
-		SELECT id FROM catalog_items WHERE merged_into='' AND series_id='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+		SELECT id FROM catalog_items WHERE merged_into='' AND series_id='' AND NOT EXISTS (SELECT 1 FROM catalog_film_version_memberships v WHERE v.member_catalog_id=catalog_items.id) AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 		UNION ALL
-		SELECT id FROM catalog_series WHERE merged_into='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+		SELECT id FROM catalog_series WHERE merged_into='' AND NOT EXISTS (SELECT 1 FROM catalog_series_version_memberships v WHERE v.member_series_id=catalog_series.id) AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 	)`, needle, needle).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count browse catalog: %w", err)
 	}
 	if limit <= 0 {
 		limit = total
 	}
-	rows, err := c.db.Query(`SELECT id,'film' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_items WHERE merged_into='' AND series_id='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+	rows, err := c.db.Query(`SELECT id,'film' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_items WHERE merged_into='' AND series_id='' AND NOT EXISTS (SELECT 1 FROM catalog_film_version_memberships v WHERE v.member_catalog_id=catalog_items.id) AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 		UNION ALL
-		SELECT id,'series' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_series WHERE merged_into='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
+		SELECT id,'series' AS kind,title,local_only,provider_id,metadata_provider,metadata_language,metadata_region,match_confidence,owner_matched,owner_unmatched,year,synopsis,poster,backdrop,genres_json,added_at,playable,demo FROM catalog_series WHERE merged_into='' AND NOT EXISTS (SELECT 1 FROM catalog_series_version_memberships v WHERE v.member_series_id=catalog_series.id) AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE
 		ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, needle, needle, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("browse catalog: %w", err)

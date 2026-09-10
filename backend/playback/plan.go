@@ -114,6 +114,9 @@ const (
 // Plan describes the selected path and its server-controlled output rendition.
 type Plan struct {
 	SourceKey              string           `json:"-"`
+	VersionID              string           `json:"-"`
+	VersionExplicit        bool             `json:"-"`
+	Version                MediaVersion     `json:"-"`
 	Kind                   Kind             `json:"kind"`
 	Container              string           `json:"container,omitempty"`
 	VideoCodec             string           `json:"video_codec,omitempty"`
@@ -144,6 +147,21 @@ type Plan struct {
 	SubtitleSelectionIndex int              `json:"-"`
 	SubtitleExternal       bool             `json:"-"`
 	SubtitleSelected       bool             `json:"-"`
+}
+
+type MediaVersion struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	EditionID    string `json:"edition_id"`
+	EditionLabel string `json:"edition_label,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	HDR          string `json:"hdr,omitempty"`
+	VideoCodec   string `json:"video_codec,omitempty"`
+	Container    string `json:"container,omitempty"`
+	Bitrate      int64  `json:"bitrate,omitempty"`
+	Selected     bool   `json:"selected"`
+	Available    bool   `json:"available"`
 }
 
 // SubtitleSource is a path-free snapshot admitted with a playback session.

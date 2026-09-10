@@ -56,7 +56,7 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 	if c.db == nil {
 		return nil, nil
 	}
-	rows, err := c.db.Query(`SELECT catalog_id,location_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix,present FROM catalog_physical_files ORDER BY present,last_seen,id`)
+	rows, err := c.db.Query(`SELECT catalog_id,location_id,root_kind,relative_path,fingerprint,full_digest,change_token,source_series_id,size_bytes,mtime_unix,present,container,duration_ms,video_codec,video_profile,video_level,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,probe_revision FROM catalog_physical_files ORDER BY present,last_seen,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -65,14 +65,31 @@ func (c *Catalog) loadPhysicalSources(previous map[scanKey]Item) ([]Item, error)
 		var catalogID, locationID, root, path, fp, digest, token, sourceSeries string
 		var size, mtime int64
 		var present bool
-		if err := rows.Scan(&catalogID, &locationID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime, &present); err != nil {
+		var audio, subtitles string
+		var properties MediaProperties
+		var probeRevision int
+		if err := rows.Scan(&catalogID, &locationID, &root, &path, &fp, &digest, &token, &sourceSeries, &size, &mtime, &present, &properties.Container, &properties.DurationMS, &properties.VideoCodec, &properties.VideoProfile, &properties.VideoLevel, &properties.PrimaryVideoStreamIndex, &properties.Width, &properties.Height, &properties.Bitrate, &properties.FrameRateMilli, &properties.BitDepth, &properties.HDR, &audio, &subtitles, &probeRevision); err != nil {
 			return nil, err
+		}
+		embeddedAudio, embeddedSubtitles := []AudioTrack{}, []SubtitleTrack{}
+		if json.Unmarshal([]byte(audio), &embeddedAudio) != nil || json.Unmarshal([]byte(subtitles), &embeddedSubtitles) != nil {
+			return nil, errors.New("decode physical media properties")
 		}
 		c.mu.RLock()
 		item, ok := c.items[catalogID]
 		c.mu.RUnlock()
 		if !ok {
 			continue
+		}
+		properties.Audio = append(embeddedAudio, externalAudioTracks(item.Audio)...)
+		properties.Subtitles = append(embeddedSubtitles, externalSubtitleTracks(item.Subtitles)...)
+		item.MediaProperties = properties
+		// The logical projection remains the compatibility marker for databases
+		// written before physical properties were durable. A stale projection must
+		// still force the normal reprobe path even if its backfilled physical row
+		// happens to carry a newer marker.
+		if item.probeRevision == mediaProbeRevision {
+			item.probeRevision = probeRevision
 		}
 		item.path, item.rootKind, item.sourceLocationID, item.fingerprint, item.digest, item.changeToken, item.size, item.mtime = path, root, locationID, fp, digest, token, size, mtime
 		item.sourceSeriesID = sourceSeries

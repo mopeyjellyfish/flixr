@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -168,7 +169,7 @@ func (c *Catalog) physicalSources(id string) ([]physicalSource, error) {
 	if !ok {
 		return nil, ErrCatalogNotFound
 	}
-	rows, err := c.db.Query(`SELECT f.location_id,x.library_id,x.root_path,f.root_kind,f.relative_path,f.full_digest,f.change_token,f.source_series_id,f.size_bytes,f.mtime_unix,f.selected FROM catalog_physical_files f JOIN library_locations x ON x.id=f.location_id WHERE f.catalog_id=? AND f.present=1`, id)
+	rows, err := c.db.Query(`SELECT f.location_id,x.library_id,x.root_path,f.root_kind,f.relative_path,f.full_digest,f.change_token,f.source_series_id,f.size_bytes,f.mtime_unix,f.selected,f.container,f.duration_ms,f.video_codec,f.video_profile,f.video_level,f.primary_video_stream_index,f.video_width,f.video_height,f.video_bitrate,f.video_frame_rate_milli,f.video_bit_depth,f.video_hdr,f.audio_json,f.subtitle_json,f.probe_revision FROM catalog_physical_files f JOIN library_locations x ON x.id=f.location_id WHERE f.catalog_id=? AND f.present=1`, id)
 	if err != nil {
 		return nil, fmt.Errorf("load physical access sources: %w", err)
 	}
@@ -177,9 +178,16 @@ func (c *Catalog) physicalSources(id string) ([]physicalSource, error) {
 	for rows.Next() {
 		x := physicalSource{Item: base}
 		var selected int
-		if err := rows.Scan(&x.sourceLocationID, &x.libraryID, &x.sourceRoot, &x.rootKind, &x.path, &x.digest, &x.changeToken, &x.sourceSeriesID, &x.size, &x.mtime, &selected); err != nil {
+		var audio, subtitles string
+		if err := rows.Scan(&x.sourceLocationID, &x.libraryID, &x.sourceRoot, &x.rootKind, &x.path, &x.digest, &x.changeToken, &x.sourceSeriesID, &x.size, &x.mtime, &selected, &x.Container, &x.DurationMS, &x.VideoCodec, &x.VideoProfile, &x.VideoLevel, &x.PrimaryVideoStreamIndex, &x.Width, &x.Height, &x.Bitrate, &x.FrameRateMilli, &x.BitDepth, &x.HDR, &audio, &subtitles, &x.probeRevision); err != nil {
 			return nil, fmt.Errorf("scan physical access source: %w", err)
 		}
+		embeddedAudio, embeddedSubtitles := []AudioTrack{}, []SubtitleTrack{}
+		if json.Unmarshal([]byte(audio), &embeddedAudio) != nil || json.Unmarshal([]byte(subtitles), &embeddedSubtitles) != nil {
+			return nil, errors.New("decode physical media properties")
+		}
+		x.Audio = append(embeddedAudio, externalAudioTracks(base.Audio)...)
+		x.Subtitles = append(embeddedSubtitles, externalSubtitleTracks(base.Subtitles)...)
 		x.selected = selected != 0
 		out = append(out, x)
 	}

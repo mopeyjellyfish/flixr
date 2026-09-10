@@ -16,11 +16,15 @@ const (
 	EpisodeSequenceEnd                EpisodeSequenceState = "end_of_series"
 	EpisodeSequenceNotEpisodic        EpisodeSequenceState = "not_episodic"
 	EpisodeSequenceContextUnavailable EpisodeSequenceState = "context_unavailable"
+	EpisodeSequenceVersionUnavailable EpisodeSequenceState = "version_unavailable"
 )
 
 type EpisodeSequence struct {
-	State   EpisodeSequenceState `json:"state"`
-	Episode *Item                `json:"episode,omitempty"`
+	State              EpisodeSequenceState `json:"state"`
+	Episode            *Item                `json:"episode,omitempty"`
+	SelectedVersionID  string               `json:"selected_version_id,omitempty"`
+	RequestedVersionID string               `json:"requested_version_id,omitempty"`
+	Alternatives       []MediaVersion       `json:"alternatives,omitempty"`
 }
 
 // EpisodeAfter returns the next playable, incomplete episode after current in

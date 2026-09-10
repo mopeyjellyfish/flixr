@@ -187,6 +187,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/identity/repairs", s.identityRepairs)
 	s.mux.HandleFunc("POST /api/v1/owner/identity/merges", s.identityMerge)
 	s.mux.HandleFunc("POST /api/v1/owner/identity/merges/{id}/unmerge", s.identityUnmerge)
+	s.mux.HandleFunc("GET /api/v1/owner/media-version-groups", s.mediaVersionGroups)
+	s.mux.HandleFunc("POST /api/v1/owner/media-version-groups", s.mediaVersionGroups)
+	s.mux.HandleFunc("PATCH /api/v1/owner/media-version-groups/{kind}/{id}", s.mediaVersionGroup)
+	s.mux.HandleFunc("DELETE /api/v1/owner/media-version-groups/{kind}/{id}/members/{member}", s.mediaVersionMember)
 	s.mux.HandleFunc("GET /api/v1/owner/metadata/unmatched", s.unmatchedMetadata)
 	s.mux.HandleFunc("GET /api/v1/owner/metadata/{kind}/{id}/candidates", s.metadataCandidates)
 	s.mux.HandleFunc("PUT /api/v1/owner/metadata/{kind}/{id}/match", s.metadataMatch)
@@ -601,6 +605,15 @@ func (s *Server) film(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "catalog_not_found")
 		return
 	}
+	versions, err := s.detailVersions(r, v.ID)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "catalog_query_failed")
+		return
+	}
+	v.Versions = versions
+	if len(versions) > 0 {
+		v.EditionLabel = versions[0].EditionLabel
+	}
 	write(w, http.StatusOK, v)
 }
 func (s *Server) series(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +637,12 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if allowed {
+				versions, versionErr := s.detailVersions(r, episode.ID)
+				if versionErr != nil {
+					fail(w, http.StatusInternalServerError, "catalog_query_failed")
+					return
+				}
+				episode.Versions = versions
 				episodes = append(episodes, episode)
 			}
 		}
@@ -636,6 +655,9 @@ func (s *Server) series(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	v.Seasons = seasons
+	if len(v.Seasons) > 0 && len(v.Seasons[0].Episodes) > 0 && len(v.Seasons[0].Episodes[0].Versions) > 0 {
+		v.EditionLabel = v.Seasons[0].Episodes[0].Versions[0].EditionLabel
+	}
 	write(w, http.StatusOK, v)
 }
 func (s *Server) item(w http.ResponseWriter, r *http.Request) {
@@ -649,6 +671,17 @@ func (s *Server) item(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		fail(w, 404, "catalog_not_found")
 		return
+	}
+	if v.Kind == "film" || v.Kind == "episode" {
+		versions, err := s.detailVersions(r, v.ID)
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "catalog_query_failed")
+			return
+		}
+		v.Versions = versions
+		if len(versions) > 0 {
+			v.EditionLabel = versions[0].EditionLabel
+		}
 	}
 	write(w, 200, v)
 }

@@ -147,7 +147,7 @@ func (c *Catalog) OpenSource(id, key string) (*os.File, error) {
 			x.sourceRoot = root
 		}
 		if rootErr != nil || x.SourceKey() != key {
-			candidates, err := c.physicalSources(id)
+			candidates, err := c.groupedPhysicalSources(id)
 			if err != nil {
 				return nil, os.ErrNotExist
 			}

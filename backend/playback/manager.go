@@ -1268,6 +1268,9 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 
 func inheritReplacementState(plan, current Plan) Plan {
 	plan.SourceKey = current.SourceKey
+	plan.VersionID = current.VersionID
+	plan.VersionExplicit = current.VersionExplicit
+	plan.Version = current.Version
 	plan.SubtitleSources = current.SubtitleSources
 	plan.SubtitleSelectionIndex = current.SubtitleSelectionIndex
 	plan.SubtitleExternal = current.SubtitleExternal
@@ -1277,6 +1280,28 @@ func inheritReplacementState(plan, current Plan) Plan {
 
 func (m *Manager) Stop(id, profileID string) bool {
 	return m.StopForViewer(id, "", profileID)
+}
+
+// StopCatalogIDs revokes sessions whose immutable source relationship may have
+// changed after an owner edits a media version group.
+func (m *Manager) StopCatalogIDs(catalogIDs []string) {
+	affected := make(map[string]bool, len(catalogIDs))
+	for _, id := range catalogIDs {
+		affected[id] = true
+	}
+	var retire []*generation
+	m.mu.Lock()
+	for id, session := range m.sessions {
+		if affected[session.CatalogID] {
+			if generation := m.stopSessionLocked(id); generation != nil {
+				retire = append(retire, generation)
+			}
+		}
+	}
+	m.mu.Unlock()
+	for _, generation := range retire {
+		m.retireGeneration(context.Background(), generation)
+	}
 }
 
 func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {

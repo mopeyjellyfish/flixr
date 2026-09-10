@@ -148,28 +148,30 @@ func nonNegative64(value int64) int64 {
 }
 
 type Item struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Kind         string   `json:"kind"`
-	Season       int      `json:"season,omitempty"`
-	Episode      int      `json:"episode,omitempty"`
-	SeriesID     string   `json:"series_id,omitempty"`
-	LocalOnly    bool     `json:"local_only"`
-	ProviderID   string   `json:"provider_id,omitempty"`
-	Provider     string   `json:"metadata_provider,omitempty"`
-	Language     string   `json:"metadata_language,omitempty"`
-	Region       string   `json:"metadata_region,omitempty"`
-	Confidence   float64  `json:"match_confidence,omitempty"`
-	OwnerMatch   bool     `json:"owner_matched,omitempty"`
-	OwnerUnmatch bool     `json:"owner_unmatched,omitempty"`
-	Year         int      `json:"year,omitempty"`
-	Synopsis     string   `json:"synopsis,omitempty"`
-	Poster       string   `json:"poster,omitempty"`
-	Backdrop     string   `json:"backdrop,omitempty"`
-	Genres       []string `json:"genres"`
-	AddedAt      int64    `json:"added_at"`
-	Playable     bool     `json:"playable"`
-	Demo         bool     `json:"demo"`
+	ID           string         `json:"id"`
+	Title        string         `json:"title"`
+	Kind         string         `json:"kind"`
+	Season       int            `json:"season,omitempty"`
+	Episode      int            `json:"episode,omitempty"`
+	SeriesID     string         `json:"series_id,omitempty"`
+	LocalOnly    bool           `json:"local_only"`
+	ProviderID   string         `json:"provider_id,omitempty"`
+	Provider     string         `json:"metadata_provider,omitempty"`
+	Language     string         `json:"metadata_language,omitempty"`
+	Region       string         `json:"metadata_region,omitempty"`
+	Confidence   float64        `json:"match_confidence,omitempty"`
+	OwnerMatch   bool           `json:"owner_matched,omitempty"`
+	OwnerUnmatch bool           `json:"owner_unmatched,omitempty"`
+	Year         int            `json:"year,omitempty"`
+	Synopsis     string         `json:"synopsis,omitempty"`
+	Poster       string         `json:"poster,omitempty"`
+	Backdrop     string         `json:"backdrop,omitempty"`
+	Genres       []string       `json:"genres"`
+	AddedAt      int64          `json:"added_at"`
+	Playable     bool           `json:"playable"`
+	Demo         bool           `json:"demo"`
+	EditionLabel string         `json:"edition_label,omitempty"`
+	Versions     []MediaVersion `json:"versions,omitempty"`
 	MediaProperties
 
 	metadataVersion  uint64
@@ -217,6 +219,7 @@ type Series struct {
 	AddedAt      int64    `json:"added_at"`
 	Playable     bool     `json:"playable"`
 	Demo         bool     `json:"demo"`
+	EditionLabel string   `json:"edition_label,omitempty"`
 	Seasons      []Season `json:"seasons,omitempty"`
 }
 
@@ -247,6 +250,7 @@ type Catalog struct {
 	demo                             bool
 	demoSource                       string
 	mu                               sync.RWMutex
+	mediaVersionsMu                  sync.Mutex
 	db                               *sqlite.DB
 	fs                               afero.Fs
 	film, tv                         string
@@ -1705,7 +1709,15 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			}
 			selected := logical.Playable && logical.sourceLocationID == source.sourceLocationID && logical.rootKind == source.rootKind && logical.path == source.path
 			physicalID := id("physical", source.sourceLocationID+"\x00"+source.path+"\x00"+source.digest+"\x00"+source.changeToken)
-			if _, err = tx.Exec(`INSERT INTO catalog_physical_files(id,catalog_id,location_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,full_digest,change_token,source_series_id,last_seen,present,selected) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET catalog_id=excluded.catalog_id,location_id=excluded.location_id,fingerprint=excluded.fingerprint,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,full_digest=excluded.full_digest,change_token=excluded.change_token,source_series_id=excluded.source_series_id,last_seen=excluded.last_seen,present=1,selected=excluded.selected`, physicalID, source.ID, source.sourceLocationID, source.rootKind, source.path, source.fingerprint, source.size, source.mtime, source.digest, source.changeToken, source.sourceSeriesID, time.Now().UnixNano(), 1, boolInt(selected)); err != nil {
+			audio, marshalErr := json.Marshal(embeddedAudio(source.Audio))
+			if marshalErr != nil {
+				return marshalErr
+			}
+			subtitles, marshalErr := json.Marshal(embeddedSubtitles(source.Subtitles))
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_physical_files(id,catalog_id,location_id,root_kind,relative_path,fingerprint,size_bytes,mtime_unix,full_digest,change_token,source_series_id,last_seen,present,selected,container,duration_ms,video_codec,video_profile,video_level,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,probe_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET catalog_id=excluded.catalog_id,location_id=excluded.location_id,fingerprint=excluded.fingerprint,size_bytes=excluded.size_bytes,mtime_unix=excluded.mtime_unix,full_digest=excluded.full_digest,change_token=excluded.change_token,source_series_id=excluded.source_series_id,last_seen=excluded.last_seen,present=1,selected=excluded.selected,container=excluded.container,duration_ms=excluded.duration_ms,video_codec=excluded.video_codec,video_profile=excluded.video_profile,video_level=excluded.video_level,primary_video_stream_index=excluded.primary_video_stream_index,video_width=excluded.video_width,video_height=excluded.video_height,video_bitrate=excluded.video_bitrate,video_frame_rate_milli=excluded.video_frame_rate_milli,video_bit_depth=excluded.video_bit_depth,video_hdr=excluded.video_hdr,audio_json=excluded.audio_json,subtitle_json=excluded.subtitle_json,probe_revision=excluded.probe_revision`, physicalID, source.ID, source.sourceLocationID, source.rootKind, source.path, source.fingerprint, source.size, source.mtime, source.digest, source.changeToken, source.sourceSeriesID, time.Now().UnixNano(), 1, boolInt(selected), source.Container, source.DurationMS, source.VideoCodec, source.VideoProfile, source.VideoLevel, source.PrimaryVideoStreamIndex, source.Width, source.Height, source.Bitrate, source.FrameRateMilli, source.BitDepth, source.HDR, string(audio), string(subtitles), source.probeRevision); err != nil {
 				return err
 			}
 			if selected {
@@ -1918,7 +1930,7 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 	if sqlLimit <= 0 {
 		sqlLimit = -1
 	}
-	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,video_level,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE merged_into='' AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
+	rows, err := c.db.Query(`SELECT id,kind,title,relative_path,local_only,root_kind,fingerprint,size_bytes,mtime_unix,container,duration_ms,video_codec,video_profile,video_level,primary_video_stream_index,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,video_hdr,audio_json,subtitle_json,genres_json,added_at,playable,demo FROM catalog_items WHERE merged_into='' AND NOT EXISTS (SELECT 1 FROM catalog_film_version_memberships v WHERE v.member_catalog_id=catalog_items.id) AND title LIKE '%' || ? || '%' ESCAPE '\' COLLATE NOCASE ORDER BY title COLLATE NOCASE,id LIMIT ? OFFSET ?`, likeLiteral(query), sqlLimit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
