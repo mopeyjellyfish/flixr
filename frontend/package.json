@@ -8,7 +8,7 @@
     "lint": "eslint src e2e *.config.ts",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
-    "test:bundle": "node scripts/check-bundles.mjs",
+    "test:bundle": "node --test scripts/embed.test.mjs && node scripts/check-bundles.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "build:embed": "npm run build && node scripts/embed.mjs",
     "test:e2e": "playwright test",

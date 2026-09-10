@@ -4,14 +4,14 @@ WORKDIR /src
 COPY frontend/package.json frontend/package-lock.json frontend/
 RUN npm --prefix frontend ci
 COPY frontend frontend
-RUN npm --prefix frontend run build
+RUN npm --prefix frontend run build:embed
 
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS backend-build
 WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend ./
-COPY --from=frontend-build /src/frontend/dist ./web/assets
+COPY --from=frontend-build /src/backend/web/assets ./web/assets
 # modernc.org/sqlite is a pure-Go driver, so this executable needs no C toolchain.
 ARG TARGETOS
 ARG TARGETARCH
