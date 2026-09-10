@@ -1,11 +1,50 @@
 package main
 
 import (
-	"github.com/mopeyjellyfish/flixr/backend/catalog"
-	"github.com/mopeyjellyfish/flixr/backend/config"
+	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"github.com/mopeyjellyfish/flixr/backend/config"
+	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
+
+func TestRunRefusesUnsupportedSchemaBeforeStartingServer(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sqlite.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO schema_migrations(version) VALUES(?)`, sqlite.LatestSchemaVersion+1); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = run(context.Background(), config.Bootstrap{DataDir: dir, ListenAddr: "invalid-listen-address"})
+	var compatibility *sqlite.SchemaCompatibilityError
+	if !errors.As(err, &compatibility) {
+		t.Fatalf("startup error = %v, want schema compatibility refusal", err)
+	}
+}
+
+func TestRunHonorsCancellationBeforeDatabaseMigration(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := run(ctx, config.Bootstrap{DataDir: dir, ListenAddr: "127.0.0.1:0"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup error = %v, want cancellation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "flixr.db")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("database created after startup cancellation: %v", statErr)
+	}
+}
 
 func TestExclusiveLocksRejectContention(t *testing.T) {
 	for _, name := range []string{"data", "segment"} {

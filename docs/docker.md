@@ -211,8 +211,14 @@ recovery by starting another scan. To disable all remote requests, set
 
 ## Update and recovery
 
-Stop the service before backing up `/config`; retain its entire contents together.
-Do not copy a live SQLite main database alone while its WAL is active. Then:
+Before an update, create a verified backup in **Server settings → Backups** while
+the current version is healthy, and wait for its status to show success. Keep that
+archive on the dedicated backup mount. Record the current image version or digest.
+Then stop the service and take a filesystem or volume snapshot of the entire
+`/config` mount. Retain its database, WAL, shared-memory, artwork and sidecar files
+together; copying only a live `flixr.db` is not a backup.
+
+Start the pinned new version and inspect its readiness and logs:
 
 ```sh
 docker compose -f compose.release.yml pull
@@ -221,11 +227,33 @@ docker compose -f compose.release.yml logs --tail=50 flixr
 ```
 
 `down` preserves named volumes; `down -v` deletes them. Cache may be discarded while
-stopped. To roll back, stop the service, restore the matching config backup if a
-schema migration occurred, select the previous image version/digest, and restart.
+stopped. Schema migrations run in one transaction. A failed or cancelled migration
+is rolled back, and the next start can retry it. Flixr checks every applied migration
+before starting its HTTP listeners. If startup reports an unsupported schema, keep
+the failed installation stopped. Do not delete rows from `schema_migrations` or edit
+the database. Either run a Flixr version that supports the reported schema, or restore
+a compatible pre-upgrade backup.
+
+To roll back after a schema migration, stop the service, preserve the failed `/config`
+mount for diagnosis, restore the complete stopped pre-upgrade snapshot, select the
+recorded previous image version or digest, and restart. A verified Flixr archive can
+also seed a new empty config volume through `restore-backup` using the previous image;
+the command verifies the archive and upgrades it only as far as that image supports.
+Switch Compose to that restored volume before starting the previous image. Do not run
+a restore command from a historic image over a newer database; images released before
+the compatibility check cannot reliably detect that schema. Restore the compatible
+archive into an empty volume instead.
+
 Never run old and new containers against the same config or segment directory.
 Existing source/demo Compose files continue mounting their previous `/data` volumes
 and explicitly set `FLIXR_DATA_DIR`; no automatic data migration is performed.
+
+Database backups contain server-owned home view/sort choices, library order, audio
+and subtitle language preferences, access rules, accounts, lists, progress and viewing
+history. Streaming quality and measured throughput live in browser `localStorage`;
+playback speed and autoplay cancellation are current-player state. Database upgrades
+do not modify those browser/runtime values, and database backups do not transfer them
+to another browser or device.
 
 ## Database and log maintenance
 

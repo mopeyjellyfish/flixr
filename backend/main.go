@@ -55,7 +55,9 @@ func main() {
 		slog.Error("load Flixr configuration", "err", err)
 		os.Exit(1)
 	}
-	if err := run(context.Background(), cfg); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, cfg); err != nil {
 		slog.Error("Flixr stopped", "err", err)
 		os.Exit(1)
 	}
@@ -105,7 +107,7 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		}
 		defer segmentUnlock()
 	}
-	db, err := sqlite.Open(cfg.DataDir)
+	db, err := sqlite.OpenContext(ctx, cfg.DataDir)
 	if err != nil {
 		return err
 	}
@@ -232,8 +234,6 @@ func run(ctx context.Context, cfg config.Bootstrap) error {
 		application.ServeHTTP(w, r)
 	})
 	inputServer := &http.Server{Handler: inputOnly, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	errCh := make(chan error, 2)
 	go func() { errCh <- inputServer.Serve(inputListener) }()
 	go func() {
