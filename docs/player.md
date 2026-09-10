@@ -79,3 +79,17 @@ presentation contract but does not establish physical iPhone or iPad behavior.
 Simulated viewports also do not establish physical TV remote, mobile hardware,
 HDR or A/V-sync qualification. Those v1 qualification gates remain tracked in
 #112 and the related device issues.
+
+`scripts/fullscreen-seek-acceptance.mjs` verifies the source-replacement path
+against an isolated loopback server containing the generated 120-second color
+probe (`Fullscreen Color Probe 2026.mov`: red, blue, green and white in
+30-second blocks). It asserts that a fullscreen seek to 50 seconds decodes blue,
+a reverse seek to 5 seconds decodes red, the same video element remains
+fullscreen and the loading overlay contains no visible text. Set
+`FLIXR_TEST_BASE` and `FLIXR_TEST_OUTPUT` before running it.
+
+If an active SourceBuffer cannot finish updating and clear its old timestamp
+ranges within the bounded safety wait, FlixR uses a normal media reattachment so
+the seek target remains accurate. Standard container fullscreen remains active,
+but that exceptional fallback may leave native OS video fullscreen. Physical
+iPhone and iPad qualification must include this fallback before it is claimed.

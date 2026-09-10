@@ -1441,6 +1441,7 @@ it('reattaches source-relative captions across repeated HLS seeks', async () => 
   video.currentTime = 5;
   fireEvent.seeked(video);
   await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2')));
+  fireEvent.seeked(video);
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(0);
 
@@ -1584,6 +1585,11 @@ it('preserves the active media pipeline through a bundled HLS replacement seek',
   expect(video.currentTime).toBe(0);
   expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
   expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+  fireEvent.seeked(video);
+  video.currentTime = 3;
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(3);
+  expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
 });
 
 it('shows and coalesces the latest seek intent while stale playback is paused', async () => {
@@ -1805,7 +1811,7 @@ it('honors pause and speed changes made while a replacement seek is pending', as
 
   await act(async () => { resolveSeek?.(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
   await waitFor(() => expect(hls.attached).toBe(2));
-  video.playbackRate = 1;
+  expect(video.playbackRate).toBe(1.5);
   fireEvent.loadedMetadata(video);
   expect(video.playbackRate).toBe(1.5);
   expect(screen.getByRole('combobox', { name: 'Playback speed' })).toHaveValue('1.5');

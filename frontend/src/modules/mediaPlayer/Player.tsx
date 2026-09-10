@@ -134,6 +134,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const hls = useRef<Hls | null>(null);
   const loadHls = useRef(retryableLazy(() => import('hls.js'))).current;
   const sourceVersion = useRef(0);
+  const activatedSourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
   const subtitleSwitchVersion = useRef(0);
   const audioSwitchTask = useRef<Promise<void> | null>(null);
@@ -269,14 +270,17 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return Math.max(0, (playback.current?.stream_offset_ms ?? 0) + relative);
   }, []);
 
-  const activateAttachedSource = useCallback(() => {
+  const activateAttachedSource = useCallback((version: number) => {
     const element = video.current;
     const plan = playback.current;
-    if (!element || !plan) return;
+    if (!element || !plan || version !== sourceVersion.current || activatedSourceVersion.current === version) return;
+    activatedSourceVersion.current = version;
     element.playbackRate = playbackRateIntent.current;
     const resumeSeconds = Math.max(0, plan.resume_ms - plan.stream_offset_ms) / 1000;
-    if (resumeSeconds > 0) initializingPosition.current = true;
-    element.currentTime = resumeSeconds;
+    if (Math.abs(element.currentTime - resumeSeconds) > 0.001) {
+      initializingPosition.current = true;
+      element.currentTime = resumeSeconds;
+    }
     if (autoStart.current) {
       autoStart.current = false;
       // Browser autoplay policy may require the receiver's local Play button.
@@ -367,7 +371,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     attachedPlayback.current = plan;
     // Transferring keeps the element's loaded metadata, so browsers are not
     // required to emit loadedmetadata again for the replacement source.
-    if (clearedTransfer) activateAttachedSource();
+    if (clearedTransfer) activateAttachedSource(version);
   }, [activateAttachedSource, loadHls]);
 
   const replaceQuality = useCallback(async (preference: QualityPreference, tier: AutoQualityTier) => {
@@ -1108,7 +1112,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             preload="auto"
             playsInline
             onDurationChange={() => { const seconds = video.current?.duration; if (seconds && Number.isFinite(seconds)) setDurationMS(seconds * 1000 + (playback.current?.stream_offset_ms ?? 0)); }}
-            onLoadedMetadata={activateAttachedSource}
+            onLoadedMetadata={() => activateAttachedSource(sourceVersion.current)}
             onCanPlay={() => { seekSourceTransitioning.current = false; dispatch({ type: video.current?.paused ? 'pause' : 'play' }); }}
             onError={() => {
               if (recovering.current || finalizing.current) return;
