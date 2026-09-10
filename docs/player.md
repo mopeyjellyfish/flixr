@@ -17,17 +17,29 @@ fullscreen presentation active. Leaving fullscreen, returning to the library,
 finishing playback or closing the player cancels that presentation normally.
 
 Auto is the default streaming quality and is remembered on each device. It
-starts at a transport-safe 360p ceiling in browsers with Media Source or Managed
-Media Source, then raises the ceiling to 480p and 720p after measured throughput
-shows enough headroom. Repeated or prolonged buffering lowers it one step. A
-native-only HLS browser starts at 480p because it does not expose fragment
-throughput; thirty seconds of uninterrupted playback with at least eight
-seconds buffered can raise it, while buffering can lower it to 360p. Data saver
-uses the 480p ceiling. Original uses a compatible source or stream copy when
-possible. The settings menu shows the actual resolution and video bitrate
-selected by the server. Quality changes
-prepare a replacement stream and restore source position, play/pause state and
-playback speed; they are not seamless multi-rendition switching.
+starts unknown connections at a bounded 720p ceiling. Four conservative distinct
+fragment measurements spanning at least eight seconds can inform the next start on the
+same device and FlixR origin; this evidence expires after 24 hours. Missing,
+future-dated, malformed or unavailable browser storage falls back to 720p. FlixR
+does not infer bandwidth from a LAN, private or VPN address.
+
+During playback, Auto measures completed fragments and in-flight fragment bytes.
+It compares delivery with the selected video plus audio bandwidth. Sustained
+insufficient delivery, a draining buffer or a six-second startup without usable
+media lowers the ceiling one step before the buffer is exhausted. Emergency
+downshifts can interrupt an upgrade cooldown. Raising quality requires sustained
+headroom and uses a longer recovery delay after a downgrade. Native HLS does not
+provide fragment telemetry, so it uses the same bounded startup deadline plus
+sampled buffer growth and drain as a fallback. Data saver uses the 480p ceiling.
+Original uses a compatible source or stream copy when possible. The settings
+menu shows the actual resolution and video bitrate selected by the server.
+
+Quality changes prepare a replacement while the current session remains
+available. FlixR commits the handoff only after the selected browser pipeline
+reports usable media; a rejected, superseded or eight-second-unready candidate
+is released and the retained stream is reattached. Timeline, fullscreen,
+play/pause, playback speed and track intent follow the winning source. This is a
+bounded stream restart and does not claim seamless multi-rendition switching.
 
 | Key | Action |
 | --- | --- |

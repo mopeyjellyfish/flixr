@@ -41,3 +41,19 @@ FLIXR_TEST_NETWORK_MBPS=0.8 FLIXR_TEST_DIP_MBPS=0.8 \
 
 The JSON result records the exact Git revision or working-tree content hash and
 Docker image digest used by the run.
+
+The harness can also make Auto policy transitions part of its pass condition.
+The following generated-real-media run requires an optimistic 720p start and a
+downshift to 480p or below during the constrained interval:
+
+```sh
+FLIXR_TEST_NETWORK_MBPS=8 FLIXR_TEST_DIP_MBPS=0.8 \
+  FLIXR_TEST_DIP_START=15 FLIXR_TEST_DIP_END=50 \
+  FLIXR_TEST_EXPECT_INITIAL_HEIGHT=720 FLIXR_TEST_EXPECT_MIN_HEIGHT=480 \
+  bash scripts/mobile-streaming-acceptance.sh
+```
+
+`FLIXR_TEST_EXPECT_RECOVERY_HEIGHT` optionally requires a later rendition at or
+above the given height. Set `FLIXR_TEST_OBSERVATION_SECONDS` to extend the run
+when using that assertion; Auto deliberately requires sustained recovery
+evidence after a downgrade.

@@ -100,7 +100,7 @@ func TestSubtitleSelectionFallsBackToSourceDefault(t *testing.T) {
 	}
 }
 
-func (e *webFakeExecutor) Start(_ string, args []string, _ io.Writer) (playback.Process, error) {
+func (e *webFakeExecutor) StartContext(_ context.Context, _ string, args []string, _ io.Writer) (playback.Process, error) {
 	if e.onStart != nil {
 		e.onStart()
 	}
@@ -680,5 +680,148 @@ func TestCanceledAudioPreparationPreservesLiveSession(t *testing.T) {
 	}
 	if executor.process == nil || !executor.process.signaled {
 		t.Fatal("canceled request did not retire candidate process")
+	}
+}
+
+func TestQualityHandoffHTTPContractAndAuthorization(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("film"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_profile,video_level,video_width,video_height,video_bitrate,video_frame_rate_milli,video_bit_depth,audio_json,subtitle_json,duration_ms,updated_at) VALUES('film','film','Film','film.mp4',1,'film','mp4','h264','High',40,1920,1080,8000000,24000,8,'[{"index":1,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"eng","default":true},{"index":2,"codec":"aac","profile":"LC","channels":2,"sample_rate":48000,"bitrate":128000,"language":"fra"}]','[]',100000,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	house, err := household.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, _ := house.CreateProfile("One", "")
+	two, _ := house.CreateProfile("Two", "")
+	oneToken, _ := house.Select(one.ID, "")
+	twoToken, _ := house.Select(two.ID, "")
+	if err := house.SaveSubtitlePreference(one.ID, household.SubtitlePreference{Mode: household.SubtitleAutomatic, Language: "eng"}); err != nil {
+		t.Fatal(err)
+	}
+	library, err := catalog.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := playback.DefaultSettings(t.TempDir())
+	settings.GenerationBytes = 1 << 20
+	settings.GlobalBytes = 2 << 20
+	settings.MaxGenerations = 2
+	manager, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: afero.NewOsFs(), InputBase: "http://127.0.0.1:8787", Executor: &webFakeExecutor{}, ManifestWait: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Shutdown(context.Background()) })
+	server := NewServerWithPlayback(house, library, manager)
+	server.readyMu.Lock()
+	server.readiness.FFmpeg = true
+	server.readyMu.Unlock()
+	handler := server.Handler()
+	capabilities := `"capabilities":{"containers":["mp4"],"video_codecs":["h264"],"video_profiles":["High"],"audio_codecs":["aac"],"supports_fmp4_hls":true,"supports_direct":true,"supports_transcode":true,"max_width":1920,"max_height":1080,"max_frame_rate_milli":30000,"max_bit_depth":8,"max_audio_channels":2}`
+	request := func(token, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: token})
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+
+	created := request(oneToken, "/api/v1/playback/plans", `{"catalog_id":"film","quality":{"mode":"auto","max_video_bitrate":2500000,"max_width":1280,"max_height":720},`+capabilities+`}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("initial plan = %d: %s", created.Code, created.Body.String())
+	}
+	var initial struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&initial); err != nil {
+		t.Fatal(err)
+	}
+	replaced := request(oneToken, "/api/v1/playback/sessions/"+initial.SessionID+"/quality", `{"smooth_handoff":true,"position_ms":1000,"observation":1,"quality":{"mode":"auto","max_video_bitrate":1000000,"max_width":854,"max_height":480},`+capabilities+`}`)
+	if replaced.Code != http.StatusOK {
+		t.Fatalf("quality handoff = %d: %s", replaced.Code, replaced.Body.String())
+	}
+	var handoff struct {
+		SessionID  string `json:"session_id"`
+		HandoffURL string `json:"handoff_url"`
+		MediaURL   string `json:"media_url"`
+	}
+	if err := json.NewDecoder(replaced.Body).Decode(&handoff); err != nil {
+		t.Fatal(err)
+	}
+	if handoff.SessionID == "" || handoff.HandoffURL == "" || handoff.SessionID == initial.SessionID {
+		t.Fatalf("handoff response = %#v", handoff)
+	}
+	if _, ok := manager.LookupForViewer(initial.SessionID, "", one.ID, false); !ok {
+		t.Fatal("quality response revoked the original before attach")
+	}
+	assetRequest := httptest.NewRequest(http.MethodGet, handoff.MediaURL, nil)
+	assetRequest.AddCookie(&http.Cookie{Name: "flixr_session", Value: oneToken})
+	assetResponse := httptest.NewRecorder()
+	handler.ServeHTTP(assetResponse, assetRequest)
+	if assetResponse.Code != http.StatusOK {
+		t.Fatalf("candidate manifest = %d: %s", assetResponse.Code, assetResponse.Body.String())
+	}
+	blockedControls := []struct {
+		path string
+		body string
+	}{
+		{"/api/v1/playback/sessions/" + initial.SessionID + "/seek", `{"position_ms":2000,"observation":2}`},
+		{"/api/v1/playback/sessions/" + initial.SessionID + "/audio", `{"audio_stream_index":2,"position_ms":2000,"observation":2,` + capabilities + `}`},
+		{"/api/v1/playback/sessions/" + initial.SessionID + "/quality", `{"position_ms":2000,"observation":2,"quality":{"mode":"auto","max_video_bitrate":500000,"max_width":640,"max_height":360},` + capabilities + `}`},
+		{"/api/v1/playback/sessions/" + initial.SessionID + "/subtitle", `{"mode":"off"}`},
+	}
+	for _, control := range blockedControls {
+		if response := request(oneToken, control.path, control.body); response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("pending old control %s = %d: %s", control.path, response.Code, response.Body.String())
+		}
+	}
+	if position, _, err := house.ProgressState(oneToken, "film"); err != nil || position != 1_000 {
+		t.Fatalf("pending old controls changed progress to %d: %v", position, err)
+	}
+	if language, err := house.AudioLanguage(one.ID); err != nil || language != "" {
+		t.Fatalf("pending old audio changed preference to %q: %v", language, err)
+	}
+	if preference, err := house.SubtitlePreference(one.ID); err != nil || preference.Mode != household.SubtitleAutomatic || preference.Language != "eng" {
+		t.Fatalf("pending old subtitle changed preference to %#v: %v", preference, err)
+	}
+	candidateHeartbeat := request(oneToken, "/api/v1/playback/sessions/"+handoff.SessionID+"/heartbeat", `{"position_ms":1001,"observation":2}`)
+	if candidateHeartbeat.Code != http.StatusServiceUnavailable {
+		t.Fatalf("candidate heartbeat = %d: %s", candidateHeartbeat.Code, candidateHeartbeat.Body.String())
+	}
+	if position, _, err := house.ProgressState(oneToken, "film"); err != nil || position != 1_000 {
+		t.Fatalf("candidate heartbeat changed progress to %d: %v", position, err)
+	}
+	if response := request(twoToken, handoff.HandoffURL, `{"attached":true}`); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-viewer handoff = %d: %s", response.Code, response.Body.String())
+	}
+	for index := range 2 {
+		if response := request(oneToken, handoff.HandoffURL, `{"attached":true}`); response.Code != http.StatusOK {
+			t.Fatalf("attach %d = %d: %s", index, response.Code, response.Body.String())
+		}
+	}
+	if response := request(oneToken, handoff.HandoffURL, `{"attached":false}`); response.Code != http.StatusConflict {
+		t.Fatalf("conflicting retry = %d: %s", response.Code, response.Body.String())
+	}
+	if _, ok := manager.LookupForViewer(initial.SessionID, "", one.ID, false); ok {
+		t.Fatal("attached handoff retained original authority")
+	}
+
+	legacy := request(oneToken, "/api/v1/playback/sessions/"+handoff.SessionID+"/quality", `{"position_ms":2000,"observation":2,"quality":{"mode":"auto","max_video_bitrate":500000,"max_width":640,"max_height":360},`+capabilities+`}`)
+	if legacy.Code != http.StatusOK || bytes.Contains(legacy.Body.Bytes(), []byte(`"handoff_url"`)) {
+		t.Fatalf("legacy quality replacement = %d: %s", legacy.Code, legacy.Body.String())
+	}
+	if _, ok := manager.LookupForViewer(handoff.SessionID, "", one.ID, false); ok {
+		t.Fatal("legacy quality replacement retained its predecessor")
 	}
 }
