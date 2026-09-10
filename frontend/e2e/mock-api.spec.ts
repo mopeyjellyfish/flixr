@@ -28,6 +28,7 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/media-version-groups' ? { json: { groups: [], candidates: [], total: 0 } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/scan/jobs' ? { json: { jobs: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/backups' ? { json: { policy: { enabled: false, destination: '', schedule_kind: 'interval', interval_seconds: 86400, local_time: '03:00', timezone: 'UTC', retain_count: 7, retain_age_seconds: 2592000, budget_bytes: 10737418240, last_status: 'never' }, jobs: [] } } : undefined)

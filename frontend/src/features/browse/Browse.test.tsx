@@ -13,6 +13,63 @@ const workflowTask = (id: string) => {
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/home'); });
 describe('browse', () => {
+  it('lets a viewer choose an encoding without exposing duplicate title cards', async () => {
+    const navigate = vi.fn();
+    const item = {
+      id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false, edition_label: 'Director’s cut',
+      versions: [
+        { id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', width: 1920, height: 1080, selected: true, available: true },
+        { id: 'source-4k', label: '4K · HDR · HEVC', edition_id: 'film-1', width: 3840, height: 2160, hdr: 'HDR10', selected: false, available: true },
+      ],
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/catalog/items/film-1')) return new Response(JSON.stringify(item));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [item] }] }));
+      if (path.includes('/ratings/')) return new Response(JSON.stringify({ rating: null }));
+      if (path.endsWith('/screens')) return new Response(JSON.stringify({ screens: [] }));
+      return new Response('{}');
+    });
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+
+    render(<Browse detailID="film-1" onExit={() => undefined} onNavigate={navigate} />);
+
+    const version = await screen.findByRole('combobox', { name: 'Version' });
+    expect(version).toHaveValue('source-1080');
+    const cards = screen.getAllByTestId('card-film-1');
+    expect(cards).toHaveLength(1);
+    expect(within(cards[0]).getByText('Director’s cut')).toBeVisible();
+    fireEvent.change(version, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Play Signal/ }));
+    expect(navigate).toHaveBeenLastCalledWith('/play/film-1?version=auto');
+    fireEvent.change(version, { target: { value: 'source-4k' } });
+    fireEvent.click(screen.getByRole('button', { name: /Play Signal/ }));
+    expect(navigate).toHaveBeenLastCalledWith('/play/film-1?version=source-4k');
+  });
+
+  it('leaves version choice on Auto when no explicit preference is persisted', async () => {
+    const navigate = vi.fn();
+    const item = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false, versions: [
+      { id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: false, available: true },
+      { id: 'source-4k', label: '4K · HEVC', edition_id: 'film-1', selected: false, available: true },
+    ] };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/catalog/items/film-1')) return new Response(JSON.stringify(item));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [item] }] }));
+      if (path.includes('/ratings/')) return new Response(JSON.stringify({ rating: null }));
+      if (path.endsWith('/screens')) return new Response(JSON.stringify({ screens: [] }));
+      return new Response('{}');
+    });
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+
+    render(<Browse detailID="film-1" onExit={() => undefined} onNavigate={navigate} />);
+
+    expect(await screen.findByRole('combobox', { name: 'Version' })).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: /Play Signal/ }));
+    expect(navigate).toHaveBeenLastCalledWith('/play/film-1');
+  });
+
   it('virtualizes a 10k logical rail and restores focus after details close', async () => {
     const items = Array.from({ length: 10_000 }, (_, index) => ({ id: `${index}`, title: `Film ${index}`, kind: 'film', local_only: index === 0 }));
     vi.spyOn(globalThis, 'fetch').mockImplementation(viewerFetch({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Films', items }], total: 10_000, next: 48 }));

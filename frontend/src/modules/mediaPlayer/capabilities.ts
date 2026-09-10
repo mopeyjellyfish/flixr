@@ -1,4 +1,4 @@
-import type { CatalogItem, PlaybackCapabilities } from '../../core/api';
+import type { CatalogItem, MediaCapabilityInput, PlaybackCapabilities, VersionCapabilities } from '../../core/api';
 
 const mp4Aliases = new Set(['mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2']);
 const transcodableVideo = new Set(['h264', 'avc', 'avc1', 'vp9', 'hevc', 'h265', 'mpeg4', 'mpeg2video']);
@@ -23,7 +23,7 @@ function compatibilityDimensions(width: number, height: number): boolean {
 }
 
 function h264ContentType(profile: string | undefined, level: number | undefined): string | undefined {
-	const prefix = ({ Baseline: '42e0', Main: '4d40', High: '6400' } as Record<string, string>)[profile ?? ''];
+	const prefix = ({ Baseline: '42e0', 'Constrained Baseline': '42e0', Main: '4d40', High: '6400' } as Record<string, string>)[profile ?? ''];
 	if (!prefix || !level || level <= 0 || level > 255) return undefined;
 	return `video/mp4; codecs="avc1.${prefix}${level.toString(16).padStart(2, '0')}"`;
 }
@@ -34,6 +34,7 @@ function sourceConfiguration(media: CatalogItem, type: DecodingType): MediaDecod
 	const audio = media.audio?.[0];
 	let audioConfiguration: AudioConfiguration | undefined;
 	if (audio) {
+		if (audio.external && type === 'file') return undefined;
 		if (audio.codec !== 'aac' || audio.profile !== 'LC' || !audio.channels || !audio.sample_rate || !audio.bitrate) return undefined;
 		audioConfiguration = { contentType: compatibility.audioContentType, channels: String(audio.channels), bitrate: audio.bitrate, samplerate: audio.sample_rate };
 	}
@@ -109,4 +110,17 @@ export async function browserCapabilities(media: CatalogItem): Promise<PlaybackC
 		max_audio_channels: sourceSupported && audio ? audio.channels : undefined,
 		hdr: sourceSupported && sourceHDR ? [sourceHDR] : [],
 	};
+}
+
+function capabilityItem(item: CatalogItem, input: MediaCapabilityInput): CatalogItem {
+	return { id: item.id, title: item.title, kind: item.kind, local_only: item.local_only, ...input };
+}
+
+export async function browserVersionCapabilities(item: CatalogItem, requestedVersionID?: string): Promise<{ capabilities: PlaybackCapabilities; versionCapabilities?: VersionCapabilities }> {
+	if (!item.versions) return { capabilities: await browserCapabilities(item) };
+	const versions = item.versions.filter((version) => version.available || version.id === requestedVersionID);
+	const assessed = await Promise.all(versions.map(async (version) => version.capability_input ? [version.id, await browserCapabilities(capabilityItem(item, version.capability_input))] as const : undefined));
+	const versionCapabilities = Object.fromEntries(assessed.filter((entry): entry is readonly [string, PlaybackCapabilities] => entry !== undefined));
+	const capabilities = requestedVersionID && versionCapabilities[requestedVersionID] || Object.values(versionCapabilities)[0] || await browserCapabilities(item);
+	return { capabilities, versionCapabilities };
 }

@@ -52,6 +52,10 @@ export function App() {
     if (nextRoute === 'browse' && !nextPath.startsWith('/detail/')) setLastBrowsePath(nextPath);
     setRoute(nextRoute);
   }, []);
+  const recordPlaybackVersion = useCallback((catalogID: string, versionID: string) => {
+    const nextPath = `/play/${encodeURIComponent(catalogID)}?version=${encodeURIComponent(versionID)}`;
+    if (`${window.location.pathname}${window.location.search}` !== nextPath) window.history.replaceState({}, '', nextPath);
+  }, []);
   useEffect(() => screenCoordinator.onCommand((command) => {
     if (command.type === 'play') {
       setContinueWatchingIntent('user');
@@ -115,8 +119,10 @@ export function App() {
   if (route === 'owner') return <Suspense fallback={<RouteFallback />}><Owner onBrowse={() => navigate('/profiles')} onLogout={() => navigate('/profiles')} /></Suspense>;
   if (route === 'history') return <Suspense fallback={<RouteFallback />}><History onBrowse={() => navigate('/home')} onExit={() => navigate('/profiles')} /></Suspense>;
   if (route === 'player') {
-    const catalogID = decodeURIComponent(path.slice('/play/'.length));
-    return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} active={!booting} startPositionMS={remoteStart?.positionMS} continueWatchingIntent={continueWatchingIntent} onAdvance={(nextID, intent) => { setContinueWatchingIntent(intent); navigate(`/play/${encodeURIComponent(nextID)}`, true); }} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
+    const pathname = path.split('?', 1)[0];
+    const catalogID = decodeURIComponent(pathname.slice('/play/'.length));
+    const versionID = new URLSearchParams(path.split('?')[1] ?? '').get('version') ?? undefined;
+    return <Suspense fallback={<RouteFallback />}><Player key={remoteStart?.sequence ?? 'local'} catalogID={catalogID} versionID={versionID} active={!booting} startPositionMS={remoteStart?.positionMS} continueWatchingIntent={continueWatchingIntent} onAdvance={(nextID, intent, nextVersionID) => { setContinueWatchingIntent(intent); navigate(`/play/${encodeURIComponent(nextID)}${nextVersionID ? `?version=${encodeURIComponent(nextVersionID)}` : ''}`, true); }} onVersionAccepted={(acceptedVersionID) => recordPlaybackVersion(catalogID, acceptedVersionID)} onExit={() => { setRestoreFocusID(catalogID); navigate(lastBrowsePath); }} /></Suspense>;
   }
   if (route === 'browse') {
     const browsePath = path.startsWith('/detail/') ? lastBrowsePath : path;

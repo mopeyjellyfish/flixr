@@ -186,6 +186,15 @@ func TestClientCapabilitiesNormalizesAliasesAndRejectsUnknownValues(t *testing.T
 	}
 }
 
+func TestPlanTreatsConstrainedBaselineAsBaseline(t *testing.T) {
+	media := MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "Constrained Baseline", Width: 1920, Height: 1080, VideoBitrate: 4_000_000, AudioCodec: "aac", AudioChannels: 2}
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, VideoProfiles: []string{"Baseline"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, MaxWidth: 1920, MaxHeight: 1080, MaxAudioChannels: 2}
+	plan, err := PlanFor(media, client, ServerReadiness{})
+	if err != nil || plan.Kind != Direct {
+		t.Fatalf("constrained baseline plan = %#v, %v", plan, err)
+	}
+}
+
 func TestPlanForQualityCapsOutputAndNeverUpscales(t *testing.T) {
 	client := ClientCapabilities{VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}
 	quality := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720}

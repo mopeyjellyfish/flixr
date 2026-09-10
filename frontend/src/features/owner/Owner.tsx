@@ -1,5 +1,5 @@
 import { LoadingButton } from '../../vendor/interior/loading-button';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useScrollSpy } from '../../vendor/interior/scroll-spy';
 import { HouseholdPanel } from './Household';
 import { api } from '../../api/client';
@@ -11,6 +11,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { BackupPanel } from './BackupPanel';
 import { LibrariesSection, type LibraryActions, type ScanActions } from './Libraries';
 import { IdentityRepair, MetadataRepair, ProviderStatus, TMDBForm } from './Metadata';
+import { MediaVersions } from './MediaVersions';
 import { ConnectedScreens, PlaybackPanel } from './Playback';
 
 type OwnerProps = {
@@ -45,6 +46,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [locked, setLocked] = useState<Set<string>>(new Set());
   const [backupStatus, setBackupStatus] = useState<string>();
   const { confirm, dialog } = useConfirm();
+  const requireOwner = useCallback(() => setOwnerRequired(true), []);
 
   const load = () => {
     api.setupStatus().then((status) => setReadiness(status.readiness)).catch((error) => setNotice(error instanceof ApiError ? error.message : 'Readiness is unavailable.'));
@@ -252,6 +254,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <ProviderStatus settings={tmdbSettings} enabled={tmdbSettings?.enabled ?? true} locked={locked.has('metadata.enabled')} onToggle={(enabled) => void setMetadataEnabled(enabled)} />
             <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
+            <MediaVersions confirm={confirm} onOwnerRequired={requireOwner} />
             <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} confirm={confirm} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />
           </section>
           <section id="backups" className="owner-section" aria-labelledby="backups-title">

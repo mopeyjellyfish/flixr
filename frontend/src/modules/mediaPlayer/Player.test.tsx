@@ -108,6 +108,91 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   });
 });
 
+it('posts independently measured evidence for mixed source versions', async () => {
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+  vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+  const audio = [{ index: 1, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000 }];
+  const detail = { ...assessedItem, video_codec: 'hevc', width: 1920, height: 1080, versions: [
+    { id: 'source-hevc', label: '1080p · HEVC', edition_id: 'film-1', selected: false, available: true, capability_input: { container: 'mp4', video_codec: 'hevc', width: 1920, height: 1080, bitrate: 4_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio } },
+    { id: 'source-h264', label: '4K · H.264', edition_id: 'film-1', selected: false, available: true, capability_input: { container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 3840, height: 2160, bitrate: 12_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio } },
+  ] };
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(detail));
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      const session = `session-${planBodies.length}`;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: detail.versions[1], session_id: session, media_url: `/film-${planBodies.length}.mp4`, heartbeat_url: `/api/v1/playback/sessions/${session}/heartbeat`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/film-1.mp4'));
+
+  expect(planBodies[0].version_capabilities).toMatchObject({
+    'source-hevc': { supports_direct: false },
+    'source-h264': { supports_direct: true, max_width: 3840, max_height: 2160 },
+  });
+  expect(planBodies[0].capabilities).toMatchObject({ supports_direct: false });
+  expect(planBodies[0].capabilities).not.toHaveProperty('max_width');
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies[1].capabilities).toMatchObject({ supports_direct: true, max_width: 3840, max_height: 2160 });
+  expect(planBodies[1].version_capabilities).toEqual(planBodies[0].version_capabilities);
+});
+
+it.each(['source-4k', 'auto'])('keeps %s version intent through initial planning and lease recovery', async (versionID) => {
+  const planBodies: Array<Record<string, unknown>> = [];
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: { id: 'source-4k', label: '4K', edition_id: 'film-1', selected: true, available: true }, session_id: `session-${plans}`, media_url: `/media-${plans}.mp4`, heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, stop_url: `/stop-${plans}`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify(path.includes('/catalog/items/') ? assessedItem : { stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID={versionID} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies.map((body) => body.version_id)).toEqual([versionID, versionID]);
+});
+
+it('requires a viewer action before using an alternative version', async () => {
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) {
+      const body = JSON.parse(String(init?.body));
+      planBodies.push(body);
+      if (body.version_id === 'source-4k') return new Response(JSON.stringify({ error: { code: 'playback_version_unavailable', requested_version_id: 'source-4k', alternatives: [{ id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: false, available: true }] } }), { status: 409 });
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: { id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: true, available: true }, session_id: 'fallback', media_url: '/fallback.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID="source-4k" onExit={() => undefined} />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/selected version is no longer available/i);
+  expect(planBodies).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: /play 1080p.*instead/i }));
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies[1]).toMatchObject({ catalog_id: 'film-1', version_id: 'source-1080' });
+});
+
 it.each(['playback_unsupported', 'ffmpeg_unavailable'] as const)('offers an explicit Original retry when Auto cannot use a capped rendition (%s)', async (code) => {
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
   const planBodies: Array<Record<string, unknown>> = [];
@@ -507,34 +592,31 @@ it('times out ambiguous handoff requests, restores the retained source, and rele
   expect(handoffBodies).toEqual([true, true, false]);
 });
 
-it('does not launch quality preparation after Back wins a pending capability check', async () => {
+it('reuses the admitted source evidence for a quality change', async () => {
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
   let itemCalls = 0;
-  let qualityCalls = 0;
-  let resolveDetail: ((response: Response) => void) | undefined;
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  let qualityCapabilities: Record<string, unknown> | undefined;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const path = String(input);
     if (path.includes('/catalog/items/')) {
       itemCalls += 1;
-      if (itemCalls === 1) return new Response(JSON.stringify(assessedItem));
-      return new Promise<Response>((resolve) => { resolveDetail = resolve; });
+      return new Response(JSON.stringify(assessedItem));
     }
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'original', media_url: '/film.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
-    if (path.endsWith('/quality')) qualityCalls += 1;
+    if (path.endsWith('/quality')) {
+      qualityCapabilities = (JSON.parse(String(init?.body)) as { capabilities: Record<string, unknown> }).capabilities;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'quality', media_url: '/quality.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
     return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
   });
-  const onExit = vi.fn();
-  render(<Player catalogID="film-1" onExit={onExit} />);
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
   await waitFor(() => expect(document.querySelector('video')).toHaveAttribute('src', '/film.mp4'));
   fireEvent.click(screen.getByText('Settings'));
   fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
-  await waitFor(() => expect(resolveDetail).toBeTypeOf('function'));
-  vi.useFakeTimers();
-  fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
-  await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
-  expect(onExit).toHaveBeenCalledOnce();
-  await act(async () => { resolveDetail?.(new Response(JSON.stringify(assessedItem))); await Promise.resolve(); });
-  expect(qualityCalls).toBe(0);
+  await waitFor(() => expect(qualityCapabilities).toBeDefined());
+  expect(itemCalls).toBe(1);
+  expect(qualityCapabilities).toMatchObject({ max_width: 320, max_height: 180 });
 });
 
 it('discards a quality response that arrives after completion starts', async () => {
@@ -1353,7 +1435,7 @@ it('counts down to the server-selected next episode after durable completion', a
     const path = String(input);
     calls.push(path);
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
-    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true }, selected_version_id: 'series-4k' }));
     return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
   });
   const advance = vi.fn();
@@ -1368,7 +1450,26 @@ it('counts down to the server-selected next episode after durable completion', a
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
   }
   expect(advance).toHaveBeenCalledOnce();
-  expect(advance).toHaveBeenCalledWith('episode-2', 'automatic');
+  expect(advance).toHaveBeenCalledWith('episode-2', 'automatic', 'series-4k');
+});
+
+it('waits for a viewer to choose a next-episode version when the selected series copy is missing', async () => {
+  const advance = vi.fn();
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'version_unavailable', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true }, requested_version_id: 'series-4k', alternatives: [{ id: 'series-1080', label: '1080p · H.264', edition_id: 'series-1', selected: false, available: true }] }));
+    return new Response(JSON.stringify(path.includes('/catalog/items/') ? assessedItem : { accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="episode-1" versionID="series-4k" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+
+  expect(await screen.findByRole('heading', { name: /choose a version for the next episode/i })).toBeVisible();
+  expect(advance).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Play 1080p · H.264' }));
+  await waitFor(() => expect(advance).toHaveBeenCalledWith('episode-2', 'user', 'series-1080'));
 });
 
 it('does not resolve the next episode when durable completion is rejected', async () => {
@@ -1712,6 +1813,42 @@ it('labels audio tracks and preserves source time when changing tracks', async (
   expect(switchRequest?.body).toContain('"observation":1');
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(2.5);
+});
+
+it('recovers an admitted external-audio version with the updated exact evidence', async () => {
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  vi.stubGlobal('MediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+  Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo: vi.fn().mockResolvedValue({ supported: true }) } });
+  const embedded = { index: 1, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000, language: 'eng', default: true };
+  const external = { index: 2, codec: 'aac', profile: 'LC', channels: 2, sample_rate: 48000, bitrate: 128000, language: 'fra', external: true };
+  const capability_input = { container: 'mp4', video_codec: 'h264', video_profile: 'High', video_level: 40, width: 1920, height: 1080, bitrate: 5_000_000, frame_rate_milli: 24_000, bit_depth: 8, audio: [embedded] };
+  const version = { id: 'source-main', label: '1080p · H.264', edition_id: 'film-1', selected: true, available: true, capability_input };
+  const detail = { ...assessedItem, width: 1920, height: 1080, bitrate: 5_000_000, video_level: 40, audio: [embedded], versions: [version] };
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/catalog/items/film-1')) return new Response(JSON.stringify(detail));
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      const recovered = planBodies.length > 1;
+      return new Response(JSON.stringify({ plan: { kind: recovered ? 'remux' : 'direct', audio_stream_index: recovered ? 2 : 1, audio_external: recovered }, version, session_id: recovered ? 'session-3' : 'session-1', media_url: recovered ? '/recovered.m3u8' : '/original.mp4', heartbeat_url: recovered ? '/api/v1/playback/sessions/session-3/heartbeat' : '/api/v1/playback/sessions/session-1/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: [embedded, external] }));
+    }
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({ plan: { kind: 'remux', audio_stream_index: 2, audio_external: true }, version, session_id: 'session-2', media_url: '/external.m3u8', heartbeat_url: '/api/v1/playback/sessions/session-2/heartbeat', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: [embedded, external] }));
+    if (path.endsWith('/session-2/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID="source-main" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'external:2' } });
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+
+  expect(planBodies[1].capabilities).toMatchObject({ supports_direct: false, supports_remux: true });
+  expect((planBodies[1].version_capabilities as Record<string, unknown>)['source-main']).toEqual(planBodies[1].capabilities);
 });
 
 it('enables Play after a paused HLS audio replacement without a new canplay event', async () => {

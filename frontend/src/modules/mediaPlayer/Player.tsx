@@ -2,11 +2,11 @@ import type Hls from 'hls.js';
 import type { AttachMediaSourceData } from 'hls.js';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
-import { ApiError, type CatalogItem, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
+import { ApiError, type CatalogItem, type Episode, type MediaCapabilityInput, type MediaVersion, type PlaybackCapabilities, type PlaybackPlan, type VersionCapabilities } from '../../core/api';
 import { initialPlayerState, playerReducer } from './state';
 import { isRetryablePlaybackFailure, PlaybackNetworkError, PlaybackRecovery } from './recovery';
 import { screenCoordinator } from '../screenCoordinator/runtime';
-import { browserCapabilities } from './capabilities';
+import { browserCapabilities, browserVersionCapabilities } from './capabilities';
 import { PlayerControls, type Chapter } from './PlayerControls';
 import { AdaptiveQualityPolicy, initialAutoQualityTier, loadQualityPreference, qualityRequest, rememberAutoThroughput, saveQualityPreference, type AutoQualityTier, type QualityPreference } from './quality';
 import { retryableLazy } from './lazy';
@@ -141,14 +141,15 @@ function subtitleLabel(track: NonNullable<PlaybackPlan['subtitle_tracks']>[numbe
 type AutoplayState =
   | { kind: 'idle' }
   | { kind: 'resolving' }
-  | { kind: 'countdown'; episode: Episode; seconds: number }
-  | { kind: 'paused'; episode?: Episode }
+  | { kind: 'countdown'; episode: Episode; seconds: number; versionID?: string }
+  | { kind: 'paused'; episode?: Episode; versionID?: string }
+  | { kind: 'version-unavailable'; episode: Episode; alternatives: MediaVersion[] }
   | { kind: 'end'; contextUnavailable: boolean }
-  | { kind: 'advancing'; episode: Episode };
+  | { kind: 'advancing'; episode: Episode; versionID?: string };
 
 const autoplaySeconds = 10;
 
-export function Player({ catalogID, startPositionMS, active = true, continueWatchingIntent = 'user', onAdvance, onExit }: { catalogID: string; startPositionMS?: number; active?: boolean; continueWatchingIntent?: 'user' | 'automatic'; onAdvance?: (catalogID: string, intent: 'user' | 'automatic') => void; onExit: () => void }) {
+export function Player({ catalogID, versionID, startPositionMS, active = true, continueWatchingIntent = 'user', onAdvance, onVersionAccepted, onExit }: { catalogID: string; versionID?: string; startPositionMS?: number; active?: boolean; continueWatchingIntent?: 'user' | 'automatic'; onAdvance?: (catalogID: string, intent: 'user' | 'automatic', versionID?: string) => void; onVersionAccepted?: (versionID: string) => void; onExit: () => void }) {
   const [state, dispatch] = useReducer(playerReducer, initialPlayerState);
   const stage = useRef<HTMLElement>(null);
   const [item, setItem] = useState<CatalogItem>();
@@ -164,6 +165,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const [playbackRate, setPlaybackRate] = useState(1);
   const [qualityPreference, setQualityPreference] = useState<QualityPreference>(loadQualityPreference);
   const [originalFallback, setOriginalFallback] = useState(false);
+  const [versionFallbacks, setVersionFallbacks] = useState<MediaVersion[]>([]);
   const [planAttempt, setPlanAttempt] = useState(0);
   const seekQueue = useRef<{ running: boolean; target?: number }>({ running: false });
   const [trackError, setTrackError] = useState<string>();
@@ -216,6 +218,17 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const seekSourceTransitioning = useRef(false);
   const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
   const playerStatus = useRef(state.status);
+  const versionIntent = useRef(versionID);
+  const admittedCapabilities = useRef<PlaybackCapabilities | undefined>(undefined);
+  const measuredVersionCapabilities = useRef<VersionCapabilities | undefined>(undefined);
+  const admittedCapabilityInput = useRef<MediaCapabilityInput | undefined>(undefined);
+  const versionAccepted = useRef(onVersionAccepted);
+  versionAccepted.current = onVersionAccepted;
+  const versionProps = useRef({ catalogID, versionID });
+  if (versionProps.current.catalogID !== catalogID || versionProps.current.versionID !== versionID) {
+    versionProps.current = { catalogID, versionID };
+    versionIntent.current = versionID;
+  }
   playerStatus.current = state.status;
 
   const enqueueSourceOperation = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
@@ -531,8 +544,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           let requestTimeout = 0;
           let lifecycleController: AbortController | undefined;
           try {
-            const detail = await api.item(catalogID);
-            const capabilities = await browserCapabilities(detail);
+            const capabilities = admittedCapabilities.current ?? await browserCapabilities(await api.item(catalogID));
             if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) {
               if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
               return;
@@ -726,9 +738,15 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     try {
       const next = await recovery.current.run(async () => {
         if (oldPlan) await api.playbackStop(oldPlan.session_id).catch(() => undefined);
-        return api.playbackPlan(catalogID, await browserCapabilities(await api.item(catalogID)), 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier));
+        if (admittedCapabilities.current) return api.playbackPlan(catalogID, admittedCapabilities.current, 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, measuredVersionCapabilities.current);
+        const detail = await api.item(catalogID);
+        const evidence = await browserVersionCapabilities(detail, versionIntent.current);
+        measuredVersionCapabilities.current = evidence.versionCapabilities;
+        return api.playbackPlan(catalogID, evidence.capabilities, 'recovery', qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, evidence.versionCapabilities);
       }, (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); });
       if (!next || finalizing.current) return;
+      admittedCapabilities.current = next.version?.id ? measuredVersionCapabilities.current?.[next.version.id] ?? admittedCapabilities.current : admittedCapabilities.current;
+      admittedCapabilityInput.current = next.version?.capability_input ?? admittedCapabilityInput.current;
       observation.current = 0;
       autoStart.current = wasSeeking ? seekPlayingIntent.current : continuePlaying;
       if (wasSeeking && seekQueue.current.target !== undefined) {
@@ -796,6 +814,10 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     completionAck.current = null;
     setAudioLocked(false);
     setOriginalFallback(false);
+    setVersionFallbacks([]);
+    admittedCapabilities.current = undefined;
+    measuredVersionCapabilities.current = undefined;
+    admittedCapabilityInput.current = undefined;
     setAutoplay({ kind: 'idle' });
     recoveryController.run(
       async () => {
@@ -805,14 +827,19 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         // Keep HLS out of the main bundle while overlapping its lazy download
         // with capability assessment and rendition preparation on MSE browsers.
         if (supportsHlsMSE()) void loadHls();
-        const capabilities: PlaybackCapabilities = await browserCapabilities(detail);
+        const evidence = await browserVersionCapabilities(detail, versionIntent.current);
         if (!active) throw new Error('player unmounted');
-        return api.playbackPlan(catalogID, capabilities, continueWatchingIntent, qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier));
+        measuredVersionCapabilities.current = evidence.versionCapabilities;
+        admittedCapabilities.current = evidence.capabilities;
+        return api.playbackPlan(catalogID, evidence.capabilities, continueWatchingIntent, qualityRequest(qualityPreferenceRef.current, qualityPolicy.current.tier), versionIntent.current, evidence.versionCapabilities);
       },
       (abandoned) => { void api.playbackStop(abandoned.session_id).catch(() => undefined); },
     ).then(async (initial) => {
       if (!initial) return;
       if (!active) { void api.playbackStop(initial.session_id); return; }
+      admittedCapabilities.current = initial.version?.id ? measuredVersionCapabilities.current?.[initial.version.id] ?? admittedCapabilities.current : admittedCapabilities.current;
+      admittedCapabilityInput.current = initial.version?.capability_input;
+      if (versionIntent.current && initial.version?.id === versionIntent.current) versionAccepted.current?.(initial.version.id);
       let plan = initial;
       playback.current = initial;
       observation.current = 0;
@@ -832,6 +859,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     }).catch((error: unknown) => {
       if (active) {
         setOriginalFallback(error instanceof ApiError && (error.code === 'playback_unsupported' || error.code === 'ffmpeg_unavailable') && qualityPreferenceRef.current !== 'original');
+        setVersionFallbacks(error instanceof ApiError && (error.code === 'playback_version_unavailable' || error.code === 'playback_version_incompatible') ? error.alternatives : []);
         const message = isRetryablePlaybackFailure(error)
           ? 'Playback could not connect to Flixr after several attempts. Check this device\'s local network connection and try again.'
           : error instanceof ApiError ? error.message : 'Playback could not start.';
@@ -870,7 +898,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           .then(() => api.playbackStop(plan.session_id)).catch(() => undefined);
       }
     };
-  }, [attach, catalogID, continueWatchingIntent, currentPosition, heartbeat, loadHls, planAttempt, startPositionMS]);
+  }, [attach, catalogID, continueWatchingIntent, currentPosition, heartbeat, loadHls, planAttempt, startPositionMS, versionID]);
 
   const tryOriginal = useCallback(() => {
     qualityPreferenceRef.current = 'original';
@@ -884,25 +912,34 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     setPlanAttempt((attempt) => attempt + 1);
   }, []);
 
+  const tryVersion = useCallback((nextVersionID: string) => {
+    versionIntent.current = nextVersionID;
+    playIntent.current = true;
+    autoStart.current = true;
+    setVersionFallbacks([]);
+    dispatch({ type: 'stop' });
+    setPlanAttempt((attempt) => attempt + 1);
+  }, []);
+
   const cancelAutoplay = useCallback(() => {
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
     setAutoplay((current) => {
-      if (current.kind === 'countdown') return { kind: 'paused', episode: current.episode };
+      if (current.kind === 'countdown') return { kind: 'paused', episode: current.episode, versionID: current.versionID };
       if (current.kind === 'resolving') return { kind: 'paused' };
-      if (current.kind === 'advancing') return { kind: 'paused', episode: current.episode };
+      if (current.kind === 'advancing') return { kind: 'paused', episode: current.episode, versionID: current.versionID };
       return current;
     });
   }, []);
 
-  const advanceTo = useCallback(async (episode: Episode, intent: 'user' | 'automatic' = 'user') => {
+  const advanceTo = useCallback(async (episode: Episode, intent: 'user' | 'automatic' = 'user', nextVersionID = versionIntent.current) => {
     if (finalizing.current) return;
     setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
     autoplayRequest.current = null;
-    setAutoplay({ kind: 'advancing', episode });
+    setAutoplay({ kind: 'advancing', episode, versionID: nextVersionID });
     const plan = retainedPlayback.current ?? playback.current;
     if (plan) {
       finalizing.current = true;
@@ -924,7 +961,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       return;
     }
     autoStart.current = true;
-    onAdvance?.(episode.id, intent);
+    onAdvance?.(episode.id, intent, nextVersionID);
   }, [onAdvance, currentPosition]);
 
   useEffect(() => {
@@ -934,7 +971,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       return;
     }
     if (autoplay.seconds <= 0) {
-      void advanceTo(autoplay.episode, 'automatic');
+      void advanceTo(autoplay.episode, 'automatic', autoplay.versionID);
       return;
     }
     const timer = window.setTimeout(() => setAutoplay((current) => current.kind === 'countdown' ? { ...current, seconds: current.seconds - 1 } : current), 1_000);
@@ -1177,7 +1214,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       if (next.state === 'not_episodic') {
         void finish();
       } else if (next.state === 'next') {
-        setAutoplay({ kind: 'countdown', episode: next.episode, seconds: autoplaySeconds });
+        setAutoplay({ kind: 'countdown', episode: next.episode, seconds: autoplaySeconds, versionID: next.selected_version_id });
+      } else if (next.state === 'version_unavailable') {
+        setAutoplay({ kind: 'version-unavailable', episode: next.episode, alternatives: next.alternatives });
       } else {
         setAutoplay({ kind: 'end', contextUnavailable: next.state === 'context_unavailable' });
       }
@@ -1232,9 +1271,12 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       autoStart.current = playIntent.current;
       replacingSession.current = plan.session_id;
       try {
-        const item = await api.item(catalogID);
         const selected = plan.audio_tracks?.find((track) => track.index === streamIndex && Boolean(track.external) === (source === 'external'));
-        const capabilities = await browserCapabilities(selected ? { ...item, audio: [selected] } : item);
+        const fallbackItem = admittedCapabilityInput.current ? undefined : await api.item(catalogID);
+        const capabilityItem: CatalogItem = admittedCapabilityInput.current
+          ? { id: catalogID, title: '', kind: 'film', local_only: true, ...admittedCapabilityInput.current, ...(selected ? { audio: [selected] } : {}) }
+          : selected ? { ...fallbackItem!, audio: [selected] } : fallbackItem!;
+        const capabilities = await browserCapabilities(capabilityItem);
         if (finalizing.current || endedPlayback.current || version !== sourceVersion.current) return;
         const controller = new AbortController();
         sourceRequestController.current = controller;
@@ -1244,6 +1286,10 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           void api.playbackStop(updated.session_id).catch(() => undefined);
           return;
         }
+        admittedCapabilities.current = capabilities;
+        const admittedVersionID = updated.version?.id ?? plan.version?.id;
+        if (admittedVersionID && measuredVersionCapabilities.current) measuredVersionCapabilities.current = { ...measuredVersionCapabilities.current, [admittedVersionID]: capabilities };
+        if (selected) admittedCapabilityInput.current = { ...(updated.version?.capability_input ?? admittedCapabilityInput.current), audio: [selected] };
         const resumeMS = Math.max(updated.resume_ms, currentPosition());
         if (seekingRef.current) autoStart.current = false;
         await attach({ ...updated, resume_ms: resumeMS });
@@ -1302,7 +1348,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       <button ref={backButton} className="player-back" onClick={() => { void finish(); }}>← Back to library</button>
       <div className="player-heading"><h1 id="player-title">{seriesTitle ? `${seriesTitle} · ${item?.title}` : item?.title ?? 'Now playing'}</h1>{item?.kind === 'episode' && <p>Season {item.season} · Episode {item.episode}</p>}</div>
     </header>
-    {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p>{originalFallback && <button className="primary" onClick={tryOriginal}>Try Original quality</button>}<button onClick={() => { void finish(); }}>Return to your library</button></section> :
+    {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p>{originalFallback && <button className="primary" onClick={tryOriginal}>Try Original quality</button>}{versionFallbacks.map((version) => <button key={version.id} className="primary" onClick={() => tryVersion(version.id)}>Play {version.label} instead</button>)}<button onClick={() => { void finish(); }}>Return to your library</button></section> :
       <section className="player-stage" aria-labelledby="player-title">
         <div className="player-frame">
           {(seeking || state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /></div>}
@@ -1357,8 +1403,9 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           {autoplay.kind !== 'idle' && <section className="player-autoplay" role="dialog" aria-modal="true" aria-labelledby="autoplay-title">
             {autoplay.kind === 'advancing' && <><h2 id="autoplay-title">Starting next episode</h2><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
             {autoplay.kind === 'resolving' && <><h2 id="autoplay-title">Episode complete</h2><p role="status">Finding the next episode in this version…</p><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></>}
-            {autoplay.kind === 'countdown' && <><h2 id="autoplay-title">Next episode</h2><p className="player-autoplay-episode">S{autoplay.episode.season} E{autoplay.episode.episode} · {autoplay.episode.title}</p><p role="status">Playing in {autoplay.seconds} seconds.</p><div className="player-autoplay-actions"><button className="primary" onClick={() => { void advanceTo(autoplay.episode); }}>Play now</button><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></div></>}
-            {autoplay.kind === 'paused' && <><h2 id="autoplay-title">Autoplay paused</h2><p>The next episode will not start automatically.</p><div className="player-autoplay-actions">{autoplay.episode && <button className="primary" onClick={() => { void advanceTo(autoplay.episode!); }}>Play next episode</button>}<button onClick={() => { void finish(); }}>Return to your library</button></div></>}
+            {autoplay.kind === 'countdown' && <><h2 id="autoplay-title">Next episode</h2><p className="player-autoplay-episode">S{autoplay.episode.season} E{autoplay.episode.episode} · {autoplay.episode.title}</p><p role="status">Playing in {autoplay.seconds} seconds.</p><div className="player-autoplay-actions"><button className="primary" onClick={() => { void advanceTo(autoplay.episode, 'user', autoplay.versionID); }}>Play now</button><button onClick={() => { cancelAutoplay(); void finish(); }}>Cancel autoplay</button></div></>}
+            {autoplay.kind === 'paused' && <><h2 id="autoplay-title">Autoplay paused</h2><p>The next episode will not start automatically.</p><div className="player-autoplay-actions">{autoplay.episode && <button className="primary" onClick={() => { void advanceTo(autoplay.episode!, 'user', autoplay.versionID); }}>Play next episode</button>}<button onClick={() => { void finish(); }}>Return to your library</button></div></>}
+            {autoplay.kind === 'version-unavailable' && <><h2 id="autoplay-title">Choose a version for the next episode</h2><p>{autoplay.episode.title} is unavailable in the version you were watching.</p><div className="player-autoplay-actions">{autoplay.alternatives.map((version) => <button key={version.id} className="primary" onClick={() => { void advanceTo(autoplay.episode, 'user', version.id); }}>Play {version.label}</button>)}<button onClick={() => { void finish(); }}>Return to your library</button></div></>}
             {autoplay.kind === 'end' && <><h2 id="autoplay-title">{autoplay.contextUnavailable ? 'No next episode in this version' : 'End of series'}</h2><p>{autoplay.contextUnavailable ? 'Flixr will not switch to another library or cut automatically.' : 'You have watched every later available episode in this series.'}</p><button className="primary" onClick={() => { void finish(); }}>Return to your library</button></>}
           </section>}
         </div>

@@ -44,6 +44,31 @@ is released and the retained stream is reattached. Timeline, fullscreen,
 play/pause, playback speed and track intent follow the winning source. This is a
 bounded stream restart and does not claim seamless multi-rendition switching.
 
+## Versions and editions
+
+When a title has several encodings, its detail page lists the available versions
+by resolution, codec and HDR format. Choosing one pins that physical source for
+the whole playback session. Resume position and other personal history stay on
+the title, and the same version lineage is requested for the next episode. If a
+remembered choice is missing or cannot play on the current device, Flixr explains
+the problem and offers compatible alternatives; it does not silently substitute
+another file. Auto checks every available, authorized version and prefers a file
+the device can play directly before starting a conversion. Choosing Auto clears
+a remembered explicit version after the new playback session is admitted.
+
+Owners create version groups in **Server settings → Media versions**. Group only
+different encodings of the same cut. Give theatrical, extended, director's-cut
+or otherwise different editions separate labels and keep them as separate
+titles. Flixr rejects series groups unless every series contains one unambiguous
+episode for each matching season and episode number.
+
+Grouping activates the canonical title's watch state. The other members' resume
+positions, ratings, lists and viewing history remain stored but dormant; ungrouping
+restores them unchanged. Grouping never merges that history. Editing a group
+stops affected active playback sessions so a session cannot retain access through
+an obsolete membership. Flixr creates streams on demand; owner-prepared rendition
+generation is outside this feature.
+
 | Key | Action |
 | --- | --- |
 | Space or K | Play/pause |

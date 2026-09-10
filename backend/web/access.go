@@ -8,6 +8,7 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/access"
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/household"
+	"github.com/mopeyjellyfish/flixr/backend/playback"
 )
 
 func (s *Server) profileAccessPolicy(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +61,17 @@ func (s *Server) playbackCatalogItem(ctx context.Context, r *http.Request, id st
 	return s.catalog.PlaybackItemForPolicy(ctx, id, policy)
 }
 
+func (s *Server) sessionPlaybackCatalogItem(ctx context.Context, r *http.Request, session playback.Session) (catalog.Item, error) {
+	policy, ok := s.requestPolicy(r)
+	if !ok {
+		return catalog.Item{}, catalog.ErrAccessDenied
+	}
+	if session.Plan.VersionID == "" {
+		return s.catalog.PlaybackItemForPolicy(ctx, session.CatalogID, policy)
+	}
+	return s.catalog.PlaybackVersionSource(ctx, session.ProfileID, session.CatalogID, session.Plan.VersionID, session.Plan.SourceKey, policy)
+}
+
 func (s *Server) requestPolicy(r *http.Request) (access.Policy, bool) {
 	profile, ok := s.house.Profile(s.session(r))
 	if !ok {
@@ -82,6 +94,9 @@ func (s *Server) contentAllowed(r *http.Request, kind, id string) (bool, error) 
 }
 
 func (s *Server) itemAllowed(r *http.Request, id string) (bool, error) {
+	if item, ok := s.catalog.Item(id); ok && s.catalog.IsMediaVersionMember(item.Kind, id) {
+		return false, nil
+	}
 	policy, ok := s.requestPolicy(r)
 	if !ok {
 		return false, nil
@@ -94,6 +109,10 @@ func (s *Server) itemAllowed(r *http.Request, id string) (bool, error) {
 }
 
 func (s *Server) publicContent(w http.ResponseWriter, r *http.Request, kind, id string) bool {
+	if s.catalog.IsMediaVersionMember(kind, id) {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return false
+	}
 	allowed, err := s.contentAllowed(r, kind, id)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
@@ -107,6 +126,10 @@ func (s *Server) publicContent(w http.ResponseWriter, r *http.Request, kind, id 
 }
 
 func (s *Server) publicItem(w http.ResponseWriter, r *http.Request, id string) bool {
+	if item, ok := s.catalog.Item(id); ok && s.catalog.IsMediaVersionMember(item.Kind, id) {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return false
+	}
 	allowed, err := s.itemAllowed(r, id)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
@@ -120,6 +143,10 @@ func (s *Server) publicItem(w http.ResponseWriter, r *http.Request, id string) b
 }
 
 func (s *Server) playableItem(w http.ResponseWriter, r *http.Request, id string) bool {
+	if item, ok := s.catalog.Item(id); ok && s.catalog.IsMediaVersionMember(item.Kind, id) {
+		fail(w, http.StatusForbidden, "content_access_denied")
+		return false
+	}
 	allowed, err := s.itemAllowed(r, id)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "playback_failed")

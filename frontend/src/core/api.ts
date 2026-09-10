@@ -34,14 +34,35 @@ export type CatalogItem = {
   backdrop?: string;
   playable?: boolean;
   demo?: boolean;
+  edition_label?: string;
+  versions?: MediaVersion[];
 };
+export type MediaVersion = {
+  id: string;
+  label: string;
+  edition_id: string;
+  edition_label?: string;
+  width?: number;
+  height?: number;
+  hdr?: string;
+  video_codec?: string;
+  container?: string;
+  bitrate?: number;
+  capability_input?: MediaCapabilityInput;
+  selected: boolean;
+  available: boolean;
+};
+export type MediaVersionCandidate = Omit<MediaVersion, 'label' | 'selected' | 'available'> & { title: string; kind: 'film' | 'series' };
+export type MediaVersionGroup = { id: string; logical_title_id: string; title: string; kind: 'film' | 'series'; edition_id: string; edition_label?: string; members: MediaVersion[] };
+export type MediaVersionGroups = { groups: MediaVersionGroup[]; candidates: MediaVersionCandidate[]; total: number; next_offset?: number };
 export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dismissed?: boolean };
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
 export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
 export type EpisodeSequence =
-  | { state: 'next'; episode: Episode }
+  | { state: 'next'; episode: Episode; selected_version_id?: string }
+  | { state: 'version_unavailable'; episode: Episode; requested_version_id: string; alternatives: MediaVersion[] }
   | { state: 'end_of_series' | 'not_episodic' | 'context_unavailable'; episode?: never };
 export type Season = { id: string; number: number; episodes: Episode[] };
 export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
@@ -79,6 +100,7 @@ export type ApiErrorCode =
   | 'content_access_denied' | 'invalid_profile_policy' | 'profile_policy_failed'
   | 'invalid_roots' | 'scan_active' | 'scan_failed' | 'scan_status_failed' | 'removal_review_changed' | 'library_cleanup_failed' | 'settings_failed' | 'metadata_invalid_credential' | 'metadata_unavailable' | 'metadata_busy' | 'metadata_not_found' | 'identity_conflict'
   | 'playback_unsupported' | 'ffmpeg_unavailable' | 'playback_failed' | 'playback_capacity' | 'playback_preparing'
+  | 'playback_version_unavailable' | 'playback_version_incompatible'
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'catalog_continue_watching_failed' | 'library_change_requires_preview'
@@ -86,6 +108,8 @@ export type ApiErrorCode =
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type PlaybackQuality = { mode: 'auto' | 'data_saver' | 'original'; max_video_bitrate?: number; max_width?: number; max_height?: number };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
+export type MediaCapabilityInput = { container?: string; video_codec?: string; video_profile?: string; video_level?: number; width?: number; height?: number; bitrate?: number; frame_rate_milli?: number; bit_depth?: number; hdr?: string; audio?: AudioTrack[] };
+export type VersionCapabilities = Record<string, PlaybackCapabilities>;
 export type SubtitleTrack = { index: number; codec: string; language?: string; title?: string; default?: boolean; forced?: boolean; sdh?: boolean; external?: boolean };
 export type PlaybackPlan = {
   plan: { kind: 'direct' | 'remux' | 'transcode'; description?: string; audio_stream_index?: number; audio_external?: boolean; width?: number; height?: number; video_bitrate?: number; audio_bitrate?: number; bandwidth?: number; quality_mode?: 'auto' | 'data_saver' | 'original' };
@@ -102,9 +126,10 @@ export type PlaybackPlan = {
   subtitle_tracks?: SubtitleTrack[];
   selected_subtitle?: SubtitleTrack;
   subtitle_url?: string;
+  version?: MediaVersion;
 };
 export class ApiError extends Error {
-  constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string) {
+  constructor(public readonly code: ApiErrorCode, public readonly status: number, public readonly errorID?: string, public readonly requestedVersionID?: string, public readonly alternatives: MediaVersion[] = []) {
     super(`${messageFor(code)}${errorID ? ` Support ID: ${errorID}.` : ''}`);
   }
 }
@@ -140,7 +165,9 @@ export function messageFor(code: string): string {
     metadata_not_found: 'That title is no longer available for identity repair.',
     identity_conflict: 'This title is already part of an identity repair. Refresh the repair list and try again.',
     playback_unsupported: 'This title is not compatible with this browser.',
-	playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
+    playback_version_unavailable: 'The selected version is no longer available.',
+    playback_version_incompatible: 'The selected version is not compatible with this browser.',
+    playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
     playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
     playback_preparing: 'This local stream is already preparing. Try again in a moment.',

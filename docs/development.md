@@ -317,6 +317,16 @@ sources; cancellation retains the entire last complete catalog state.
 Admitted playback pins a private source version; a changed source requires a new
 playback plan instead of changing bytes under an existing session.
 
+Media-version groups are separate from identity repair. A film version ID is the
+member film anchor; a series version ID is the member series anchor and maps to an
+exact season/episode coordinate. The playback session keeps the canonical catalog
+ID for progress and immutable history while its source key and version ID identify
+the admitted file. Follow-on seek, quality, audio, subtitle and input requests must
+resolve those pinned values rather than the catalog's current primary projection.
+Physical-file media properties are durable so planning can compare grouped sources
+without changing the shared primary. Profile preferences are written only after an
+explicit version plan is admitted.
+
 In **Server settings → Metadata → Identity repair**, review the conflict and
 explicitly choose which title keeps its identity. Merge retains both original
 anchors and metadata, snapshots each profile's progress, and resolves immutable
