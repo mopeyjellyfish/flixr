@@ -3,22 +3,38 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Player } from './Player';
 import { screenCoordinator } from '../screenCoordinator/runtime';
 
-const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: unknown) => void), frag: undefined as undefined | ((event: unknown, data: unknown) => void), attached: 0, destroyed: 0, imported: 0, configs: [] as Array<Record<string, unknown>>, supported: true, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
+const hls = vi.hoisted(() => ({ error: undefined as undefined | ((event: unknown, data: unknown) => void), frag: undefined as undefined | ((event: unknown, data: unknown) => void), manifest: undefined as undefined | ((event: unknown, data: unknown) => void), attached: 0, destroyed: 0, imported: 0, removed: 0, released: 0, ended: 0, bufferedTransfer: false, mediaSourceTransfer: false, configs: [] as Array<Record<string, unknown>>, supported: true, waitForImport: false, releaseImport: undefined as undefined | (() => void) }));
 vi.mock('hls.js', async () => {
   if (hls.waitForImport) await new Promise<void>((resolve) => { hls.releaseImport = resolve; });
   hls.imported += 1;
   class FakeHls {
-    static Events = { ERROR: 'error', FRAG_LOADED: 'fragLoaded' };
+    static Events = { ERROR: 'error', FRAG_LOADED: 'fragLoaded', MANIFEST_PARSED: 'manifestParsed' };
     static ErrorTypes = { NETWORK_ERROR: 'networkError' };
     static isSupported() { return hls.supported; }
+    private media: HTMLMediaElement | null = null;
     constructor(config: Record<string, unknown>) { hls.configs.push(config); }
     on(event: string, handler: (event: unknown, data: unknown) => void) {
       if (event === 'error') hls.error = handler;
       if (event === 'fragLoaded') hls.frag = handler;
+      if (event === 'manifestParsed') hls.manifest = handler;
     }
     loadSource() { /* observable through attachment */ }
-    attachMedia() { hls.attached += 1; }
-    destroy() { hls.destroyed += 1; }
+    stopLoad() { /* preserves the attached media while recovery prepares */ }
+    attachMedia(data: HTMLMediaElement | { media: HTMLMediaElement }) { this.media = 'media' in data ? data.media : data; hls.attached += 1; }
+    transferMedia() {
+      const media = this.media;
+      this.media = null;
+      let buffered = hls.bufferedTransfer;
+      const buffer = { get updating() { return false; }, buffered: { get length() { return buffered ? 1 : 0; }, start: () => 0, end: () => 20 }, remove: () => { hls.removed += 1; buffered = false; } };
+      const sourceBuffers = [buffer];
+      const mediaSource = hls.mediaSourceTransfer ? {
+        readyState: 'open', sourceBuffers,
+        removeSourceBuffer: (candidate: typeof buffer) => { sourceBuffers.splice(sourceBuffers.indexOf(candidate), 1); hls.released += 1; },
+        endOfStream: () => { hls.ended += 1; },
+      } : null;
+      return media ? { media, mediaSource, tracks: hls.bufferedTransfer ? { video: { buffer } } : {} } : null;
+    }
+    destroy() { hls.destroyed += 1; if (this.media) { this.media.removeAttribute('src'); this.media.load(); this.media = null; } }
   }
   return { default: FakeHls };
 });
@@ -26,9 +42,15 @@ vi.mock('hls.js', async () => {
 beforeEach(() => {
   hls.error = undefined;
   hls.frag = undefined;
+  hls.manifest = undefined;
   hls.attached = 0;
   hls.destroyed = 0;
   hls.imported = 0;
+  hls.removed = 0;
+  hls.released = 0;
+  hls.ended = 0;
+  hls.bufferedTransfer = false;
+  hls.mediaSourceTransfer = false;
   hls.configs = [];
   hls.supported = true;
   hls.waitForImport = false;
@@ -42,6 +64,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: undefined });
 });
@@ -160,7 +183,9 @@ it('resumes at the latest position after quality preparation while the old sourc
   expect(video.currentTime).toBe(5);
 });
 
-it('honors Play and the latest quality intent while quality preparation is pending', async () => {
+it('hands pending HLS quality intent to direct playback without resetting fullscreen', async () => {
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  hls.mediaSourceTransfer = true;
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
   const pending: Array<(response: Response) => void> = [];
   const qualityBodies: Array<Record<string, unknown>> = [];
@@ -176,7 +201,10 @@ it('honors Play and the latest quality intent while quality preparation is pendi
   });
   render(<Player catalogID="film-1" onExit={() => undefined} />);
   const video = document.querySelector('video') as HTMLVideoElement;
-  await waitFor(() => expect(video).toHaveAttribute('src', '/balanced.m3u8'));
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
   let paused = false;
   Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
   vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
@@ -194,10 +222,14 @@ it('honors Play and the latest quality intent while quality preparation is pendi
   await waitFor(() => expect(pending).toHaveLength(2));
   expect(qualityBodies[1]).toMatchObject({ quality: { mode: 'original' } });
   expect(Number(qualityBodies[1].observation)).toBeGreaterThan(Number(qualityBodies[0].observation));
+  play.mockClear();
   await act(async () => { pending[1](new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'original', media_url: '/original.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }))); });
   await waitFor(() => expect(video).toHaveAttribute('src', '/original.mp4'));
   fireEvent.loadedMetadata(video);
-  expect(play).toHaveBeenCalledTimes(2);
+  expect(play).toHaveBeenCalledOnce();
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+  expect(hls.released).toBe(1);
+  expect(hls.ended).toBe(1);
 });
 
 it('aborts a pending quality request and bounds Back navigation', async () => {
@@ -288,7 +320,7 @@ it('discards a quality response that arrives after completion starts', async () 
   expect(stops.some((path) => path.includes('late-quality'))).toBe(true);
 });
 
-it('retries an adaptive ramp after a failed quality request', async () => {
+it('retries an adaptive ramp without resetting the active media pipeline', async () => {
   let now = 1_000;
   let qualityCalls = 0;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -304,6 +336,10 @@ it('retries an adaptive ramp after a failed quality request', async () => {
   });
   render(<Player catalogID="film-1" onExit={() => undefined} />);
   await waitFor(() => expect(hls.attached).toBe(1));
+  const video = document.querySelector('video') as HTMLVideoElement;
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   const fragment = () => hls.frag?.({}, { frag: { stats: { loading: { start: 0, end: 160 } } }, payload: new Uint8Array(100_000) });
   for (now of [1_000, 5_000, 9_000, 16_000]) fragment();
@@ -311,6 +347,7 @@ it('retries an adaptive ramp after a failed quality request', async () => {
   for (now of [27_000, 31_000, 35_000, 42_000]) fragment();
   await waitFor(() => expect(qualityCalls).toBe(2));
   await waitFor(() => expect(hls.attached).toBe(2));
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
 });
 
 it('serializes quality, seek and audio replacements against the latest session', async () => {
@@ -1284,6 +1321,46 @@ it('labels audio tracks and preserves source time when changing tracks', async (
   expect(video.currentTime).toBe(2.5);
 });
 
+it('enables Play after a paused HLS audio replacement without a new canplay event', async () => {
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  const audioTracks = [
+    { index: 1, codec: 'aac', language: 'eng', default: true },
+    { index: 2, codec: 'aac', language: 'fra' },
+  ];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'remux', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/english.m3u8',
+      resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: audioTracks,
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({
+      plan: { kind: 'remux', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/french.m3u8',
+      resume_ms: 1_000, stream_offset_ms: 1_000, expires_at: 9999999999, audio_tracks: audioTracks,
+    }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let paused = false;
+  vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.loadedMetadata(video);
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+  fireEvent.pause(video);
+  expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled();
+
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+
+  expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled();
+});
+
 it('keeps the active source when an audio change fails', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
@@ -1422,6 +1499,7 @@ it('reattaches source-relative captions across repeated HLS seeks', async () => 
   video.currentTime = 5;
   fireEvent.seeked(video);
   await waitFor(() => expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('session-2')));
+  fireEvent.seeked(video);
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(0);
 
@@ -1477,6 +1555,101 @@ it('accumulates fifteen-second direct seek steps before the browser emits timeup
   expect(video.currentTime).toBe(30);
 });
 
+it('preserves native video fullscreen through a source-changing seek', async () => {
+  vi.stubGlobal('MediaSource', undefined);
+  vi.stubGlobal('ManagedMediaSource', undefined);
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/stream-1.m3u8'));
+  fireEvent.loadedMetadata(video);
+  fireEvent.canPlay(video);
+  fireEvent.playing(video);
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(video).toHaveAttribute('src', '/stream-2.m3u8'));
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+});
+
+it('preserves native video fullscreen while an expired seek recovers', async () => {
+  vi.stubGlobal('MediaSource', undefined);
+  vi.stubGlobal('ManagedMediaSource', undefined);
+  vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) {
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: `session-${plans}`, media_url: `/stream-${plans}.m3u8`, resume_ms: plans === 1 ? 0 : 15_000, stream_offset_ms: plans === 1 ? 0 : 15_000, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/seek')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/stream-1.m3u8'));
+  fireEvent.loadedMetadata(video);
+  fireEvent.canPlay(video);
+  fireEvent.playing(video);
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(video).toHaveAttribute('src', '/stream-2.m3u8'));
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+});
+
+it('preserves the active media pipeline through a bundled HLS replacement seek', async () => {
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  hls.bufferedTransfer = true;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify({ ...assessedItem, duration_ms: 120000 }));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-1', media_url: '/stream-1.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.endsWith('/seek')) return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }));
+    return new Response(JSON.stringify({ stopped: true, accepted: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  fireEvent.loadedMetadata(video);
+  fireEvent.canPlay(video);
+  fireEvent.playing(video);
+  Object.defineProperty(video, 'paused', { configurable: true, value: false });
+  video.currentTime = 5;
+  vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+  let displayingFullscreen = true;
+  Object.defineProperty(video, 'webkitDisplayingFullscreen', { configurable: true, get: () => displayingFullscreen });
+  vi.mocked(HTMLMediaElement.prototype.load).mockImplementation(() => { displayingFullscreen = false; });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Forward 15 seconds' }));
+
+  await waitFor(() => expect(hls.attached).toBe(2));
+  expect(hls.removed).toBe(1);
+  expect(video.currentTime).toBe(0);
+  expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
+  expect((video as HTMLVideoElement & { webkitDisplayingFullscreen: boolean }).webkitDisplayingFullscreen).toBe(true);
+  fireEvent.seeked(video);
+  video.currentTime = 3;
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(3);
+  expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
+});
+
 it('shows and coalesces the latest seek intent while stale playback is paused', async () => {
   const seekRequests: Array<{ position: number; resolve: (response: Response) => void }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -1503,7 +1676,8 @@ it('shows and coalesces the latest seek intent while stale playback is paused', 
   await waitFor(() => expect(seekRequests).toHaveLength(1));
   expect(pause).toHaveBeenCalled();
   expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuetext', '0:15 of 2:00');
-  expect(screen.getByText('Seeking…')).toBeVisible();
+  expect(document.querySelector('.player-loading')?.textContent).toBe('');
+  expect(document.querySelector('.player-status')).toHaveTextContent(/^Loading$/);
   fireEvent.click(forward);
 
   await act(async () => { seekRequests[0].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
@@ -1513,7 +1687,8 @@ it('shows and coalesces the latest seek intent while stale playback is paused', 
 
   await act(async () => { seekRequests[1].resolve(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-3', media_url: '/stream-3.m3u8', resume_ms: 30_000, stream_offset_ms: 30_000, expires_at: 9999999999 }))); });
   await waitFor(() => expect(hls.attached).toBe(2));
-  expect(screen.queryByText('Seeking…')).not.toBeInTheDocument();
+  expect(document.querySelector('.player-loading')?.textContent).toBe('');
+  expect(document.querySelector('.player-status')).toHaveTextContent(/^Loading$/);
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(0);
   expect(play).toHaveBeenCalledOnce();
@@ -1694,7 +1869,7 @@ it('honors pause and speed changes made while a replacement seek is pending', as
 
   await act(async () => { resolveSeek?.(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2.m3u8', resume_ms: 15_000, stream_offset_ms: 15_000, expires_at: 9999999999 }))); });
   await waitFor(() => expect(hls.attached).toBe(2));
-  video.playbackRate = 1;
+  expect(video.playbackRate).toBe(1.5);
   fireEvent.loadedMetadata(video);
   expect(video.playbackRate).toBe(1.5);
   expect(screen.getByRole('combobox', { name: 'Playback speed' })).toHaveValue('1.5');

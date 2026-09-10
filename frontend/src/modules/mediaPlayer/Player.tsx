@@ -1,4 +1,5 @@
 import type Hls from 'hls.js';
+import type { AttachMediaSourceData } from 'hls.js';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { ApiError, type CatalogItem, type Episode, type PlaybackCapabilities, type PlaybackPlan } from '../../core/api';
@@ -14,6 +15,56 @@ import './player.css';
 const maxConsecutiveRecoveries = 3;
 const finalHeartbeatWaitMS = 2_000;
 const qualityRequestTimeoutMS = 15_000;
+const sourceBufferUpdateTimeoutMS = 1_000;
+
+async function waitForSourceBuffer(buffer: SourceBuffer): Promise<boolean> {
+  if (!buffer.updating) return true;
+  return new Promise((resolve) => {
+    let timer = 0;
+    const done = (ready: boolean) => {
+      window.clearTimeout(timer);
+      buffer.removeEventListener('updateend', updated);
+      buffer.removeEventListener('error', failed);
+      buffer.removeEventListener('abort', failed);
+      resolve(ready);
+    };
+    const updated = () => done(true);
+    const failed = () => done(false);
+    buffer.addEventListener('updateend', updated, { once: true });
+    buffer.addEventListener('error', failed, { once: true });
+    buffer.addEventListener('abort', failed, { once: true });
+    timer = window.setTimeout(() => done(false), sourceBufferUpdateTimeoutMS);
+  });
+}
+
+async function clearTransferredBuffers(transfer: AttachMediaSourceData): Promise<boolean> {
+  const buffers = new Set(Object.values(transfer.tracks).flatMap((track) => track?.buffer ? [track.buffer] : []));
+  return (await Promise.all(Array.from(buffers, async (buffer) => {
+    if (!await waitForSourceBuffer(buffer)) return false;
+    for (let attempt = 0; buffer.buffered.length && attempt < 8; attempt += 1) {
+      try { buffer.remove(buffer.buffered.start(0), buffer.buffered.end(buffer.buffered.length - 1)); }
+      catch { return false; }
+      if (!await waitForSourceBuffer(buffer)) return false;
+    }
+    return buffer.buffered.length === 0;
+  }))).every(Boolean);
+}
+
+async function releaseTransferredMedia(transfer: AttachMediaSourceData, objectURL: string): Promise<void> {
+  const source = transfer.mediaSource;
+  if (source?.readyState === 'open') {
+    const buffers = Array.from(source.sourceBuffers);
+    await Promise.all(buffers.map((buffer) => waitForSourceBuffer(buffer)));
+    for (const buffer of buffers) {
+      try { source.removeSourceBuffer(buffer); }
+      catch { /* the direct source is already active; release is best-effort */ }
+    }
+    try { if (source.readyState === 'open') source.endOfStream(); }
+    catch { /* a closing MediaSource no longer needs explicit completion */ }
+  }
+  try { if (objectURL.startsWith('blob:')) URL.revokeObjectURL(objectURL); }
+  catch { /* the browser may already have released the replaced object URL */ }
+}
 
 function supportsHlsMSE(): boolean {
   const managed = (globalThis as typeof globalThis & { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
@@ -86,7 +137,6 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const [seekPlaying, setSeekPlaying] = useState(true);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [qualityPreference, setQualityPreference] = useState<QualityPreference>(loadQualityPreference);
-  const [bufferingFeedback, setBufferingFeedback] = useState('');
   const [originalFallback, setOriginalFallback] = useState(false);
   const [planAttempt, setPlanAttempt] = useState(0);
   const seekQueue = useRef<{ running: boolean; target?: number }>({ running: false });
@@ -100,6 +150,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const hls = useRef<Hls | null>(null);
   const loadHls = useRef(retryableLazy(() => import('hls.js'))).current;
   const sourceVersion = useRef(0);
+  const activatedSourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
   const subtitleSwitchVersion = useRef(0);
   const audioSwitchTask = useRef<Promise<void> | null>(null);
@@ -126,7 +177,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const qualityPreferenceRef = useRef(qualityPreference);
   const qualityPolicy = useRef(new AdaptiveQualityPolicy(supportsHlsMSE() ? 'low' : 'saver'));
   const qualitySwitching = useRef(false);
-  const pendingQuality = useRef<{ preference: QualityPreference; tier: AutoQualityTier; feedback: string } | undefined>(undefined);
+  const pendingQuality = useRef<{ preference: QualityPreference; tier: AutoQualityTier } | undefined>(undefined);
   const sourceOperations = useRef<Promise<void>>(Promise.resolve());
   const sourceOperationActive = useRef(false);
   const sourceRequestController = useRef<AbortController | null>(null);
@@ -235,6 +286,37 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return Math.max(0, (playback.current?.stream_offset_ms ?? 0) + relative);
   }, []);
 
+  const activateAttachedSource = useCallback((version: number) => {
+    const element = video.current;
+    const plan = playback.current;
+    if (!element || !plan || version !== sourceVersion.current || activatedSourceVersion.current === version) return;
+    activatedSourceVersion.current = version;
+    element.playbackRate = playbackRateIntent.current;
+    const resumeSeconds = Math.max(0, plan.resume_ms - plan.stream_offset_ms) / 1000;
+    if (Math.abs(element.currentTime - resumeSeconds) > 0.001) {
+      initializingPosition.current = true;
+      element.currentTime = resumeSeconds;
+    }
+    if (autoStart.current) {
+      autoStart.current = false;
+      // Browser autoplay policy may require the receiver's local Play button.
+      void element.play().catch((error: unknown) => {
+        playIntent.current = false;
+        if (error instanceof DOMException && error.name === 'NotAllowedError') {
+          initialPlayPending.current = false;
+          setTrackError('Press Play to start watching.');
+        }
+        dispatch({ type: 'pause' });
+      });
+    } else {
+      // A transferred MediaSource can retain metadata without emitting canplay
+      // again. The replacement is attached and intentionally paused, so expose
+      // Play immediately; a later waiting event will report actual buffering.
+      dispatch({ type: 'pause' });
+    }
+    seekSourceTransitioning.current = false;
+  }, []);
+
   const attach = useCallback(async (plan: PlaybackPlan) => {
     const element = video.current;
     if (!element) return;
@@ -242,20 +324,23 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     qualityPolicy.current.resetBufferEvidence();
     subtitleSwitchVersion.current += 1;
     setSwitchingSubtitle(false);
-    hls.current?.destroy();
-    hls.current = null;
     playback.current = plan;
     attachedPlayback.current = null;
     dispatch({ type: 'load', source: plan.media_url, resumeMs: plan.resume_ms });
-    element.removeAttribute('src');
-    element.load();
     element.playbackRate = playbackRateIntent.current;
     // Prefer the bundled engine for live/sliding HLS; native MIME support alone
-    // does not establish reliable live playback (notably in Chromium).
+    // does not establish reliable live playback (notably in Chromium). Avoid an
+    // explicit empty source/load cycle here: mobile browsers end native video
+    // fullscreen when the active media element is reset.
     const mse = supportsHlsMSE();
     if (plan.plan.kind === 'direct' || (!mse && element.canPlayType('application/vnd.apple.mpegurl'))) {
+      const objectURL = element.currentSrc || element.src;
+      const transferredMedia = hls.current?.transferMedia();
+      hls.current?.destroy();
+      hls.current = null;
       element.src = plan.media_url;
       attachedPlayback.current = plan;
+      if (transferredMedia) await releaseTransferredMedia(transferredMedia, objectURL);
       return;
     }
     let Hls: typeof import('hls.js').default;
@@ -263,6 +348,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     catch {
       if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) return;
       if (element.canPlayType('application/vnd.apple.mpegurl')) {
+        hls.current?.destroy();
+        hls.current = null;
         element.src = plan.media_url;
         attachedPlayback.current = plan;
       } else dispatch({ type: 'error', message: 'The compatibility player could not load. Try again.' });
@@ -271,6 +358,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) return;
     if (!Hls.isSupported()) {
       if (element.canPlayType('application/vnd.apple.mpegurl')) {
+        hls.current?.destroy();
+        hls.current = null;
         element.src = plan.media_url;
         attachedPlayback.current = plan;
         return;
@@ -279,6 +368,13 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       return;
     }
     const startPosition = Math.max(0, (plan.resume_ms - plan.stream_offset_ms) / 1000);
+    // Hls.destroy() normally detaches and empties its media element. Transfer the
+    // existing MediaSource first so the same video presentation remains active.
+    const transferredMedia = hls.current?.transferMedia();
+    hls.current?.destroy();
+    hls.current = null;
+    const clearedTransfer = transferredMedia && await clearTransferredBuffers(transferredMedia) ? transferredMedia : undefined;
+    if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) return;
     const next = new Hls({ enableWorker: true, lowLatencyMode: false, startPosition, maxBufferLength: 20, maxMaxBufferLength: 30, maxBufferSize: 32 * 1024 * 1024, backBufferLength: 30 });
     next.on(Hls.Events.ERROR, (_event, data) => {
       if (version !== sourceVersion.current || finalizing.current) return;
@@ -294,13 +390,16 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       if (data.payload.byteLength >= 64 * 1024 && elapsed >= 100) qualityRateRef.current(data.payload.byteLength * 8 * 1000 / elapsed);
     });
     next.loadSource(plan.media_url);
-    next.attachMedia(video.current);
+    next.attachMedia(clearedTransfer ?? video.current);
     hls.current = next;
     attachedPlayback.current = plan;
-  }, [loadHls]);
+    // Transferring keeps the element's loaded metadata, so browsers are not
+    // required to emit loadedmetadata again for the replacement source.
+    if (clearedTransfer) activateAttachedSource(version);
+  }, [activateAttachedSource, loadHls]);
 
-  const replaceQuality = useCallback(async (preference: QualityPreference, tier: AutoQualityTier, feedback: string) => {
-    pendingQuality.current = { preference, tier, feedback };
+  const replaceQuality = useCallback(async (preference: QualityPreference, tier: AutoQualityTier) => {
+    pendingQuality.current = { preference, tier };
     if (qualitySwitching.current || finalizing.current || endedPlayback.current) return;
     qualitySwitching.current = true;
     try {
@@ -315,7 +414,6 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
           const version = sourceVersion.current;
           const position = currentPosition();
           autoStart.current = playIntent.current;
-          setBufferingFeedback(intent.feedback);
           let requestTimeout = 0;
           try {
             const detail = await api.item(catalogID);
@@ -354,7 +452,6 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       if (!finalizing.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change streaming quality.');
     } finally {
       qualitySwitching.current = false;
-      window.setTimeout(() => setBufferingFeedback(''), 4_000);
     }
   }, [attach, catalogID, currentPosition, enqueueSourceOperation]);
 
@@ -364,8 +461,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     const bufferSeconds = element.buffered.length ? Math.max(0, element.buffered.end(element.buffered.length - 1) - element.currentTime) : 0;
     const change = qualityPolicy.current.throughput(bitsPerSecond, bufferSeconds, Date.now());
     const tier = qualityPolicy.current.proposedTier;
-    if (change === 'down' && tier) void replaceQuality('auto', tier, tier === 'low' ? 'Connection throughput remains low; reducing data use…' : 'Connection throughput is low; reducing data use…');
-    if (change === 'up' && tier) void replaceQuality('auto', tier, tier === 'balanced' ? 'Connection is stable; restoring balanced quality…' : 'Connection improved; increasing quality…');
+    if ((change === 'down' || change === 'up') && tier) void replaceQuality('auto', tier);
   };
 
   useEffect(() => {
@@ -378,23 +474,22 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       const buffered = element.buffered.length ? Math.max(0, element.buffered.end(element.buffered.length - 1) - element.currentTime) : 0;
       if (qualityPolicy.current.buffer(buffered, !element.paused, Date.now())) {
         const tier = qualityPolicy.current.proposedTier;
-        if (tier) void replaceQuality('auto', tier, 'Buffered playback is stable; increasing quality…');
+        if (tier) void replaceQuality('auto', tier);
       }
     };
     const stalled = () => {
       if (!playback.current || finalizing.current || element.paused) return;
       dispatch({ type: 'buffering' });
-      setBufferingFeedback('Your connection is buffering…');
       if (qualityPreferenceRef.current === 'auto' && qualityPolicy.current.stall(Date.now())) {
         const tier = qualityPolicy.current.proposedTier;
-        if (tier) void replaceQuality('auto', tier, 'Connection slowed; reducing data use…');
+        if (tier) void replaceQuality('auto', tier);
         return;
       }
       window.clearTimeout(prolongedTimer);
       prolongedTimer = window.setTimeout(() => {
         if (qualityPreferenceRef.current === 'auto' && qualityPolicy.current.prolongedStall(Date.now())) {
           const tier = qualityPolicy.current.proposedTier;
-          if (tier) void replaceQuality('auto', tier, 'Buffering continued; reducing data use…');
+          if (tier) void replaceQuality('auto', tier);
         }
       }, 8_000);
     };
@@ -421,7 +516,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     setQualityPreference(preference);
     saveQualityPreference(preference);
     qualityPolicy.current = new AdaptiveQualityPolicy(supportsHlsMSE() ? 'low' : 'saver');
-    void replaceQuality(preference, qualityPolicy.current.tier, preference === 'auto' ? 'Switching to Auto quality…' : preference === 'data_saver' ? 'Switching to Data saver…' : 'Switching to Original quality…');
+    void replaceQuality(preference, qualityPolicy.current.tier);
   }, [replaceQuality]);
 
   const recover = useCallback(async (failure: unknown) => {
@@ -448,13 +543,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     const oldPlan = playback.current;
     const wasSeeking = seekingRef.current;
     const continuePlaying = initialPlayPending.current || (video.current ? !video.current.paused : false);
+    video.current?.pause();
+    hls.current?.stopLoad();
     playback.current = null;
     sourceVersion.current += 1;
-    hls.current?.destroy();
-    hls.current = null;
     attachedPlayback.current = null;
-    video.current?.removeAttribute('src');
-    video.current?.load();
     dispatch({ type: 'buffering' });
     try {
       const next = await recovery.current.run(async () => {
@@ -1023,7 +1116,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   };
 
   const episodeIndex = episodes.findIndex((episode) => episode.id === catalogID);
-  const statusLabel = seeking && pendingSeekMS !== undefined ? `Seeking to ${Math.floor(pendingSeekMS / 1000)} seconds…` : state.status === 'idle' || state.status === 'loading' ? 'Preparing local playback…' : state.status === 'buffering' ? 'Buffering on your network…' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
+  const statusLabel = seeking || state.status === 'idle' || state.status === 'loading' || state.status === 'buffering' ? 'Loading' : state.status === 'paused' ? 'Paused' : 'Playing on this device';
   const effectivePlan = playback.current?.plan;
   const effectiveQuality = effectivePlan
     ? `${effectivePlan.height ? `${effectivePlan.height}p` : 'Original'}${effectivePlan.video_bitrate ? ` · ${(effectivePlan.video_bitrate / 1_000_000).toFixed(effectivePlan.video_bitrate % 1_000_000 ? 1 : 0)} Mbps` : ''}`
@@ -1037,26 +1130,13 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     {state.status === 'error' ? <section className="state player-error" role="alert" aria-labelledby="player-title"><h2>Playback stopped</h2><p>{state.message}</p>{originalFallback && <button className="primary" onClick={tryOriginal}>Try Original quality</button>}<button onClick={() => { void finish(); }}>Return to your library</button></section> :
       <section className="player-stage" aria-labelledby="player-title">
         <div className="player-frame">
-          {(seeking || state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /><span>{seeking ? 'Seeking…' : state.status === 'buffering' ? 'Buffering…' : 'Starting playback…'}</span></div>}
+          {(seeking || state.status === 'idle' || state.status === 'loading' || state.status === 'buffering') && <div className="player-loading" aria-hidden="true"><span className="button-spinner" /></div>}
           <video
             ref={video}
             preload="auto"
             playsInline
             onDurationChange={() => { const seconds = video.current?.duration; if (seconds && Number.isFinite(seconds)) setDurationMS(seconds * 1000 + (playback.current?.stream_offset_ms ?? 0)); }}
-            onLoadedMetadata={() => {
-              const plan = playback.current;
-              if (!video.current || !plan) return;
-              video.current.playbackRate = playbackRateIntent.current;
-              const resumeSeconds = Math.max(0, plan.resume_ms - plan.stream_offset_ms) / 1000;
-              if (resumeSeconds > 0) initializingPosition.current = true;
-              video.current.currentTime = resumeSeconds;
-              if (autoStart.current) {
-                autoStart.current = false;
-                // Browser autoplay policy may require the receiver's local Play button.
-                void video.current.play().catch((error: unknown) => { playIntent.current = false; if (error instanceof DOMException && error.name === 'NotAllowedError') { initialPlayPending.current = false; setTrackError('Press Play to start watching.'); } dispatch({ type: 'pause' }); });
-              }
-              seekSourceTransitioning.current = false;
-            }}
+            onLoadedMetadata={() => activateAttachedSource(sourceVersion.current)}
             onCanPlay={() => { seekSourceTransitioning.current = false; dispatch({ type: video.current?.paused ? 'pause' : 'play' }); }}
             onError={() => {
               if (recovering.current || finalizing.current) return;
@@ -1105,7 +1185,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         </div>
           <p role="status" className="player-status player-sr-only"><span className={`player-status-dot ${state.status}`} aria-hidden="true" />{statusLabel}</p>
         <div className="player-toolbar">
-          <PlayerControls seeking={seeking} playing={seeking ? seekPlaying : state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={pendingSeekMS ?? state.positionMs} disabled={(!playback.current && !seeking) || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={togglePlayback} video={video} stage={stage} chapters={chapters} sessionID={sessionID} playbackRate={playbackRate} onPlaybackRateChange={(rate) => { playbackRateIntent.current = rate; setPlaybackRate(rate); }} quality={qualityPreference} effectiveQuality={effectiveQuality} bufferingFeedback={bufferingFeedback} onQualityChange={changeQuality}>
+          <PlayerControls seeking={seeking} playing={seeking ? seekPlaying : state.status === 'playing'} durationMS={item?.duration_ms || durationMS} positionMS={pendingSeekMS ?? state.positionMs} disabled={(!playback.current && !seeking) || audioLocked || switchingAudio || state.status === 'loading'} onSeek={requestSeek} onPrevious={onAdvance && episodeIndex > 0 ? () => { void advanceTo(episodes[episodeIndex - 1]); } : undefined} onNext={onAdvance && episodeIndex >= 0 && episodeIndex < episodes.length - 1 ? () => { void advanceTo(episodes[episodeIndex + 1]); } : undefined} onToggle={togglePlayback} video={video} stage={stage} chapters={chapters} sessionID={sessionID} playbackRate={playbackRate} onPlaybackRateChange={(rate) => { playbackRateIntent.current = rate; setPlaybackRate(rate); }} quality={qualityPreference} effectiveQuality={effectiveQuality} onQualityChange={changeQuality}>
           {(playback.current?.audio_tracks?.length ?? 0) > 1 && <label className="player-audio">Audio track
             <select
               aria-busy={switchingAudio}

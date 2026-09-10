@@ -23,9 +23,9 @@ type Props = {
   onSeek: (ms: number) => void; onToggle: () => void; onPrevious?: () => void; onNext?: () => void;
   video: RefObject<HTMLVideoElement | null>; stage: RefObject<HTMLElement | null>;
   chapters?: Chapter[]; sessionID?: string; playbackRate?: number; onPlaybackRateChange?: (rate: number) => void; children?: ReactNode;
-  quality?: QualityPreference; effectiveQuality?: string; bufferingFeedback?: string; onQualityChange?: (quality: QualityPreference) => void;
+  quality?: QualityPreference; effectiveQuality?: string; onQualityChange?: (quality: QualityPreference) => void;
 };
-export function PlayerControls({ playing, durationMS, positionMS, disabled, seeking = false, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, playbackRate = 1, onPlaybackRateChange, quality, effectiveQuality, bufferingFeedback, onQualityChange, children }: Props) {
+export function PlayerControls({ playing, durationMS, positionMS, disabled, seeking = false, onSeek, onToggle, onPrevious, onNext, video, stage, chapters = [], sessionID, playbackRate = 1, onPlaybackRateChange, quality, effectiveQuality, onQualityChange, children }: Props) {
   const [scrub, setScrub] = useState<number>();
   const [hover, setHover] = useState<number>();
   const [preview, setPreview] = useState<{ key: string; url: string }>();
@@ -140,6 +140,6 @@ export function PlayerControls({ playing, durationMS, positionMS, disabled, seek
       {document.pictureInPictureEnabled && <button aria-label="Picture in picture" onClick={() => { void (document.pictureInPictureElement ? document.exitPictureInPicture() : video.current?.requestPictureInPicture())?.catch(() => setNotice('Picture in picture is unavailable for this video.')); }}><Icon name="pip" /></button>}
       <button data-fullscreen aria-label={full ? 'Exit fullscreen' : 'Fullscreen'} title="Fullscreen (F)" onClick={() => { void fullscreen(); }}><Icon name="fullscreen" /></button>
     </div>
-    {(notice || bufferingFeedback) && <p className="player-control-notice" role="status">{notice || bufferingFeedback}</p>}
+    {notice && <p className="player-control-notice" role="status">{notice}</p>}
   </div>;
 }
