@@ -29,26 +29,30 @@ export function MediaVersions({ confirm, onOwnerRequired }: { confirm: Confirm; 
   const [noticeError, setNoticeError] = useState(false);
   const [busy, setBusy] = useState(false);
   const request = useRef(0);
+  const loadedOffsets = useRef([0]);
   const fail = useCallback((error: unknown, fallback: string) => {
     if (error instanceof ApiError && error.code === 'owner_required') { onOwnerRequired(); return; }
     setNotice(error instanceof ApiError ? error.message : fallback);
     setNoticeError(true);
   }, [onOwnerRequired]);
 
-  const load = useCallback(async (offset = 0, append = false) => {
+  const load = useCallback(async (offset = 0, append = false): Promise<boolean> => {
     const requestID = ++request.current;
     setBusy(true);
     try {
       const result = await api.mediaVersionGroups(query, offset, pageSize);
-      if (requestID !== request.current) return;
+      if (requestID !== request.current) return false;
       setGroups((current) => append ? [...current, ...(result.groups ?? [])] : result.groups ?? []);
       setCandidates((current) => append ? [...current, ...(result.candidates ?? [])] : result.candidates ?? []);
+      loadedOffsets.current = append ? [...loadedOffsets.current, offset] : [0];
       setTotal(result.total ?? result.groups?.length ?? 0);
       setNextOffset(result.next_offset);
       setNotice('');
       setNoticeError(false);
+      return true;
     } catch (error) {
       if (requestID === request.current) fail(error, 'Media versions are unavailable.');
+      return false;
     } finally {
       if (requestID === request.current) setBusy(false);
     }
@@ -59,7 +63,47 @@ export function MediaVersions({ confirm, onOwnerRequired }: { confirm: Confirm; 
   const canonical = useMemo(() => candidates.find((candidate) => candidate.id === canonicalID), [candidates, canonicalID]);
   const compatibleCandidates = canonical ? candidates.filter((candidate) => candidate.id !== canonical.id && candidate.kind === canonical.kind) : [];
   const toggleMember = (id: string) => setMemberIDs((current) => current.includes(id) ? current.filter((memberID) => memberID !== id) : [...current, id]);
-  const refresh = async () => { await load(); };
+  const refresh = async (reselectID: string): Promise<boolean> => {
+    const requestID = ++request.current;
+    const minimumPages = loadedOffsets.current.length;
+    const refreshedGroups: MediaVersionGroup[] = [];
+    const refreshedCandidates: MediaVersionCandidate[] = [];
+    const offsets: number[] = [];
+    let offset = 0;
+    let result;
+    setBusy(true);
+    try {
+      do {
+        offsets.push(offset);
+        result = await api.mediaVersionGroups(query, offset, pageSize);
+        if (requestID !== request.current) return false;
+        refreshedGroups.push(...(result.groups ?? []));
+        refreshedCandidates.push(...(result.candidates ?? []));
+        if (result.next_offset === undefined) break;
+        offset = result.next_offset;
+      } while (offsets.length < minimumPages || !refreshedGroups.some((group) => group.id === reselectID));
+      setGroups(refreshedGroups);
+      setCandidates(refreshedCandidates);
+      loadedOffsets.current = offsets;
+      setTotal(result.total ?? refreshedGroups.length);
+      setNextOffset(result.next_offset);
+      setSelectedGroupID(refreshedGroups.some((group) => group.id === reselectID) ? reselectID : '');
+      setNotice('');
+      setNoticeError(false);
+      return true;
+    } catch (error) {
+      if (requestID === request.current) {
+        if (error instanceof ApiError && error.code === 'owner_required') onOwnerRequired();
+        else {
+          setNotice('The change was saved, but media versions could not be refreshed. Try again.');
+          setNoticeError(true);
+        }
+      }
+      return false;
+    } finally {
+      if (requestID === request.current) setBusy(false);
+    }
+  };
   const search = (event: FormEvent) => {
     event.preventDefault();
     setSelectedGroupID('');
@@ -83,8 +127,7 @@ export function MediaVersions({ confirm, onOwnerRequired }: { confirm: Confirm; 
       setSelectedGroupID(group.id);
       setCanonicalID('');
       setMemberIDs([]);
-      await refresh();
-      setNotice('Encoding copies grouped.');
+      if (await refresh(group.id)) setNotice('Encoding copies grouped.');
     } catch (error) { fail(error, 'Flixr could not group these encodings.'); }
     finally { setBusy(false); }
   };
@@ -101,8 +144,7 @@ export function MediaVersions({ confirm, onOwnerRequired }: { confirm: Confirm; 
     setNoticeError(false);
     try {
       await api.ungroupMediaVersion(group.kind, group.id, memberID);
-      await refresh();
-      setNotice(`${member.label} is a separate title again.`);
+      if (await refresh(group.id)) setNotice(`${member.label} is a separate title again.`);
     } catch (error) { fail(error, 'Flixr could not ungroup this encoding.'); }
     finally { setBusy(false); }
   };
@@ -113,8 +155,7 @@ export function MediaVersions({ confirm, onOwnerRequired }: { confirm: Confirm; 
     setNoticeError(false);
     try {
       await api.updateMediaVersionEdition(group.kind, group.id, editionLabel.trim());
-      await refresh();
-      setNotice(editionLabel.trim() ? 'Edition label saved.' : 'Edition label removed.');
+      if (await refresh(group.id)) setNotice(editionLabel.trim() ? 'Edition label saved.' : 'Edition label removed.');
     } catch (error) { fail(error, 'Flixr could not save this edition label.'); }
     finally { setBusy(false); }
   };

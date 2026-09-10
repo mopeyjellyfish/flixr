@@ -88,3 +88,43 @@ it('returns an expired owner mutation to the owner sign-in flow', async () => {
 
   await waitFor(() => expect(onOwnerRequired).toHaveBeenCalledOnce());
 });
+
+it('reloads through the selected page after editing a page-two title', async () => {
+  const first = { id: 'film-1', logical_title_id: 'film-1', title: 'Arrival', kind: 'film', edition_id: 'film-1', members: [{ id: 'film-1', label: '1080p', edition_id: 'film-1', selected: false, available: true }] };
+  const second = { id: 'film-2', logical_title_id: 'film-2', title: 'Blade Runner', kind: 'film', edition_id: 'film-2', edition_label: 'Theatrical cut', members: [{ id: 'film-2', label: '4K', edition_id: 'film-2', selected: false, available: true }] };
+  let patched = false;
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (init?.method === 'PATCH') { patched = true; return new Response(JSON.stringify({ ...second, edition_label: 'Final cut' })); }
+    if (path.includes('offset=50')) return new Response(JSON.stringify({ groups: [{ ...second, edition_label: patched ? 'Final cut' : 'Theatrical cut' }], candidates: [], total: 2 }));
+    return new Response(JSON.stringify({ groups: [first], candidates: [], total: 2, next_offset: 50 }));
+  });
+  render(<MediaVersions confirm={vi.fn().mockResolvedValue(true)} onOwnerRequired={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load more titles' }));
+  await screen.findByRole('option', { name: /Blade Runner/ });
+  fireEvent.change(screen.getByLabelText('Title to manage'), { target: { value: 'film-2' } });
+  const edition = screen.getByLabelText('Edition label');
+  fireEvent.change(edition, { target: { value: 'Final cut' } });
+  fireEvent.blur(edition);
+
+  await waitFor(() => expect(screen.getByLabelText('Title to manage')).toHaveValue('film-2'));
+  expect(await screen.findByDisplayValue('Final cut')).toBeVisible();
+  expect(fetcher.mock.calls.filter(([input]) => String(input).includes('offset=50'))).toHaveLength(2);
+});
+
+it('keeps a refresh failure visible instead of replacing it with success', async () => {
+  const group = { id: 'film-1', logical_title_id: 'film-1', title: 'Arrival', kind: 'film', edition_id: 'film-1', members: [{ id: 'film-1', label: '1080p', edition_id: 'film-1', selected: false, available: true }] };
+  let patched = false;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+    if (init?.method === 'PATCH') { patched = true; return new Response(JSON.stringify({ ...group, edition_label: 'Final cut' })); }
+    if (patched) return new Response(JSON.stringify({ error: { code: 'request_failed' } }), { status: 500 });
+    return new Response(JSON.stringify({ groups: [group], candidates: [], total: 1 }));
+  });
+  render(<MediaVersions confirm={vi.fn().mockResolvedValue(true)} onOwnerRequired={() => undefined} />);
+  const edition = await screen.findByLabelText('Edition label');
+  fireEvent.change(edition, { target: { value: 'Final cut' } });
+  fireEvent.blur(edition);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/change was saved.*could not be refreshed/i);
+  expect(screen.queryByText('Edition label saved.')).not.toBeInTheDocument();
+});
