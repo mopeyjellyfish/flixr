@@ -71,7 +71,7 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   expect(posted).toEqual({
     catalog_id: 'film-1',
     continue_watching_intent: 'user',
-    quality: { mode: 'auto', max_video_bitrate: 500_000, max_width: 640, max_height: 360 },
+    quality: { mode: 'auto', max_video_bitrate: 1_000_000, max_width: 854, max_height: 480 },
     capabilities: expect.objectContaining({
       supports_direct: true,
       supports_remux: true,
@@ -522,6 +522,30 @@ it('uses native HLS when the coarse MSE probe and hls.js support disagree', asyn
   }
 });
 
+it('uses Managed Media Source for adaptive HLS when MediaSource is absent', async () => {
+  const originalMediaSource = globalThis.MediaSource;
+  const managedGlobal = globalThis as typeof globalThis & { ManagedMediaSource?: typeof MediaSource };
+  const originalManaged = managedGlobal.ManagedMediaSource;
+  Object.defineProperty(globalThis, 'MediaSource', { configurable: true, value: undefined });
+  Object.defineProperty(managedGlobal, 'ManagedMediaSource', { configurable: true, value: { isTypeSupported: () => true } });
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    if (String(input).endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'mms', media_url: '/mms/master.m3u8', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify(assessedItem));
+  });
+  try {
+    render(<Player catalogID="film-1" onExit={() => undefined} />);
+    await waitFor(() => expect(hls.attached).toBe(1));
+    expect(planBodies[0]).toMatchObject({ quality: { mode: 'auto', max_video_bitrate: 500_000, max_width: 640, max_height: 360 } });
+  } finally {
+    Object.defineProperty(globalThis, 'MediaSource', { configurable: true, value: originalMediaSource });
+    Object.defineProperty(managedGlobal, 'ManagedMediaSource', { configurable: true, value: originalManaged });
+  }
+});
+
 it('keeps the current stream usable when an HLS seek replacement is refused', async () => {
   let seeks = 0;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -744,8 +768,11 @@ it('cancels an in-flight recovery plan on explicit stop and releases its late se
   fireEvent.pause(video);
   await waitFor(() => expect(resolveRecovery).toBeTypeOf('function'));
 
+  vi.useFakeTimers();
   fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
-  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+  expect(exit).toHaveBeenCalledOnce();
+  vi.useRealTimers();
   resolveRecovery!(new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-2', media_url: '/media-2.mp4', heartbeat_url: '/heartbeat-2', resume_ms: 12_000, stream_offset_ms: 0, expires_at: 9999999999 })));
 
   await waitFor(() => expect(stopped.some((path) => path.endsWith('/session-2/stop'))).toBe(true));
@@ -806,8 +833,11 @@ it('releases a seek replacement that arrives after explicit stop', async () => {
   fireEvent.seeked(video);
   await waitFor(() => expect(resolveSeek).toBeTypeOf('function'));
 
+  vi.useFakeTimers();
   fireEvent.click(screen.getByRole('button', { name: /back to library/i }));
-  await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+  expect(exit).toHaveBeenCalledOnce();
+  vi.useRealTimers();
   resolveSeek!(new Response(JSON.stringify({ plan: { kind: 'transcode' }, session_id: 'session-2', media_url: '/stream-2/manifest.m3u8', heartbeat_url: '/heartbeat-2', seek_url: '/seek-2', stop_url: '/api/v1/playback/sessions/session-2/stop', resume_ms: 3_000, stream_offset_ms: 3_000, expires_at: 9999999999 })));
 
   await waitFor(() => expect(stopped.some((path) => path.includes('/session-2/stop'))).toBe(true));
@@ -1169,7 +1199,7 @@ it('locks audio selection while completion and next-episode resolution use the c
   expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
 });
 
-it('waits for an in-flight audio replacement before completing its stable session', async () => {
+it('discards an in-flight audio replacement when completion wins', async () => {
   let resolveAudio: ((response: Response) => void) | undefined;
   const calls: string[] = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -1200,13 +1230,14 @@ it('waits for an in-flight audio replacement before completing its stable sessio
   }))); });
 
   expect(await screen.findByRole('heading', { name: /end of series/i })).toBeVisible();
-  expect(calls.some((path) => path.includes('session-1/heartbeat') || path.includes('session-1/next'))).toBe(false);
-  expect(calls.some((path) => path.includes('session-2/heartbeat'))).toBe(true);
-  expect(calls.some((path) => path.includes('session-2/next'))).toBe(true);
+  expect(calls.some((path) => path.includes('session-1/heartbeat'))).toBe(true);
+  expect(calls.some((path) => path.includes('session-1/next'))).toBe(true);
+  expect(calls.some((path) => path.includes('session-2/heartbeat') || path.includes('session-2/next'))).toBe(false);
+  expect(calls.some((path) => path.includes('session-2/stop'))).toBe(true);
   expect(screen.queryByRole('heading', { name: /playback stopped/i })).toBeNull();
 
   view.unmount();
-  await waitFor(() => expect(calls.some((path) => path.includes('session-2/stop'))).toBe(true));
+  await waitFor(() => expect(calls.some((path) => path.includes('session-1/stop'))).toBe(true));
 });
 
 it('labels audio tracks and preserves source time when changing tracks', async () => {

@@ -111,6 +111,19 @@ it('assesses MSE when both native HLS and MSE are advertised', async () => {
  expect(decodingInfo.mock.calls.slice(1).map(([configuration])=>configuration.type)).toEqual(['media-source','media-source']);
 });
 
+it('assesses Managed Media Source when conventional MediaSource is absent', async () => {
+	vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably');
+	vi.stubGlobal('MediaSource', undefined);
+	vi.stubGlobal('ManagedMediaSource', { isTypeSupported: vi.fn().mockReturnValue(true) });
+	const decodingInfo = vi.fn().mockResolvedValue({ supported: true });
+	Object.defineProperty(navigator, 'mediaCapabilities', { configurable: true, value: { decodingInfo } });
+
+	const result = await browserCapabilities(media);
+
+	expect(result.supports_fmp4_hls).toBe(true);
+	expect(decodingInfo.mock.calls.slice(1).map(([configuration]) => configuration.type)).toEqual(['media-source', 'media-source']);
+});
+
 it('bounds a stalled capability probe without discarding completed supported paths', async () => {
 	vi.useFakeTimers();
 	try {

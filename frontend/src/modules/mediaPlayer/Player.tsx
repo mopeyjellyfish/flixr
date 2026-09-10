@@ -8,6 +8,7 @@ import { screenCoordinator } from '../screenCoordinator/runtime';
 import { browserCapabilities } from './capabilities';
 import { PlayerControls, type Chapter } from './PlayerControls';
 import { AdaptiveQualityPolicy, loadQualityPreference, qualityRequest, saveQualityPreference, type AutoQualityTier, type QualityPreference } from './quality';
+import { retryableLazy } from './lazy';
 import './player.css';
 
 const maxConsecutiveRecoveries = 3;
@@ -15,7 +16,9 @@ const finalHeartbeatWaitMS = 2_000;
 const qualityRequestTimeoutMS = 15_000;
 
 function supportsHlsMSE(): boolean {
-  return typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.40.2"');
+  const managed = (globalThis as typeof globalThis & { ManagedMediaSource?: typeof MediaSource }).ManagedMediaSource;
+  const source = typeof MediaSource !== 'undefined' ? MediaSource : managed;
+  return Boolean(source?.isTypeSupported('video/mp4; codecs="avc1.640028, mp4a.40.2"'));
 }
 
 async function settleWithin(promise: Promise<unknown>, timeoutMS: number): Promise<void> {
@@ -95,7 +98,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const video = useRef<HTMLVideoElement>(null);
   const backButton = useRef<HTMLButtonElement>(null);
   const hls = useRef<Hls | null>(null);
-  const hlsPreload = useRef<Promise<typeof import('hls.js')> | null>(null);
+  const loadHls = useRef(retryableLazy(() => import('hls.js'))).current;
   const sourceVersion = useRef(0);
   const audioSwitchVersion = useRef(0);
   const subtitleSwitchVersion = useRef(0);
@@ -121,27 +124,18 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const keyboardInteraction = useRef(true);
   const playbackRateIntent = useRef(1);
   const qualityPreferenceRef = useRef(qualityPreference);
-  const qualityPolicy = useRef(new AdaptiveQualityPolicy());
+  const qualityPolicy = useRef(new AdaptiveQualityPolicy(supportsHlsMSE() ? 'low' : 'saver'));
   const qualitySwitching = useRef(false);
   const pendingQuality = useRef<{ preference: QualityPreference; tier: AutoQualityTier; feedback: string } | undefined>(undefined);
   const sourceOperations = useRef<Promise<void>>(Promise.resolve());
   const sourceOperationActive = useRef(false);
-  const qualityRequestController = useRef<AbortController | null>(null);
+  const sourceRequestController = useRef<AbortController | null>(null);
   const qualityRateRef = useRef<(bitsPerSecond: number) => void>(() => undefined);
   const attachedPlayback = useRef<PlaybackPlan | null>(null);
   const seekSourceTransitioning = useRef(false);
   const retainedSeekFallback = useRef<{ plan: PlaybackPlan; target: number } | undefined>(undefined);
   const playerStatus = useRef(state.status);
   playerStatus.current = state.status;
-
-  const loadHls = useCallback(() => {
-    if (!hlsPreload.current) {
-      const pending = import('hls.js');
-      void pending.catch(() => undefined);
-      hlsPreload.current = pending;
-    }
-    return hlsPreload.current;
-  }, []);
 
   const enqueueSourceOperation = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
     const run = async () => {
@@ -245,6 +239,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     const element = video.current;
     if (!element) return;
     const version = ++sourceVersion.current;
+    qualityPolicy.current.resetBufferEvidence();
     subtitleSwitchVersion.current += 1;
     setSwitchingSubtitle(false);
     hls.current?.destroy();
@@ -263,7 +258,15 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       attachedPlayback.current = plan;
       return;
     }
-    const { default: Hls } = await loadHls();
+    let Hls: typeof import('hls.js').default;
+    try { ({ default: Hls } = await loadHls()); }
+    catch {
+      if (element.canPlayType('application/vnd.apple.mpegurl')) {
+        element.src = plan.media_url;
+        attachedPlayback.current = plan;
+      } else dispatch({ type: 'error', message: 'The compatibility player could not load. Try again.' });
+      return;
+    }
     if (version !== sourceVersion.current || !video.current) return;
     if (!Hls.isSupported()) {
       if (element.canPlayType('application/vnd.apple.mpegurl')) {
@@ -321,11 +324,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
               return;
             }
             const controller = new AbortController();
-            qualityRequestController.current = controller;
+            sourceRequestController.current = controller;
             requestTimeout = window.setTimeout(() => controller.abort(), qualityRequestTimeoutMS);
             const updated = await api.playbackQuality(current.session_id, position, ++observation.current, capabilities, qualityRequest(intent.preference, intent.tier), controller.signal);
             window.clearTimeout(requestTimeout);
-            if (qualityRequestController.current === controller) qualityRequestController.current = null;
+            if (sourceRequestController.current === controller) sourceRequestController.current = null;
             if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) {
               void api.playbackStop(updated.session_id).catch(() => undefined);
               if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
@@ -340,7 +343,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
             }
           } catch (error: unknown) {
             window.clearTimeout(requestTimeout);
-            qualityRequestController.current = null;
+            sourceRequestController.current = null;
             if (adaptiveProposal) qualityPolicy.current.reject(intent.tier, Date.now());
             if (version === sourceVersion.current && !finalizing.current && !endedPlayback.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change streaming quality.');
           }
@@ -368,6 +371,15 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     const element = video.current;
     if (!element) return;
     let prolongedTimer = 0;
+    const nativeHeadroom = () => {
+      const current = playback.current;
+      if (qualityPreferenceRef.current !== 'auto' || !current || current.plan.kind === 'direct' || hls.current || sourceOperationActive.current) return;
+      const buffered = element.buffered.length ? Math.max(0, element.buffered.end(element.buffered.length - 1) - element.currentTime) : 0;
+      if (qualityPolicy.current.buffer(buffered, !element.paused, Date.now())) {
+        const tier = qualityPolicy.current.proposedTier;
+        if (tier) void replaceQuality('auto', tier, 'Buffered playback is stable; increasing quality…');
+      }
+    };
     const stalled = () => {
       if (!playback.current || finalizing.current || element.paused) return;
       dispatch({ type: 'buffering' });
@@ -389,11 +401,17 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     element.addEventListener('waiting', stalled);
     element.addEventListener('stalled', stalled);
     element.addEventListener('playing', playing);
+    element.addEventListener('progress', nativeHeadroom);
+    element.addEventListener('timeupdate', nativeHeadroom);
+    const nativeTimer = window.setInterval(nativeHeadroom, 5_000);
     return () => {
       window.clearTimeout(prolongedTimer);
+      window.clearInterval(nativeTimer);
       element.removeEventListener('waiting', stalled);
       element.removeEventListener('stalled', stalled);
       element.removeEventListener('playing', playing);
+      element.removeEventListener('progress', nativeHeadroom);
+      element.removeEventListener('timeupdate', nativeHeadroom);
     };
   }, [replaceQuality]);
 
@@ -401,7 +419,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     qualityPreferenceRef.current = preference;
     setQualityPreference(preference);
     saveQualityPreference(preference);
-    qualityPolicy.current = new AdaptiveQualityPolicy();
+    qualityPolicy.current = new AdaptiveQualityPolicy(supportsHlsMSE() ? 'low' : 'saver');
     void replaceQuality(preference, qualityPolicy.current.tier, preference === 'auto' ? 'Switching to Auto quality…' : preference === 'data_saver' ? 'Switching to Data saver…' : 'Switching to Original quality…');
   }, [replaceQuality]);
 
@@ -562,8 +580,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return () => {
       active = false;
       recoveryController.cancel();
-      qualityRequestController.current?.abort();
-      qualityRequestController.current = null;
+      sourceRequestController.current?.abort();
+      sourceRequestController.current = null;
       audioSwitchVersion.current += 1;
       pendingQuality.current = undefined;
       autoplayVersion.current += 1;
@@ -589,7 +607,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     qualityPreferenceRef.current = 'original';
     setQualityPreference('original');
     saveQualityPreference('original');
-    qualityPolicy.current = new AdaptiveQualityPolicy();
+    qualityPolicy.current = new AdaptiveQualityPolicy(supportsHlsMSE() ? 'low' : 'saver');
     playIntent.current = true;
     autoStart.current = true;
     setOriginalFallback(false);
@@ -666,7 +684,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     return enqueueSourceOperation(async () => {
     const plan = playback.current;
     const element = video.current;
-    if (!plan || !element) return 'failed';
+    if (!plan || !element || finalizing.current || endedPlayback.current) return 'failed';
     if (plan.plan.kind === 'direct') {
       element.currentTime = target / 1000;
       dispatch({ type: 'progress', positionMs: currentPosition() });
@@ -674,9 +692,12 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     }
     const version = sourceVersion.current;
     setTrackError(undefined);
+    const controller = new AbortController();
+    sourceRequestController.current = controller;
     try {
-      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
-      if (version !== sourceVersion.current || finalizing.current || !video.current) {
+      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current, controller.signal);
+      if (sourceRequestController.current === controller) sourceRequestController.current = null;
+      if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) {
         if (updated.session_id !== plan.session_id) void api.playbackStop(updated.session_id).catch(() => undefined);
         return 'failed';
       }
@@ -699,6 +720,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         return 'retained';
       }
     } catch (error: unknown) {
+      if (sourceRequestController.current === controller) sourceRequestController.current = null;
+      if (finalizing.current || endedPlayback.current) return 'failed';
       const sessionInvalid = error instanceof ApiError && error.code === 'playback_session_invalid';
       if (sessionInvalid) retainedSeekFallback.current = undefined;
       if (!sessionInvalid && seekQueue.current.target === undefined) {
@@ -734,6 +757,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const requestSeek = useCallback((target: number) => {
     const element = video.current;
     if (!element) return;
+    qualityPolicy.current.resetBufferEvidence();
     if (seekQueue.current.running) {
       seekQueue.current.target = target;
       setPendingSeekMS(target);
@@ -837,8 +861,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     if (finalizing.current) return;
     finalizing.current = true;
     recovery.current.cancel();
-    qualityRequestController.current?.abort();
-    qualityRequestController.current = null;
+    sourceRequestController.current?.abort();
+    sourceRequestController.current = null;
     setAudioLocked(true);
     autoplayVersion.current += 1;
     autoplayRequest.current?.abort();
@@ -859,8 +883,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
   const complete = async () => {
     if (!playback.current || finalizing.current || endedPlayback.current) return;
     endedPlayback.current = true;
-    qualityRequestController.current?.abort();
-    qualityRequestController.current = null;
+    sourceRequestController.current?.abort();
+    sourceRequestController.current = null;
     setAudioLocked(true);
     const version = ++autoplayVersion.current;
     autoplayRequest.current?.abort();
@@ -894,27 +918,32 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
     }
   };
 
-  const seeked = async () => {
+  const seeked = async () => enqueueSourceOperation(async () => {
+    qualityPolicy.current.resetBufferEvidence();
     const plan = playback.current;
-    if (!plan) return;
+    if (!plan || finalizing.current || endedPlayback.current) return;
     if (plan.plan.kind === 'direct') { await heartbeat(); return; }
     const version = sourceVersion.current;
     const target = currentPosition();
     setTrackError(undefined);
+    const controller = new AbortController();
+    sourceRequestController.current = controller;
     try {
-      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current);
-      if (version !== sourceVersion.current || finalizing.current) {
+      const updated = await api.playbackSeek(plan.session_id, target, ++observation.current, controller.signal);
+      if (sourceRequestController.current === controller) sourceRequestController.current = null;
+      if (version !== sourceVersion.current || finalizing.current || endedPlayback.current) {
         if (updated.session_id !== plan.session_id) void api.playbackStop(updated.session_id).catch(() => undefined);
         return;
       }
       if (updated.session_id !== plan.session_id || updated.media_url !== plan.media_url) void attach(updated);
     } catch (error: unknown) {
-      if (version === sourceVersion.current && !finalizing.current) {
+      if (sourceRequestController.current === controller) sourceRequestController.current = null;
+      if (version === sourceVersion.current && !finalizing.current && !endedPlayback.current) {
         if (isRetryablePlaybackFailure(error)) void recover(error);
         else setTrackError(error instanceof ApiError ? error.message : 'Flixr could not seek in this stream. Try again.');
       }
     }
-  };
+  });
 
   const changeAudio = async (value: string) => {
     if (!playback.current || !video.current || switchingAudio || audioSwitchTask.current || audioLocked || finalizing.current || endedPlayback.current) return;
@@ -937,8 +966,12 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         const item = await api.item(catalogID);
         const selected = plan.audio_tracks?.find((track) => track.index === streamIndex && Boolean(track.external) === (source === 'external'));
         const capabilities = await browserCapabilities(selected ? { ...item, audio: [selected] } : item);
-        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, capabilities);
-        if (version !== sourceVersion.current || !video.current) {
+        if (finalizing.current || endedPlayback.current || version !== sourceVersion.current) return;
+        const controller = new AbortController();
+        sourceRequestController.current = controller;
+        const updated = await api.playbackAudio(plan.session_id, streamIndex, source === 'external', positionMs, ++observation.current, capabilities, controller.signal);
+        if (sourceRequestController.current === controller) sourceRequestController.current = null;
+        if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || !video.current) {
           void api.playbackStop(updated.session_id).catch(() => undefined);
           return;
         }
@@ -946,7 +979,8 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         if (seekingRef.current) autoStart.current = false;
         await attach({ ...updated, resume_ms: resumeMS });
       } catch (error: unknown) {
-        if (version === sourceVersion.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
+        sourceRequestController.current = null;
+        if (version === sourceVersion.current && !finalizing.current && !endedPlayback.current) setTrackError(error instanceof ApiError ? error.message : 'Flixr could not change the audio track.');
       } finally {
         if (replacingSession.current === plan.session_id) replacingSession.current = undefined;
       }

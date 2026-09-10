@@ -15,11 +15,15 @@ Fullscreen stays an explicit choice; a browser that blocks automatic playback
 shows a Play button.
 
 Auto is the default streaming quality and is remembered on each device. It
-starts with a balanced 720p ceiling, then changes to the 480p Data saver ceiling
-after repeated buffering. Measured throughput headroom can restore balanced
-quality after three minutes. Data saver always uses the lower ceiling. Original uses a
-compatible source or stream copy when possible. The settings menu shows the
-actual resolution and video bitrate selected by the server. Quality changes
+starts at a transport-safe 360p ceiling in browsers with Media Source or Managed
+Media Source, then raises the ceiling to 480p and 720p after measured throughput
+shows enough headroom. Repeated or prolonged buffering lowers it one step. A
+native-only HLS browser starts at 480p because it does not expose fragment
+throughput; thirty seconds of uninterrupted playback with at least twelve
+seconds buffered can raise it, while buffering can lower it to 360p. Data saver
+uses the 480p ceiling. Original uses a compatible source or stream copy when
+possible. The settings menu shows the actual resolution and video bitrate
+selected by the server. Quality changes
 prepare a replacement stream and restore source position, play/pause state and
 playback speed; they are not seamless multi-rendition switching.
 

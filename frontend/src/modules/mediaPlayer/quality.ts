@@ -28,12 +28,14 @@ export class AdaptiveQualityPolicy {
   tier: AutoQualityTier;
   private stalls: number[] = [];
   private stalledAt?: number;
+  private lastStallAt?: number;
   private cooldownUntil = 0;
   private recoveryAfter = 15_000;
   private recoverySpan = 12_000;
   private retryAfter = 0;
   private rates: Array<{ now: number; bitsPerSecond: number }> = [];
   private recoveryHeadroom?: { since: number; last: number; samples: number };
+  private bufferHeadroom?: { since: number; last: number; samples: number };
   private pendingTier?: AutoQualityTier;
 
   constructor(initialTier: AutoQualityTier = 'low') { this.tier = initialTier; }
@@ -42,6 +44,7 @@ export class AdaptiveQualityPolicy {
 
   stall(now: number): boolean {
     if (this.stalledAt === undefined) this.stalledAt = now;
+    this.lastStallAt = now;
     if (this.tier === 'low' || !this.outsideCooldown(now)) return false;
     this.stalls = [...this.stalls.filter((value) => now - value <= 15_000), now];
     if (this.stalls.length < 2) return false;
@@ -55,6 +58,20 @@ export class AdaptiveQualityPolicy {
   }
 
   playing(): void { this.stalledAt = undefined; }
+
+  buffer(bufferSeconds: number, playing: boolean, now: number): boolean {
+    if (!playing || bufferSeconds < 12 || this.tier === 'balanced' || (this.lastStallAt !== undefined && now - this.lastStallAt < 30_000) || !this.outsideCooldown(now)) {
+      this.bufferHeadroom = undefined;
+      return false;
+    }
+    if (!this.bufferHeadroom || now - this.bufferHeadroom.last > 15_000) this.bufferHeadroom = { since: now, last: now, samples: 1 };
+    else { this.bufferHeadroom.last = now; this.bufferHeadroom.samples += 1; }
+    return this.bufferHeadroom.samples >= 4 && now - this.bufferHeadroom.since >= 30_000
+      ? this.propose(this.higherTier())
+      : false;
+  }
+
+  resetBufferEvidence(): void { this.bufferHeadroom = undefined; }
 
   throughput(bitsPerSecond: number, bufferSeconds: number, now: number): 'down' | 'up' | undefined {
     if (!Number.isFinite(bitsPerSecond) || bitsPerSecond <= 0) return undefined;
@@ -111,5 +128,6 @@ export class AdaptiveQualityPolicy {
     this.stalledAt = undefined;
     this.rates = [];
     this.recoveryHeadroom = undefined;
+    this.bufferHeadroom = undefined;
   }
 }
