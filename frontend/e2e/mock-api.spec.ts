@@ -55,7 +55,10 @@ test('mocked owner configures and runs a verified backup', async ({ page }, test
     if (path.endsWith('/owner/backups/jobs') && method === 'POST') return { status: 202, json: { job: { id: 'backup-1', trigger: 'manual', status: 'queued', queued_at: 1 } } };
     return undefined;
   });
-  await open(page, '/owner'); await page.getByLabel('Backup folder').fill('/backups/flixr'); await page.getByRole('button', { name: /save backup policy/i }).click(); await expect(page.getByText('Backup policy saved.')).toBeVisible(); await page.getByRole('button', { name: /back up now/i }).click(); await expect(page.getByText(/manual backup/i)).toBeVisible(); await check(page, []); await page.locator('#backups').screenshot({ path: testInfo.outputPath('owner-backups.png') });
+  await open(page, '/owner'); await page.getByLabel('Backup folder').fill('/backups/flixr'); await page.getByRole('button', { name: /save backup policy/i }).click(); await expect(page.getByText('Backup policy saved.')).toBeVisible();
+  const runBackup = page.getByRole('button', { name: /back up now/i });
+  await expect(runBackup).toBeEnabled();
+  await runBackup.click(); await expect(page.getByText(/manual backup/i)).toBeVisible(); await check(page, []); await page.locator('#backups').screenshot({ path: testInfo.outputPath('owner-backups.png') });
   await page.screenshot({ path: testInfo.outputPath('owner-desktop.png'), fullPage: true });
   // Phone layout: the section strip stays reachable, nothing overflows, and forms stack.
   await page.setViewportSize({ width: 390, height: 844 });
@@ -72,6 +75,7 @@ async function open(page: Page, path: string) {
   await status;
   await page.waitForFunction(() => !document.body.textContent?.includes('Loading local Flixr…'));
   if (path !== '/') await page.evaluate((nextPath) => { window.history.pushState({}, '', nextPath); window.dispatchEvent(new PopStateEvent('popstate')); }, path);
+  await expect(page.locator('[data-app-content]')).not.toHaveAttribute('inert');
 }
 async function check(page: Page, errors: string[]) {
   // Let entrance animations finish so axe measures settled colours, not mid-fade blends.
