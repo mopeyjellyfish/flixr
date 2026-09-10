@@ -496,7 +496,7 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
       const cancelled = () => done(false);
       const observed = (event: Event) => {
         if (version !== sourceVersion.current || finalizing.current || endedPlayback.current || video.current !== element) done(false);
-        else if (event.type === 'error' || event.type === 'abort') done(false);
+        else if ((event.type === 'error' || event.type === 'abort') && (usesHls || sourceMatches())) done(false);
         else {
           if (!usesHls && sourceMatches() && (event.type === 'loadedmetadata' || event.type === 'loadeddata' || event.type === 'canplay')) nativeReadyObserved = true;
           if (ready() || (usesHls ? event.type === 'canplay' : sourceMatches() && (event.type === 'canplay' || event.type === 'loadeddata'))) done(true);

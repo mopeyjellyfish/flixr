@@ -305,6 +305,7 @@ it('does not commit native handoff from stale readyState before the candidate so
   fireEvent.click(screen.getByText('Settings'));
   fireEvent.change(screen.getByRole('combobox', { name: 'Streaming quality' }), { target: { value: 'data_saver' } });
   await waitFor(() => expect(video).toHaveAttribute('src', '/candidate.m3u8'));
+  fireEvent.abort(video);
   expect(handoffs).toEqual([]);
 
   currentSource = new URL('/candidate.m3u8', window.location.href).href;
