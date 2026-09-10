@@ -829,7 +829,7 @@ func TestFFmpegCommandUsesNoShellAndRejectsNonLoopbackInput(t *testing.T) {
 		t.Fatalf("unexpected command: %s %v", name, args)
 	}
 	joined := strings.Join(args, " ")
-	for _, exact := range []string{"-readrate 1", "-readrate_initial_burst 4", "-readrate_catchup 4", "-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-force_key_frames expr:gte(t,n_forced*2)", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-hls_time 2", "-master_pl_name master.m3u8"} {
+	for _, exact := range []string{"-readrate 1", "-readrate_initial_burst 12", "-readrate_catchup 4", "-profile:v high", "-level:v 4.0", "-pix_fmt yuv420p", "-r 30", "-b:v 5000000", "-maxrate 5000000", "-bufsize 10000000", "-force_key_frames expr:gte(t,n_forced*2)", "-c:a aac", "-ac 2", "-ar 48000", "-b:a 128000", "-hls_time 2", "-master_pl_name master.m3u8"} {
 		if !strings.Contains(joined, exact) {
 			t.Fatalf("command %q lacks bounded rendition %q", joined, exact)
 		}
@@ -1145,5 +1145,23 @@ func TestSourceVersionSeparatesGenerationsAndInputAuthority(t *testing.T) {
 		if !ok || id != "film" || key != want {
 			t.Fatalf("input %s %s %v", id, key, ok)
 		}
+	}
+}
+
+func TestQualityParametersSeparateGenerations(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	balanced := Plan{Kind: Transcode, VideoCodec: "h264", Width: 1280, Height: 720, VideoBitrate: 2_500_000, AudioCodec: "aac", AudioBitrate: 128_000, Bandwidth: 2_900_000, QualityMode: QualityAuto}
+	saver := balanced
+	saver.Width, saver.Height, saver.VideoBitrate, saver.AudioBitrate, saver.Bandwidth = 854, 480, 1_000_000, 96_000, 1_210_000
+	first, err := manager.Create("p", "film", balanced, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create("p", "film", saver, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GenerationID == second.GenerationID {
+		t.Fatal("different quality parameters shared a generation")
 	}
 }

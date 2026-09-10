@@ -470,14 +470,14 @@ func TestRealFFmpegNonzeroMain10TranscodeSeekPresentsFramesWithinTwoSeconds(t *t
 	continuingReady := time.Since(started)
 	assertRGBNear(t, continuingFrame, [3]byte{0, 253, 253}, 20)
 
-	waitForMediaSegments(t, manifest, 7, process, 15*time.Second)
-	seventhSegmentReady := time.Since(started)
-	waitForMediaSegments(t, manifest, 9, process, 15*time.Second)
-	ninthSegmentReady := time.Since(started)
-	if pacedInterval := ninthSegmentReady - seventhSegmentReady; pacedInterval < 3500*time.Millisecond {
+	waitForMediaSegments(t, manifest, 8, process, 20*time.Second)
+	eighthSegmentReady := time.Since(started)
+	waitForMediaSegments(t, manifest, 10, process, 20*time.Second)
+	tenthSegmentReady := time.Since(started)
+	if pacedInterval := tenthSegmentReady - eighthSegmentReady; pacedInterval < 3500*time.Millisecond {
 		t.Fatalf("two later segments advanced in %s; input did not return to sustained real-time pacing", pacedInterval)
 	}
-	t.Logf("Main 10 -> H.264 seek: first segment %s; first target frame %s; continuing frame %s; seventh segment %s; ninth segment %s", firstSegmentReady.Round(time.Millisecond), firstFrameReady.Round(time.Millisecond), continuingReady.Round(time.Millisecond), seventhSegmentReady.Round(time.Millisecond), ninthSegmentReady.Round(time.Millisecond))
+	t.Logf("Main 10 -> H.264 seek: first segment %s; first target frame %s; continuing frame %s; eighth segment %s; tenth segment %s", firstSegmentReady.Round(time.Millisecond), firstFrameReady.Round(time.Millisecond), continuingReady.Round(time.Millisecond), eighthSegmentReady.Round(time.Millisecond), tenthSegmentReady.Round(time.Millisecond))
 
 	if err := process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)

@@ -185,3 +185,81 @@ func TestClientCapabilitiesNormalizesAliasesAndRejectsUnknownValues(t *testing.T
 		}
 	}
 }
+
+func TestPlanForQualityCapsOutputAndNeverUpscales(t *testing.T) {
+	client := ClientCapabilities{VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}
+	quality := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720}
+	plan, err := PlanForQuality(MediaProperties{Container: "matroska", VideoCodec: "h264", Width: 1920, Height: 1080, VideoBitrate: 8_000_000, FrameRateMilli: 24000, AudioCodec: "aac", AudioBitrate: 256_000}, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Kind != Transcode || plan.Width != 1280 || plan.Height != 720 || plan.VideoBitrate != 2_500_000 || plan.AudioBitrate != 128_000 || plan.Bandwidth != 2_900_000 || plan.QualityMode != QualityAuto {
+		t.Fatalf("balanced plan = %#v", plan)
+	}
+	plan, err = PlanForQuality(MediaProperties{Container: "webm", VideoCodec: "vp9", Width: 640, Height: 360, VideoBitrate: 3_000_000, FrameRateMilli: 24000}, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil || plan.Width != 640 || plan.Height != 360 {
+		t.Fatalf("small source was upscaled: %#v, err=%v", plan, err)
+	}
+	plan, err = PlanForQuality(MediaProperties{Container: "webm", VideoCodec: "vp9", Width: 1080, Height: 1920, VideoBitrate: 8_000_000, FrameRateMilli: 24000}, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil || plan.Width != 720 || plan.Height != 1280 {
+		t.Fatalf("portrait cap lost display orientation: %#v, err=%v", plan, err)
+	}
+}
+
+func TestPlanForQualityUsesCopyOnlyWithCapEvidence(t *testing.T) {
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, VideoProfiles: []string{"High"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, SupportsRemux: true, SupportsTranscode: true, MaxWidth: 1920, MaxHeight: 1080, MaxFrameRateMilli: 30000, MaxBitDepth: 8, MaxAudioChannels: 2}
+	quality := QualityRequest{Mode: QualityDataSaver, MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480}
+	media := MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", Width: 854, Height: 480, FrameRateMilli: 24000, BitDepth: 8, AudioCodec: "aac", AudioChannels: 2}
+	plan, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil || plan.Kind != Transcode {
+		t.Fatalf("unknown source bitrate bypassed cap: %#v, err=%v", plan, err)
+	}
+	media.VideoBitrate, media.AudioBitrate = 800_000, 96_000
+	plan, err = PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil || plan.Kind != Direct || plan.VideoBitrate != 800_000 {
+		t.Fatalf("proven source within cap not copied: %#v, err=%v", plan, err)
+	}
+	media.AudioBitrate = 256_000
+	plan, err = PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil || plan.Kind != Transcode || plan.AudioBitrate != 96_000 {
+		t.Fatalf("source audio bypassed saver cap: %#v, err=%v", plan, err)
+	}
+}
+
+func TestPlanForQualityAutoLowLeavesTransportHeadroom(t *testing.T) {
+	client := ClientCapabilities{VideoCodecs: []string{"h264"}, AudioCodecs: []string{"aac"}, SupportsFMP4HLS: true, SupportsTranscode: true}
+	quality := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 500_000, MaxWidth: 640, MaxHeight: 360}
+	media := MediaProperties{Container: "matroska", VideoCodec: "mpeg4", Width: 1280, Height: 720, VideoBitrate: 8_000_000, FrameRateMilli: 24000, AudioCodec: "aac", AudioBitrate: 128_000}
+	plan, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, quality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Kind != Transcode || plan.Width != 640 || plan.Height != 360 || plan.VideoBitrate != 500_000 || plan.AudioBitrate != 64_000 || plan.Bandwidth != 630_000 {
+		t.Fatalf("unexpected low Auto plan: %#v", plan)
+	}
+}
+
+func TestQualityRequestRejectsUnboundedOrMismatchedLimits(t *testing.T) {
+	for _, quality := range []QualityRequest{
+		{Mode: "fast", MaxVideoBitrate: 1_000_000, MaxWidth: 854, MaxHeight: 480},
+		{Mode: QualityDataSaver, MaxVideoBitrate: 9_000_000, MaxWidth: 854, MaxHeight: 480},
+		{Mode: QualityOriginal, MaxVideoBitrate: 1, MaxWidth: 1, MaxHeight: 1},
+	} {
+		if _, err := quality.Normalized(); !errors.Is(err, ErrInvalidQuality) {
+			t.Fatalf("quality %#v error=%v, want invalid quality", quality, err)
+		}
+	}
+}
+
+func TestOriginalKeepsCompatibleHighResolutionHDRDirectPlayback(t *testing.T) {
+	media := MediaProperties{Container: "mp4", VideoCodec: "h264", VideoProfile: "High", Width: 3840, Height: 2160, VideoBitrate: 20_000_000, FrameRateMilli: 60000, BitDepth: 10, HDR: "smpte2084", AudioCodec: "aac", AudioChannels: 2, AudioBitrate: 128_000}
+	client := ClientCapabilities{Containers: []string{"mp4"}, VideoCodecs: []string{"h264"}, VideoProfiles: []string{"High"}, AudioCodecs: []string{"aac"}, SupportsDirect: true, SupportsFMP4HLS: true, SupportsTranscode: true, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRateMilli: 60000, MaxBitDepth: 10, MaxAudioChannels: 2, HDR: []string{"smpte2084"}}
+	plan, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, QualityRequest{Mode: QualityOriginal})
+	if err != nil || plan.Kind != Direct {
+		t.Fatalf("compatible original plan = %#v, err=%v", plan, err)
+	}
+	auto := QualityRequest{Mode: QualityAuto, MaxVideoBitrate: 2_500_000, MaxWidth: 1280, MaxHeight: 720}
+	if _, err := PlanForQuality(media, client, ServerReadiness{FFmpeg: true}, auto); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("capped HDR error=%v, want unsupported so the client can offer explicit Original", err)
+	}
+}

@@ -8,11 +8,24 @@ buffering and keyboard focus keep the controls visible.
 
 The bottom controls let you pause, skip fifteen seconds, seek, change volume and enter
 fullscreen. Select the time display to switch between elapsed and remaining time.
-Settings contains audio tracks, subtitles, playback speed, fit/fill, episode
+Settings contains streaming quality, audio tracks, subtitles, playback speed, fit/fill, episode
 selection and title information. Previous and next episode buttons appear when
 those episodes are available. Picture in picture appears on supported browsers.
 Fullscreen stays an explicit choice; a browser that blocks automatic playback
 shows a Play button.
+
+Auto is the default streaming quality and is remembered on each device. It
+starts at a transport-safe 360p ceiling in browsers with Media Source or Managed
+Media Source, then raises the ceiling to 480p and 720p after measured throughput
+shows enough headroom. Repeated or prolonged buffering lowers it one step. A
+native-only HLS browser starts at 480p because it does not expose fragment
+throughput; thirty seconds of uninterrupted playback with at least eight
+seconds buffered can raise it, while buffering can lower it to 360p. Data saver
+uses the 480p ceiling. Original uses a compatible source or stream copy when
+possible. The settings menu shows the actual resolution and video bitrate
+selected by the server. Quality changes
+prepare a replacement stream and restore source position, play/pause state and
+playback speed; they are not seamless multi-rendition switching.
 
 | Key | Action |
 | --- | --- |

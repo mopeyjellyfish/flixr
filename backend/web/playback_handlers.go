@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net"
@@ -19,6 +20,7 @@ type playbackPlanRequest struct {
 	CatalogID              string                      `json:"catalog_id"`
 	ContinueWatchingIntent string                      `json:"continue_watching_intent,omitempty"`
 	Capabilities           playback.ClientCapabilities `json:"capabilities"`
+	Quality                playback.QualityRequest     `json:"quality"`
 	AudioStreamIndex       *int                        `json:"audio_stream_index"`
 	AudioExternal          bool                        `json:"audio_external,omitempty"`
 	SubtitleStreamIndex    *int                        `json:"subtitle_stream_index"`
@@ -31,6 +33,13 @@ type playbackAudioRequest struct {
 	AudioExternal    bool                        `json:"audio_external,omitempty"`
 	PositionMS       int64                       `json:"position_ms"`
 	Observation      int64                       `json:"observation"`
+}
+
+type playbackQualityRequest struct {
+	Capabilities playback.ClientCapabilities `json:"capabilities"`
+	Quality      playback.QualityRequest     `json:"quality"`
+	PositionMS   int64                       `json:"position_ms"`
+	Observation  int64                       `json:"observation"`
 }
 
 type playbackSubtitleRequest struct {
@@ -244,7 +253,7 @@ func (s *Server) playbackPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	plan, err := playback.PlanFor(mediaProperties(item, track, hasAudio), body.Capabilities, readiness)
+	plan, err := playback.PlanForQuality(mediaProperties(item, track, hasAudio), body.Capabilities, readiness, body.Quality)
 	if err != nil {
 		playbackFailure(w, err)
 		return
@@ -361,6 +370,8 @@ func playbackFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, playback.ErrUnsupported):
 		fail(w, http.StatusUnprocessableEntity, "playback_unsupported")
+	case errors.Is(err, playback.ErrInvalidQuality):
+		fail(w, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, playback.ErrFFmpegUnavailable):
 		fail(w, http.StatusServiceUnavailable, "ffmpeg_unavailable")
 	case errors.Is(err, playback.ErrPreparing):
@@ -481,6 +492,18 @@ func (s *Server) servePlaybackAsset(w http.ResponseWriter, r *http.Request, name
 	switch filepath.Ext(name) {
 	case ".m3u8":
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		manifest, readErr := io.ReadAll(file)
+		if readErr != nil {
+			fail(w, http.StatusNotFound, "playback_asset_not_found")
+			return
+		}
+		// Native HLS otherwise defaults to the sliding playlist's live edge,
+		// downloading later fragments before seeking back to the session start.
+		manifest = bytes.Replace(manifest, []byte("#EXTM3U\n"), []byte("#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"), 1)
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(manifest)
+		return
 	case ".mp4", ".m4s":
 		w.Header().Set("Content-Type", "video/mp4")
 	}
@@ -599,7 +622,11 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 	s.readyMu.RLock()
 	readiness := playback.ServerReadiness{FFmpeg: s.readiness.FFmpeg}
 	s.readyMu.RUnlock()
-	plan, err := playback.PlanFor(mediaProperties(item, track, true), body.Capabilities, readiness)
+	quality := playback.QualityRequest{Mode: session.Plan.QualityMode}
+	if session.Plan.QualityMode != playback.QualityOriginal {
+		quality.MaxVideoBitrate, quality.MaxWidth, quality.MaxHeight = session.Plan.QualityMaxVideoBitrate, session.Plan.QualityMaxWidth, session.Plan.QualityMaxHeight
+	}
+	plan, err := playback.PlanForQuality(mediaProperties(item, track, true), body.Capabilities, readiness, quality)
 	if err != nil {
 		playbackFailure(w, err)
 		return
@@ -633,6 +660,68 @@ func (s *Server) playbackAudio(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, "playback_failed")
 			return
 		}
+	}
+	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
+}
+
+func (s *Server) playbackQuality(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	session, ok := s.playbackSession(w, r, false)
+	if !ok {
+		return
+	}
+	var body playbackQualityRequest
+	if !decode(r, &body) || body.PositionMS < 0 || body.Observation < 0 {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	item, err := s.playbackCatalogItem(r.Context(), r, session.CatalogID)
+	if err != nil {
+		fail(w, http.StatusNotFound, "catalog_not_found")
+		return
+	}
+	var track catalog.AudioTrack
+	hasAudio := session.Plan.AudioSelected
+	if hasAudio {
+		index := session.Plan.AudioStreamIndex
+		track, hasAudio = selectedAudio(item.Audio, &index, session.Plan.AudioExternal, "")
+		if !hasAudio {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+	}
+	s.readyMu.RLock()
+	readiness := playback.ServerReadiness{FFmpeg: s.readiness.FFmpeg}
+	s.readyMu.RUnlock()
+	plan, err := playback.PlanForQuality(mediaProperties(item, track, hasAudio), body.Capabilities, readiness, body.Quality)
+	if err != nil {
+		playbackFailure(w, err)
+		return
+	}
+	plan.SourceKey = session.Plan.SourceKey
+	plan.SubtitleSources = session.Plan.SubtitleSources
+	plan.SubtitleSelectionIndex = session.Plan.SubtitleSelectionIndex
+	plan.SubtitleExternal = session.Plan.SubtitleExternal
+	plan.SubtitleSelected = session.Plan.SubtitleSelected
+	profile, _ := s.house.Profile(s.session(r))
+	accepted, err := s.house.RecordPlaybackProgress(profile.ID, item.ID, body.PositionMS, session.ProgressGeneration, body.Observation, false)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "progress_failed")
+		return
+	}
+	if !accepted {
+		fail(w, http.StatusConflict, "progress_conflict")
+		return
+	}
+	updated, err := s.playback.ReplaceContext(r.Context(), session.ID, profile.ID, plan, body.PositionMS)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		playbackFailure(w, err)
+		return
 	}
 	write(w, http.StatusOK, playbackResponse(updated, item.Audio, item.Subtitles))
 }

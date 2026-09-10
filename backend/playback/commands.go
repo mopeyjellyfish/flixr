@@ -14,10 +14,10 @@ import (
 const (
 	hlsRemuxSegmentDuration     = 4 * time.Second
 	hlsTranscodeSegmentDuration = 2 * time.Second
-	// FFmpeg may read four media seconds without pacing while preparing a
+	// FFmpeg may read twelve media seconds without pacing while preparing a
 	// generation. FFmpeg 8 limits catch-up after a stall to 4x, and every
 	// generation returns to the sustained 1x input rate after the allowance.
-	hlsInitialReadBurst = 4 * time.Second
+	hlsInitialReadBurst = 12 * time.Second
 	hlsCatchupReadRate  = 4
 )
 
@@ -69,12 +69,23 @@ func ffmpegCommand(plan Plan, inputURL, audioInputURL string, audioStreamIndex i
 			args = append(args, "-b:a", strconv.FormatInt(plan.AudioBitrate, 10))
 		}
 	} else {
+		videoBitrate := plan.VideoBitrate
+		if videoBitrate <= 0 {
+			videoBitrate = compatibilityVideoBitrate
+		}
+		audioBitrate := plan.AudioBitrate
+		if audioBitrate <= 0 {
+			audioBitrate = compatibilityAudioBitrate
+		}
 		args = append(args,
 			"-c:v", "libx264", "-preset", "veryfast", "-profile:v", "high", "-level:v", "4.0", "-pix_fmt", "yuv420p", "-r", strconv.Itoa(compatibilityMaxFrameRate/1000),
-			"-b:v", strconv.FormatInt(compatibilityVideoBitrate, 10), "-maxrate", strconv.FormatInt(compatibilityVideoBitrate, 10), "-bufsize", strconv.FormatInt(compatibilityVideoBitrate*2, 10),
+			"-b:v", strconv.FormatInt(videoBitrate, 10), "-maxrate", strconv.FormatInt(videoBitrate, 10), "-bufsize", strconv.FormatInt(videoBitrate*2, 10),
 			"-force_key_frames", "expr:gte(t,n_forced*"+strconv.FormatFloat(segmentDuration.Seconds(), 'f', -1, 64)+")", "-sc_threshold", "0",
-			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(compatibilityAudioBitrate, 10),
+			"-c:a", "aac", "-ac", strconv.Itoa(compatibilityAudioChannels), "-ar", strconv.Itoa(compatibilityAudioSampleRate), "-b:a", strconv.FormatInt(audioBitrate, 10),
 		)
+		if plan.Width > 0 && plan.Height > 0 {
+			args = append(args, "-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2", plan.Width, plan.Height))
+		}
 	}
 	args = append(args,
 		"-f", "hls",
