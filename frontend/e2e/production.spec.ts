@@ -318,7 +318,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await expect(ownerPage.locator('[data-app-content]')).not.toHaveAttribute('inert');
   await ownerPage.getByLabel(/owner password/i).fill('production-owner-password');
   await ownerPage.getByRole('button',{name:/sign in/i}).click();
-  await expect(ownerPage.getByRole('heading',{name:'Scheduled scans'})).toBeVisible({timeout:15_000});
+  await expect(ownerPage.getByRole('heading',{name:'Scan activity'})).toBeVisible({timeout:15_000});
   const activeGenerations = await ownerPage.evaluate(async () => {
     const status = await fetch('/api/v1/owner/playback/status');
     if (!status.ok) throw new Error(`playback status failed with HTTP ${status.status}`);
@@ -326,7 +326,9 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
     return body.generations;
   });
   expect(activeGenerations).toEqual([]);
-  const filmsSchedule=ownerPage.locator('form.setting-row').filter({hasText:'Films'});
+  const filmsCard=ownerPage.locator('article.library-card').filter({has:ownerPage.getByRole('heading',{name:'Films'})});
+  await filmsCard.getByText('Scan schedule').click();
+  const filmsSchedule=filmsCard.locator('details.schedule');
   await filmsSchedule.getByLabel(/enable scheduled scans/i).check();
   const savedSchedule=ownerPage.waitForResponse((response)=>response.request().method()==='PATCH'&&response.url().endsWith('/owner/libraries/films/scan-policy'));
   await filmsSchedule.getByRole('button',{name:/save schedule for films/i}).click();
@@ -335,7 +337,7 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await filmsSchedule.getByRole('button',{name:/run now for films/i}).click();
   const queuedResponse=await queuedScan;expect(queuedResponse.ok()).toBeTruthy();const queuedBody=await queuedResponse.json() as {job:{id:string}};
   await expect.poll(async()=>ownerPage.evaluate(async(id)=>{const response=await fetch(`/api/v1/owner/scan/jobs/${id}`);const body=await response.json() as {job:{status:string}};return body.job.status;},queuedBody.job.id),{timeout:30_000}).toBe('succeeded');
-  const latestFilmsScan = ownerPage.getByRole('region', { name: 'Scheduled scans' }).locator('article').filter({ hasText: 'Films · succeeded' }).first();
+  const latestFilmsScan = ownerPage.getByRole('region', { name: 'Scan activity' }).locator('article').filter({ hasText: 'Films · succeeded' }).first();
   await expect(latestFilmsScan).toContainText(/manual · \d+ scanned · \d+ unchanged · 0 failed · 2 total/i);
   await ownerPage.screenshot({path:testInfo.outputPath('production-scheduled-scan.png'),fullPage:true});
   // Content access now lives in the profile's edit dialog.

@@ -56,6 +56,15 @@ test('mocked owner configures and runs a verified backup', async ({ page }, test
     return undefined;
   });
   await open(page, '/owner'); await page.getByLabel('Backup folder').fill('/backups/flixr'); await page.getByRole('button', { name: /save backup policy/i }).click(); await expect(page.getByText('Backup policy saved.')).toBeVisible(); await page.getByRole('button', { name: /back up now/i }).click(); await expect(page.getByText(/manual backup/i)).toBeVisible(); await check(page, []); await page.locator('#backups').screenshot({ path: testInfo.outputPath('owner-backups.png') });
+  await page.screenshot({ path: testInfo.outputPath('owner-desktop.png'), fullPage: true });
+  // Phone layout: the section strip stays reachable, nothing overflows, and forms stack.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('navigation', { name: 'Server settings' }).getByRole('link', { name: 'Backups' })).toBeVisible();
+  await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+  await page.getByRole('navigation', { name: 'Server settings' }).getByRole('link', { name: 'Libraries' }).click();
+  await expect(page.getByRole('navigation', { name: 'Server settings' })).toBeInViewport();
+  await check(page, []);
+  await page.screenshot({ path: testInfo.outputPath('owner-phone.png'), fullPage: true });
 });
 async function open(page: Page, path: string) {
   const status = page.waitForResponse((response) => response.url().includes('/api/v1/setup/status'));
@@ -268,16 +277,21 @@ test('mocked owner identity repair confirms merge and unmerge without exposing f
   await expect(repair).not.toContainText('film-b');
   await expect(repair).not.toContainText('/media');
   await repair.getByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }).check();
-  page.once('dialog', (dialog) => dialog.accept());
   await repair.getByRole('button', { name: /merge selected titles/i }).click();
+  const mergeDialog = page.getByRole('dialog', { name: /merge arrival \(duplicate\) into arrival/i });
+  await expect(mergeDialog).not.toContainText('/media');
+  await mergeDialog.getByRole('button', { name: /merge titles/i }).click();
+  await repair.getByText('Identity repair history').click();
   await expect(repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('owner-identity-repair.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i })).toBeVisible();
   await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('owner-identity-repair-mobile.png'), fullPage: true });
-  page.once('dialog', (dialog) => dialog.accept());
   await repair.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }).click();
+  const unmergeDialog = page.getByRole('dialog', { name: /unmerge arrival and arrival \(duplicate\)/i });
+  await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+  await unmergeDialog.getByRole('button', { name: 'Unmerge' }).click();
   await expect(repair.getByText(/unmerge retained the state/i)).toBeVisible();
   await check(page, errors);
 });
