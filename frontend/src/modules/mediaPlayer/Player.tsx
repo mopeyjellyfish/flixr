@@ -308,6 +308,11 @@ export function Player({ catalogID, startPositionMS, active = true, continueWatc
         }
         dispatch({ type: 'pause' });
       });
+    } else {
+      // A transferred MediaSource can retain metadata without emitting canplay
+      // again. The replacement is attached and intentionally paused, so expose
+      // Play immediately; a later waiting event will report actual buffering.
+      dispatch({ type: 'pause' });
     }
     seekSourceTransitioning.current = false;
   }, []);

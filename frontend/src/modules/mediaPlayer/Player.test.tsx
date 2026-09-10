@@ -1321,6 +1321,46 @@ it('labels audio tracks and preserves source time when changing tracks', async (
   expect(video.currentTime).toBe(2.5);
 });
 
+it('enables Play after a paused HLS audio replacement without a new canplay event', async () => {
+  vi.stubGlobal('MediaSource', { isTypeSupported: () => true });
+  const audioTracks = [
+    { index: 1, codec: 'aac', language: 'eng', default: true },
+    { index: 2, codec: 'aac', language: 'fra' },
+  ];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({
+      plan: { kind: 'remux', audio_stream_index: 1 }, session_id: 'session-1', media_url: '/english.m3u8',
+      resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999, audio_tracks: audioTracks,
+    }));
+    if (path.endsWith('/audio')) return new Response(JSON.stringify({
+      plan: { kind: 'remux', audio_stream_index: 2 }, session_id: 'session-2', media_url: '/french.m3u8',
+      resume_ms: 1_000, stream_offset_ms: 1_000, expires_at: 9999999999, audio_tracks: audioTracks,
+    }));
+    return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+
+  render(<Player catalogID="film-1" onExit={() => undefined} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  await waitFor(() => expect(hls.attached).toBe(1));
+  let paused = false;
+  vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+  vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  fireEvent.loadedMetadata(video);
+  fireEvent.playing(video);
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+  fireEvent.pause(video);
+  expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled();
+
+  fireEvent.change(screen.getByRole('combobox', { name: /audio track/i }), { target: { value: 'embedded:2' } });
+  await waitFor(() => expect(hls.attached).toBe(2));
+  await waitFor(() => expect(screen.getByRole('combobox', { name: /audio track/i })).toBeEnabled());
+
+  expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled();
+});
+
 it('keeps the active source when an audio change fails', async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
