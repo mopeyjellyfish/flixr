@@ -10,6 +10,21 @@ async function renderApp() {
 }
 
 describe('Flixr routes', () => {
+  it('keeps a playback version query separate from the catalog item ID', async () => {
+    window.history.replaceState({}, '', '/play/film-1?version=source-4k');
+    const planBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([
+      { path: '/api/v1/setup/status', handle: () => ({ json: { claimed: true, readiness: { ffprobe: true, ffmpeg: true } } }) },
+      { path: '/api/v1/catalog/items/film-1', handle: () => ({ json: { id: 'film-1', title: 'Signal', kind: 'film', local_only: true } }) },
+      { path: '/api/v1/playback/plans', method: 'POST', handle: ({ body }) => { planBodies.push(body as Record<string, unknown>); return { status: 422, json: { error: { code: 'playback_unsupported' } } }; } },
+    ]));
+
+    await renderApp();
+
+    expect(await screen.findByRole('heading', { name: 'Signal' })).toBeVisible();
+    expect(planBodies[0]).toMatchObject({ catalog_id: 'film-1', version_id: 'source-4k' });
+  });
+
   it.each([false, true])('shows demo guidance only when the server enables demo mode (%s)', async (demo) => {
     window.history.replaceState({}, '', '/home');
     vi.spyOn(globalThis, 'fetch').mockImplementation(strictFetch([

@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type BackupJob, type BackupPolicy, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type ProfileAccessPolicy, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type BackupJob, type BackupPolicy, type CatalogItem, type CatalogPage, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MediaVersion, type MediaVersionGroup, type MediaVersionGroups, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type ProfileAccessPolicy, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type ViewerModel, type ViewerPreference } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -13,7 +13,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError('request_failed', 0);
   }
   const body: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError((body as { error?: { code?: ApiError['code'] } }).error?.code ?? 'request_failed', response.status, response.headers.get('X-Flixr-Error-ID') ?? undefined);
+  if (!response.ok) {
+    const detail = (body as { error?: { code?: ApiError['code']; requested_version_id?: string; alternatives?: MediaVersion[] } }).error;
+    throw new ApiError(detail?.code ?? 'request_failed', response.status, response.headers.get('X-Flixr-Error-ID') ?? undefined, detail?.requested_version_id, detail?.alternatives ?? []);
+  }
   return body as T;
 }
 
@@ -82,6 +85,10 @@ export const api = {
   identityRepairs: () => request<IdentityRepairs>('/owner/identity/repairs'),
   mergeIdentity: (kind: string, survivorID: string, sourceID: string) => request<IdentityMerge>('/owner/identity/merges', { method: 'POST', body: JSON.stringify({ kind, survivor_id: survivorID, source_id: sourceID }) }),
   unmergeIdentity: (mergeID: string) => request<IdentityMerge>(`/owner/identity/merges/${encodeURIComponent(mergeID)}/unmerge`, { method: 'POST' }),
+  mediaVersionGroups: () => request<MediaVersionGroups>('/owner/media-version-groups'),
+  createMediaVersionGroup: (kind: 'film' | 'series', canonicalID: string, memberIDs: string[]) => request<MediaVersionGroup>('/owner/media-version-groups', { method: 'POST', body: JSON.stringify({ kind, canonical_id: canonicalID, member_ids: memberIDs }) }),
+  updateMediaVersionEdition: (kind: 'film' | 'series', canonicalID: string, editionLabel: string) => request<MediaVersionGroup>(`/owner/media-version-groups/${kind}/${encodeURIComponent(canonicalID)}`, { method: 'PATCH', body: JSON.stringify({ edition_label: editionLabel }) }),
+  ungroupMediaVersion: (kind: 'film' | 'series', canonicalID: string, memberID: string) => request<{ group: MediaVersionGroup; ungrouped_id: string }>(`/owner/media-version-groups/${kind}/${encodeURIComponent(canonicalID)}/members/${encodeURIComponent(memberID)}`, { method: 'DELETE' }),
   recheck: () => request<SetupStatus>('/owner/readiness/recheck', { method: 'POST' }),
   playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),
@@ -101,7 +108,7 @@ export const api = {
   setListed: (kind: 'film' | 'series', id: string, listed: boolean) => request<{ listed: boolean }>(`/catalog/list/${kind}/${encodeURIComponent(id)}`, { method: listed ? 'PUT' : 'DELETE' }),
   setContinueWatchingDismissed: (kind: 'film' | 'series', id: string, dismissed: boolean) => request<{ dismissed: boolean }>(`/catalog/continue-watching/${kind}/${encodeURIComponent(id)}`, { method: dismissed ? 'DELETE' : 'PUT' }),
   setWatched: (kind: 'film' | 'episode' | 'season' | 'series', id: string, watched: boolean, season?: number) => request<{ watched: boolean }>(`/catalog/watched/${kind}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ watched, season }) }),
-  playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities, continueWatchingIntent: 'user' | 'recovery' | 'automatic' = 'user', quality: import('../core/api').PlaybackQuality = { mode: 'auto', max_video_bitrate: 2_500_000, max_width: 1280, max_height: 720 }) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, continue_watching_intent: continueWatchingIntent, capabilities, quality }) }),
+  playbackPlan: (catalogID: string, capabilities: PlaybackCapabilities, continueWatchingIntent: 'user' | 'recovery' | 'automatic' = 'user', quality: import('../core/api').PlaybackQuality = { mode: 'auto', max_video_bitrate: 2_500_000, max_width: 1280, max_height: 720 }, versionID?: string) => request<PlaybackPlan>('/playback/plans', { method: 'POST', body: JSON.stringify({ catalog_id: catalogID, continue_watching_intent: continueWatchingIntent, capabilities, quality, ...(versionID ? { version_id: versionID } : {}) }) }),
   playbackHeartbeat: (sessionID: string, positionMs: number, observation: number, ended = false) => request<{ accepted: boolean; expires_at: number }>(`/playback/sessions/${encodeURIComponent(sessionID)}/heartbeat`, { method: 'POST', body: JSON.stringify({ position_ms: positionMs, observation, ended }) }),
   playbackNext: (sessionID: string, includeSpecials = false, signal?: AbortSignal) => request<EpisodeSequence>(`/playback/sessions/${encodeURIComponent(sessionID)}/next?include_specials=${includeSpecials}`, { signal }),
   playbackSeek: (sessionID: string, positionMs: number, observation: number, signal?: AbortSignal) => request<PlaybackPlan>(`/playback/sessions/${encodeURIComponent(sessionID)}/seek`, { method: 'POST', signal, body: JSON.stringify({ position_ms: positionMs, observation }) }),

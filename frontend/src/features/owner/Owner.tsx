@@ -11,6 +11,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { BackupPanel } from './BackupPanel';
 import { LibrariesSection, type LibraryActions, type ScanActions } from './Libraries';
 import { IdentityRepair, MetadataRepair, ProviderStatus, TMDBForm } from './Metadata';
+import { MediaVersions } from './MediaVersions';
 import { ConnectedScreens, PlaybackPanel } from './Playback';
 
 type OwnerProps = {
@@ -252,6 +253,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <ProviderStatus settings={tmdbSettings} enabled={tmdbSettings?.enabled ?? true} locked={locked.has('metadata.enabled')} onToggle={(enabled) => void setMetadataEnabled(enabled)} />
             <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
+            <MediaVersions confirm={confirm} />
             <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} confirm={confirm} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />
           </section>
           <section id="backups" className="owner-section" aria-labelledby="backups-title">

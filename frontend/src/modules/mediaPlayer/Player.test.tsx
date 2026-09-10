@@ -108,6 +108,52 @@ it('posts the exact per-title source and compatibility evidence', async () => {
   });
 });
 
+it('keeps an explicit source version through initial planning and lease recovery', async () => {
+  const planBodies: Array<Record<string, unknown>> = [];
+  let plans = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) {
+      planBodies.push(JSON.parse(String(init?.body)));
+      plans += 1;
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: { id: 'source-4k', label: '4K', edition_id: 'film-1', selected: true, available: true }, session_id: `session-${plans}`, media_url: `/media-${plans}.mp4`, heartbeat_url: `/api/v1/playback/sessions/session-${plans}/heartbeat`, stop_url: `/stop-${plans}`, resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    if (path.endsWith('/session-1/heartbeat')) return new Response(JSON.stringify({ error: { code: 'playback_session_invalid' } }), { status: 403 });
+    if (path.endsWith('/heartbeat')) return new Response(JSON.stringify({ expires_at: 9999999999 }));
+    return new Response(JSON.stringify(path.includes('/catalog/items/') ? assessedItem : { stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID="source-4k" onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/media-1.mp4'));
+  fireEvent.pause(video);
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies.map((body) => body.version_id)).toEqual(['source-4k', 'source-4k']);
+});
+
+it('requires a viewer action before using an alternative version', async () => {
+  const planBodies: Array<Record<string, unknown>> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/items/')) return new Response(JSON.stringify(assessedItem));
+    if (path.endsWith('/playback/plans')) {
+      const body = JSON.parse(String(init?.body));
+      planBodies.push(body);
+      if (body.version_id === 'source-4k') return new Response(JSON.stringify({ error: { code: 'playback_version_unavailable', requested_version_id: 'source-4k', alternatives: [{ id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: false, available: true }] } }), { status: 409 });
+      return new Response(JSON.stringify({ plan: { kind: 'direct' }, version: { id: 'source-1080', label: '1080p · H.264', edition_id: 'film-1', selected: true, available: true }, session_id: 'fallback', media_url: '/fallback.mp4', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    }
+    return new Response(JSON.stringify({ stopped: true }));
+  });
+
+  render(<Player catalogID="film-1" versionID="source-4k" onExit={() => undefined} />);
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/selected version is no longer available/i);
+  expect(planBodies).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: /play 1080p.*instead/i }));
+  await waitFor(() => expect(planBodies).toHaveLength(2));
+  expect(planBodies[1]).toMatchObject({ catalog_id: 'film-1', version_id: 'source-1080' });
+});
+
 it.each(['playback_unsupported', 'ffmpeg_unavailable'] as const)('offers an explicit Original retry when Auto cannot use a capped rendition (%s)', async (code) => {
   vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue('probably');
   const planBodies: Array<Record<string, unknown>> = [];
@@ -1353,7 +1399,7 @@ it('counts down to the server-selected next episode after durable completion', a
     const path = String(input);
     calls.push(path);
     if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', seek_url: '/seek', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
-    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true } }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'next', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true }, selected_version_id: 'series-4k' }));
     return new Response(JSON.stringify({ accepted: true, stopped: true, expires_at: 9999999999 }));
   });
   const advance = vi.fn();
@@ -1368,7 +1414,26 @@ it('counts down to the server-selected next episode after durable completion', a
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
   }
   expect(advance).toHaveBeenCalledOnce();
-  expect(advance).toHaveBeenCalledWith('episode-2', 'automatic');
+  expect(advance).toHaveBeenCalledWith('episode-2', 'automatic', 'series-4k');
+});
+
+it('waits for a viewer to choose a next-episode version when the selected series copy is missing', async () => {
+  const advance = vi.fn();
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.endsWith('/playback/plans')) return new Response(JSON.stringify({ plan: { kind: 'direct' }, session_id: 'session-1', media_url: '/episode-1.mp4', heartbeat_url: '/heartbeat', stop_url: '/stop', resume_ms: 0, stream_offset_ms: 0, expires_at: 9999999999 }));
+    if (path.includes('/next?')) return new Response(JSON.stringify({ state: 'version_unavailable', episode: { id: 'episode-2', title: 'Second Signal', kind: 'episode', season: 1, episode: 2, local_only: true, playable: true }, requested_version_id: 'series-4k', alternatives: [{ id: 'series-1080', label: '1080p · H.264', edition_id: 'series-1', selected: false, available: true }] }));
+    return new Response(JSON.stringify(path.includes('/catalog/items/') ? assessedItem : { accepted: true, stopped: true, expires_at: 9999999999 }));
+  });
+  render(<Player catalogID="episode-1" versionID="series-4k" onAdvance={advance} onExit={() => undefined} />);
+  const video = document.querySelector('video')!;
+  await waitFor(() => expect(video).toHaveAttribute('src', '/episode-1.mp4'));
+  fireEvent.ended(video);
+
+  expect(await screen.findByRole('heading', { name: /choose a version for the next episode/i })).toBeVisible();
+  expect(advance).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Play 1080p · H.264' }));
+  await waitFor(() => expect(advance).toHaveBeenCalledWith('episode-2', 'user', 'series-1080'));
 });
 
 it('does not resolve the next episode when durable completion is rejected', async () => {
