@@ -65,6 +65,8 @@ async function open(page: Page, path: string) {
   if (path !== '/') await page.evaluate((nextPath) => { window.history.pushState({}, '', nextPath); window.dispatchEvent(new PopStateEvent('popstate')); }, path);
 }
 async function check(page: Page, errors: string[]) {
+  // Let entrance animations finish so axe measures settled colours, not mid-fade blends.
+  await page.evaluate(() => Promise.all(document.getAnimations().filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished.catch(() => undefined))));
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -138,12 +140,14 @@ for (const viewport of viewports) {
     });
     await open(page, '/');
     await page.getByRole('button', { name: /protected/i }).click();
-    await page.getByLabel(/profile PIN/i).fill('0000');
-    await page.getByRole('button', { name: /continue/i }).click();
+    // Pasting into the first cell fills the rest; the fourth digit submits.
+    await page.getByLabel(/profile PIN digit 1 of 4/i).fill('0000');
     await expect(page.getByRole('alert')).toContainText(/not valid/i);
-    await page.getByRole('button', { name: /continue/i }).click();
+    await page.getByLabel(/profile PIN digit 1 of 4/i).fill('0000');
     await expect(page.getByRole('alert')).toContainText(/too many/i);
+    // The mocked 401 and 429 responses are logged as console errors by design.
     errors.length = 0;
+    await check(page, errors);
 
     await mock(page, (path, _method, query) => {
       if (path.endsWith('/setup/status')) return { json: ready };

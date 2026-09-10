@@ -13,24 +13,24 @@ func TestOldPINCannotCompleteAfterRotation(t *testing.T) {
 	defer db.Close()
 	m, err := Open(db)
 	require.NoError(t, err)
-	p, err := m.CreateProfile("Ada", "old")
+	p, err := m.CreateProfile("Ada", "1111")
 	require.NoError(t, err)
 	started, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	m.deriveFn = func(secret string, salt []byte) ([]byte, error) {
-		if secret == "old" {
+		if secret == "1111" {
 			once.Do(func() { close(started); <-release })
 		}
 		return hash(secret, salt), nil
 	}
 	result := make(chan error, 1)
-	go func() { _, err := m.Select(p.ID, "old"); result <- err }()
+	go func() { _, err := m.Select(p.ID, "1111"); result <- err }()
 	<-started
-	_, err = m.UpdateProfile(p.ID, "", "new", false)
+	_, err = m.UpdateProfile(p.ID, "", "2222", false)
 	require.NoError(t, err)
 	close(release)
 	require.ErrorIs(t, <-result, ErrPIN)
-	_, err = m.Select(p.ID, "new")
+	_, err = m.Select(p.ID, "2222")
 	require.NoError(t, err)
 }
 

@@ -69,7 +69,7 @@ export type LibraryLocation = { id: string; library_id: string; library_name?: s
 export type Library = { id: string; name: string; kind: 'film' | 'episode'; locations: LibraryLocation[] };
 export type LocationChangePreview = { id: string; location_id: string; new_path?: string; affected_sources: number; affected_titles: number };
 export type ApiErrorCode =
-  | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'pin_rate_limited'
+  | 'invalid_token' | 'invalid_credentials' | 'invalid_pin' | 'invalid_pin_format' | 'pin_rate_limited'
   | 'credential_busy' | 'login_rate_limited'
   | 'ffprobe_unavailable' | 'owner_required' | 'profile_required' | 'request_failed'
   | 'invalid_request' | 'already_claimed' | 'profile_not_found' | 'invalid_pagination'
@@ -109,7 +109,7 @@ export class ApiError extends Error {
 export function messageFor(code: string): string {
   return ({
     invalid_token: 'That setup token is not valid.', invalid_credentials: 'The owner password is not valid.',
-    invalid_pin: 'That PIN is not valid.', pin_rate_limited: 'Too many PIN attempts. Please wait and try again.',
+    invalid_pin: 'That PIN is not valid.', invalid_pin_format: 'A PIN is 4 to 6 digits.', pin_rate_limited: 'Too many PIN attempts. Please wait and try again.',
     credential_busy: 'Flixr is busy securing credentials. Please wait and try again.',
     login_rate_limited: 'Too many sign-in attempts. Please wait and try again.',
     ffprobe_unavailable: 'ffprobe is unavailable. Install it, then recheck readiness.', owner_required: 'Owner access is required.',
