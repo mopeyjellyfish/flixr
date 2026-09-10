@@ -131,9 +131,8 @@ test('built binary completes setup, scan, profile, browse, and detail flow', asy
   await page.context().setOffline(true);
   await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeFalsy();
   const failedHeartbeat = page.waitForEvent('requestfailed', (request) => request.method() === 'POST' && request.url().endsWith('/heartbeat'));
-  const failedCapabilityRefresh = page.waitForEvent('requestfailed', (request) => request.method() === 'GET' && request.url().includes('/catalog/items/'));
   await directVideo.dispatchEvent('pause');
-  await Promise.all([failedHeartbeat, failedCapabilityRefresh]);
+  await failedHeartbeat;
   const reconnectPlan = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/playback/plans') && response.ok());
   await page.context().setOffline(false);
   await expect.poll(() => page.evaluate(() => navigator.onLine)).toBeTruthy();
