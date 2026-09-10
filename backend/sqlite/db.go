@@ -265,6 +265,7 @@ func applyMigrations(ctx context.Context, db *sql.DB, source fs.FS, files []migr
 		if queryErr != nil {
 			return fmt.Errorf("inspect applied schema migrations: %w", queryErr)
 		}
+		applied := 0
 		for rows.Next() {
 			var version int
 			if scanErr := rows.Scan(&version); scanErr != nil {
@@ -275,24 +276,21 @@ func applyMigrations(ctx context.Context, db *sql.DB, source fs.FS, files []migr
 				rows.Close()
 				return &SchemaCompatibilityError{FoundVersion: version, SupportedVersion: supportedVersion}
 			}
+			applied++
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
 			rows.Close()
 			return fmt.Errorf("inspect applied schema migrations: %w", rowsErr)
 		}
 		rows.Close()
-	} else {
-		var userObject string
-		err = tx.QueryRowContext(ctx, `SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1`).Scan(&userObject)
-		if err == nil {
-			return &SchemaCompatibilityError{
-				FoundVersion:            0,
-				SupportedVersion:        supportedVersion,
-				MissingMigrationHistory: true,
+		if applied == 0 {
+			if err = rejectUntrackedSchema(ctx, tx, supportedVersion, true); err != nil {
+				return err
 			}
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("inspect database schema: %w", err)
+	} else {
+		if err = rejectUntrackedSchema(ctx, tx, supportedVersion, false); err != nil {
+			return err
 		}
 	}
 	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"); err != nil {
@@ -322,4 +320,23 @@ func applyMigrations(ctx context.Context, db *sql.DB, source fs.FS, files []migr
 		}
 	}
 	return tx.Commit()
+}
+
+func rejectUntrackedSchema(ctx context.Context, tx *sql.Tx, supportedVersion int, historyTablePresent bool) error {
+	query := `SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'`
+	if historyTablePresent {
+		query += ` AND name <> 'schema_migrations'`
+	}
+	var userObjects int
+	if err := tx.QueryRowContext(ctx, query).Scan(&userObjects); err != nil {
+		return fmt.Errorf("inspect database schema: %w", err)
+	}
+	if userObjects == 0 {
+		return nil
+	}
+	return &SchemaCompatibilityError{
+		FoundVersion:            0,
+		SupportedVersion:        supportedVersion,
+		MissingMigrationHistory: true,
+	}
 }

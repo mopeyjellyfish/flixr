@@ -64,89 +64,128 @@ func TestOpenRefusesUnsupportedAppliedSchemaBeforeMigration(t *testing.T) {
 }
 
 func TestOpenRefusesNonemptyDatabaseWithoutMigrationHistory(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flixr.db")
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name       string
+		setup      string
+		table      string
+		wantSchema string
+	}{
+		{
+			name:       "user table without history table",
+			setup:      `CREATE TABLE foreign_product_state(value TEXT NOT NULL); INSERT INTO foreign_product_state VALUES('preserved')`,
+			table:      "foreign_product_state",
+			wantSchema: "[table:foreign_product_state]",
+		},
+		{
+			name:       "user table resembling internal name",
+			setup:      `CREATE TABLE sqliteXstate(value TEXT NOT NULL); INSERT INTO sqliteXstate VALUES('preserved')`,
+			table:      "sqliteXstate",
+			wantSchema: "[table:sqliteXstate]",
+		},
+		{
+			name:       "empty history table with other user table",
+			setup:      `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY); CREATE TABLE foreign_product_state(value TEXT NOT NULL); INSERT INTO foreign_product_state VALUES('preserved')`,
+			table:      "foreign_product_state",
+			wantSchema: "[table:foreign_product_state table:schema_migrations]",
+		},
 	}
-	if _, err = raw.Exec(`CREATE TABLE foreign_product_state(value TEXT NOT NULL); INSERT INTO foreign_product_state VALUES('preserved')`); err != nil {
-		t.Fatal(err)
-	}
-	if err = raw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "flixr.db")
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = raw.Exec(test.setup); err != nil {
+				t.Fatal(err)
+			}
+			if err = raw.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	db, openErr := sqlite.Open(dir)
-	if openErr == nil {
-		db.Close()
-		t.Fatal("nonempty database without migration history was accepted")
-	}
-	var compatibility *sqlite.SchemaCompatibilityError
-	if !errors.Is(openErr, sqlite.ErrIncompatibleSchema) || !errors.As(openErr, &compatibility) {
-		t.Fatalf("open error = %v, want typed schema compatibility error", openErr)
-	}
-	if compatibility.FoundVersion != 0 || compatibility.SupportedVersion != sqlite.LatestSchemaVersion || !compatibility.MissingMigrationHistory {
-		t.Fatalf("compatibility error = %+v", compatibility)
-	}
-	if message := openErr.Error(); !strings.Contains(message, "no Flixr migration history") || !strings.Contains(message, "empty data directory") || !strings.Contains(message, "restore a compatible backup") {
-		t.Fatalf("compatibility guidance = %q", message)
-	}
+			db, openErr := sqlite.Open(dir)
+			if openErr == nil {
+				db.Close()
+				t.Fatal("nonempty database without migration history was accepted")
+			}
+			var compatibility *sqlite.SchemaCompatibilityError
+			if !errors.Is(openErr, sqlite.ErrIncompatibleSchema) || !errors.As(openErr, &compatibility) {
+				t.Fatalf("open error = %v, want typed schema compatibility error", openErr)
+			}
+			if compatibility.FoundVersion != 0 || compatibility.SupportedVersion != sqlite.LatestSchemaVersion || !compatibility.MissingMigrationHistory {
+				t.Fatalf("compatibility error = %+v", compatibility)
+			}
+			if message := openErr.Error(); !strings.Contains(message, "no Flixr migration history") || !strings.Contains(message, "empty data directory") || !strings.Contains(message, "restore a compatible backup") {
+				t.Fatalf("compatibility guidance = %q", message)
+			}
 
-	raw, err = sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	var value string
-	if err = raw.QueryRow(`SELECT value FROM foreign_product_state`).Scan(&value); err != nil || value != "preserved" {
-		t.Fatalf("foreign state after refusal = %q, %v", value, err)
-	}
-	var schema []string
-	rows, err := raw.Query(`SELECT type || ':' || name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var object string
-		if err = rows.Scan(&object); err != nil {
-			t.Fatal(err)
-		}
-		schema = append(schema, object)
-	}
-	if err = rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(schema) != "[table:foreign_product_state]" {
-		t.Fatalf("schema after refusal = %v", schema)
+			raw, err = sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			var value string
+			if err = raw.QueryRow(`SELECT value FROM ` + test.table).Scan(&value); err != nil || value != "preserved" {
+				t.Fatalf("user state after refusal = %q, %v", value, err)
+			}
+			var schema []string
+			rows, err := raw.Query(`SELECT type || ':' || name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var object string
+				if err = rows.Scan(&object); err != nil {
+					t.Fatal(err)
+				}
+				schema = append(schema, object)
+			}
+			if err = rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(schema) != test.wantSchema {
+				t.Fatalf("schema after refusal = %v, want %s", schema, test.wantSchema)
+			}
+		})
 	}
 }
 
 func TestOpenInitializesGenuinelyEmptyDatabase(t *testing.T) {
-	dir := t.TempDir()
-	raw, err := sql.Open("sqlite", filepath.Join(dir, "flixr.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = raw.Ping(); err != nil {
-		t.Fatal(err)
-	}
-	var userObjects int
-	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&userObjects); err != nil || userObjects != 0 {
-		t.Fatalf("empty database user objects = %d, %v", userObjects, err)
-	}
-	if err = raw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	for _, setup := range []struct {
+		name string
+		sql  string
+	}{
+		{name: "schema empty"},
+		{name: "empty migration history only", sql: `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)`},
+	} {
+		t.Run(setup.name, func(t *testing.T) {
+			dir := t.TempDir()
+			raw, err := sql.Open("sqlite", filepath.Join(dir, "flixr.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if setup.sql == "" {
+				if err = raw.Ping(); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err = raw.Exec(setup.sql); err != nil {
+				t.Fatal(err)
+			}
+			if err = raw.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	db, err := sqlite.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	version, err := db.SchemaVersion()
-	if err != nil || version != sqlite.LatestSchemaVersion {
-		t.Fatalf("initialized schema = %d, %v", version, err)
+			db, err := sqlite.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			version, err := db.SchemaVersion()
+			if err != nil || version != sqlite.LatestSchemaVersion {
+				t.Fatalf("initialized schema = %d, %v", version, err)
+			}
+		})
 	}
 }
