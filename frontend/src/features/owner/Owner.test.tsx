@@ -23,7 +23,8 @@ describe('owner operations', () => {
       return new Response('{}');
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
-    const films = await screen.findByLabelText(/add folder to films/i);
+    fireEvent.click(await screen.findByRole('button', { name: /add folder/i }));
+    const films = screen.getByLabelText(/add folder to films/i);
     fireEvent.change(films, { target: { value: '/media/new-films' } });
     fireEvent.click(screen.getByRole('button', { name: /refresh activity/i }));
     expect(await screen.findByText(/living room/i)).toBeVisible();
@@ -71,12 +72,11 @@ describe('owner operations', () => {
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     expect(await screen.findByText('Managed by environment')).toBeVisible();
-    expect(within(screen.getByText('/media/films').parentElement!).queryByRole('button', { name: 'Move folder' })).not.toBeInTheDocument();
-    expect(within(screen.getByText('/media/tv').parentElement!).getByRole('button', { name: 'Move folder' })).toBeEnabled();
+    expect(within(screen.getByText('/media/films').closest('li')!).queryByRole('button', { name: 'Move folder' })).not.toBeInTheDocument();
+    expect(within(screen.getByText('/media/tv').closest('li')!).getByRole('button', { name: 'Move folder' })).toBeEnabled();
   });
 
   it('surfaces and explicitly confirms an environment-staged populated root move', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -89,8 +89,10 @@ describe('owner operations', () => {
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     expect(await screen.findByText('/mnt/films')).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /review and apply/i }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('/mnt/films'));
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/env-preview/confirm', expect.objectContaining({ method: 'POST' }));
+    const dialog = await screen.findByRole('dialog', { name: /apply the folder move/i });
+    expect(dialog).toHaveTextContent('/mnt/films');
+    fireEvent.click(within(dialog).getByRole('button', { name: /apply change/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/env-preview/confirm', expect.objectContaining({ method: 'POST' })));
     expect(await screen.findByText(/environment-managed folder moved/i)).toBeVisible();
   });
 
@@ -109,7 +111,6 @@ describe('owner operations', () => {
   });
 
   it('requires explicit confirmation before cleaning up suspicious removals', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -122,13 +123,13 @@ describe('owner operations', () => {
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     expect(await screen.findByText(/2 missing files/i)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: /confirm removal/i }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 missing files'));
-    expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/removals/confirm', expect.objectContaining({ method: 'POST', body: JSON.stringify({ scan_id: 'scan-1', location_id: 'films-root' }) }));
+    const dialog = await screen.findByRole('dialog', { name: /remove 2 missing files/i });
+    fireEvent.click(within(dialog).getByRole('button', { name: /confirm removal/i }));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/scan/removals/confirm', expect.objectContaining({ method: 'POST', body: JSON.stringify({ scan_id: 'scan-1', location_id: 'films-root' }) })));
     expect(await screen.findByText(/cleanup confirmed/i)).toBeVisible();
   });
 
   it('previews a folder removal before applying the explicit owner confirmation', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -141,14 +142,15 @@ describe('owner operations', () => {
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: /remove folder/i }));
+    const dialog = await screen.findByRole('dialog', { name: /remove this folder/i });
+    expect(dialog).toHaveTextContent('2 affected titles');
+    fireEvent.click(within(dialog).getByRole('button', { name: /remove folder/i }));
     expect(await screen.findByText(/media files were untouched/i)).toBeVisible();
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('2 affected titles'));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-locations/disk-2/change-preview', expect.objectContaining({ method: 'POST', body: JSON.stringify({ path: '' }) }));
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1/confirm', expect.objectContaining({ method: 'POST' }));
   });
 
   it('discards a folder preview when the owner cancels confirmation', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -161,6 +163,7 @@ describe('owner operations', () => {
     });
     render(<Owner onBrowse={() => undefined} onLogout={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: /remove folder/i }));
+    fireEvent.click(within(await screen.findByRole('dialog', { name: /remove this folder/i })).getByRole('button', { name: /cancel/i }));
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1', expect.objectContaining({ method: 'DELETE' })));
     expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/library-location-changes/preview-1/confirm', expect.anything());
   });
@@ -235,7 +238,6 @@ describe('owner operations', () => {
   });
 
   it('requires an explicit survivor before merging an identity conflict and reports its affected titles', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -251,10 +253,13 @@ describe('owner operations', () => {
     fireEvent.click(screen.getByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }));
     fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
 
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Merge Arrival (duplicate) into Arrival?'));
+    let dialog = await screen.findByRole('dialog', { name: 'Merge Arrival (duplicate) into Arrival?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/identity/merges', expect.anything());
-    confirm.mockReturnValue(true);
     fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
+    dialog = await screen.findByRole('dialog', { name: 'Merge Arrival (duplicate) into Arrival?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /merge titles/i }));
 
     expect(await screen.findByText(/identity repair merged arrival and arrival \(duplicate\)/i)).toBeInTheDocument();
     expect(screen.getAllByText(/affected titles: arrival and arrival \(duplicate\)/i)).toHaveLength(2);
@@ -262,7 +267,6 @@ describe('owner operations', () => {
   });
 
   it('shows active merge decisions and makes unmerge an explicit action', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -275,16 +279,18 @@ describe('owner operations', () => {
 
     expect(await screen.findByText(/retained newer survivor progress/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Unmerge Arrival and Arrival (duplicate)?'));
+    let dialog = await screen.findByRole('dialog', { name: 'Unmerge Arrival and Arrival (duplicate)?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(fetcher).not.toHaveBeenCalledWith('/api/v1/owner/identity/merges/merge-7/unmerge', expect.anything());
-    confirm.mockReturnValue(true);
     fireEvent.click(screen.getByRole('button', { name: /unmerge arrival and arrival \(duplicate\)/i }));
+    dialog = await screen.findByRole('dialog', { name: 'Unmerge Arrival and Arrival (duplicate)?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Unmerge' }));
     expect(await screen.findByText(/unmerged arrival and arrival \(duplicate\)/i)).toBeInTheDocument();
     expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/identity/merges/merge-7/unmerge', expect.objectContaining({ method: 'POST' }));
   });
 
   it('reports a stale identity repair after a version conflict and offers a refresh', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const path = String(input);
       if (path.includes('/setup/status')) return new Response(JSON.stringify({ claimed: true, readiness: { ffprobe: true, ffmpeg: true } }));
@@ -297,6 +303,7 @@ describe('owner operations', () => {
 
     fireEvent.click(await screen.findByRole('radio', { name: /^keep arrival; merge arrival \(duplicate\) into it$/i }));
     fireEvent.click(screen.getByRole('button', { name: /merge selected titles/i }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /merge titles/i }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/repair list changed before this merge/i);
     expect(screen.getByRole('button', { name: /refresh repair list/i })).toBeInTheDocument();
@@ -314,7 +321,9 @@ describe('owner operations', () => {
       return new Response(JSON.stringify({scan:{},settings:[],configured:false,screens:[]}));
     });
     render(<Owner onBrowse={()=>undefined} onLogout={()=>undefined}/>);
-    expect(await screen.findByRole('heading',{name:/scheduled scans/i})).toBeVisible();
+    expect(await screen.findByRole('heading',{name:/scan activity/i})).toBeVisible();
+    expect(await screen.findByText(/every 6 h/i)).toBeVisible();
+    fireEvent.click(screen.getByText('Scan schedule'));
     expect(await screen.findByDisplayValue('Extras/**')).toBeVisible();
     expect(screen.getByText(/broken.mp4/i)).toBeVisible();
     fireEvent.click(screen.getByRole('button',{name:/run now/i}));
@@ -352,6 +361,7 @@ describe('owner operations', () => {
     fireEvent.click(within(filmsForm).getByRole('button', { name: /save exclusions for films/i }));
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/v1/owner/libraries/films/scan-policy', expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ ...policy('films'), exclusions: ['Extras/**', 'Samples/**'] }) })));
 
+    fireEvent.click(screen.getByRole('button', { name: /create library/i }));
     const createForm = screen.getByRole('heading', { name: /create library/i }).closest('form')!;
     fireEvent.change(within(createForm).getByLabelText(/^name$/i), { target: { value: 'Archive' } });
     fireEvent.click(within(createForm).getByRole('button', { name: /create library/i }));
