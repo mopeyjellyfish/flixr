@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -57,6 +58,24 @@ func (c *Catalog) episodeAfter(profileID, currentID string, includeSpecials bool
 	if current.Season < 0 || current.Episode <= 0 || (current.Season == 0 && !includeSpecials) {
 		return EpisodeSequence{State: EpisodeSequenceContextUnavailable}, nil
 	}
+	order, orderErr := c.EpisodeOrder(current.SeriesID)
+	if orderErr != nil && !errors.Is(orderErr, ErrCatalogNotFound) {
+		return EpisodeSequence{}, orderErr
+	}
+	mapped := map[string]EpisodeOrderPosition{}
+	hasSavedMapping := false
+	if orderErr == nil && order.Revision > 0 {
+		if order.NeedsRepair {
+			return EpisodeSequence{State: EpisodeSequenceContextUnavailable}, nil
+		}
+		for _, entry := range order.Entries {
+			if entry.Mapping == nil {
+				continue
+			}
+			mapped[entry.CatalogID] = *entry.Mapping
+		}
+		hasSavedMapping = len(mapped) != 0
+	}
 
 	completed, err := c.completedEpisodes(profileID, current.SeriesID)
 	if err != nil {
@@ -70,7 +89,16 @@ func (c *Catalog) episodeAfter(profileID, currentID string, includeSpecials bool
 		if item.ID == current.ID || item.Kind != "episode" || item.SeriesID != current.SeriesID || !item.Playable || item.Episode <= 0 {
 			continue
 		}
-		if item.Season < 0 || (item.Season == 0 && !includeSpecials) || compareEpisode(item, current) <= 0 {
+		if item.Season < 0 || (item.Season == 0 && !includeSpecials) {
+			continue
+		}
+		if hasSavedMapping {
+			currentPosition, currentMapped := mapped[current.ID]
+			itemPosition, itemMapped := mapped[item.ID]
+			if !currentMapped || !itemMapped || (!includeSpecials && itemPosition.Special) || itemPosition.Position <= currentPosition.EndPosition {
+				continue
+			}
+		} else if compareEpisode(item, current) <= 0 {
 			continue
 		}
 		if allowed != nil {
@@ -98,9 +126,12 @@ func (c *Catalog) episodeAfter(profileID, currentID string, includeSpecials bool
 		return EpisodeSequence{State: EpisodeSequenceEnd}, nil
 	}
 	slices.SortFunc(candidates, func(a, b Item) int {
+		if hasSavedMapping {
+			return cmp.Or(cmp.Compare(mapped[a.ID].Position, mapped[b.ID].Position), cmp.Compare(a.ID, b.ID))
+		}
 		return cmp.Or(cmp.Compare(a.Season, b.Season), cmp.Compare(a.Episode, b.Episode), cmp.Compare(a.ID, b.ID))
 	})
-	if len(candidates) > 1 && candidates[0].Season == candidates[1].Season && candidates[0].Episode == candidates[1].Episode {
+	if len(candidates) > 1 && ((hasSavedMapping && mapped[candidates[0].ID].Position == mapped[candidates[1].ID].Position) || (!hasSavedMapping && candidates[0].Season == candidates[1].Season && candidates[0].Episode == candidates[1].Episode)) {
 		return EpisodeSequence{State: EpisodeSequenceContextUnavailable}, nil
 	}
 	next := candidates[0]

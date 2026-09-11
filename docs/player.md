@@ -44,6 +44,13 @@ is released and the retained stream is reattached. Timeline, fullscreen,
 play/pause, playback speed and track intent follow the winning source. This is a
 bounded stream restart and does not claim seamless multi-rendition switching.
 
+## Episode order
+
+Series can use a saved aired, DVD or absolute viewing order. Multi-episode files
+show their full span, and Next Up advances after the entire file. Owners manage
+ordering and ambiguous assignments in Server settings; see
+[TV episode numbering and viewing order](episode-order.md).
+
 ## Versions and editions
 
 When a title has several encodings, its detail page lists the available versions

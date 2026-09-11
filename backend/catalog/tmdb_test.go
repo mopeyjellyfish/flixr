@@ -161,6 +161,26 @@ func TestEpisodeNumbersBeyond99(t *testing.T) {
 	}
 }
 
+func TestEpisodeSpanParserRejectsReleaseSuffixesAndPartialChains(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		season, episode, end int
+	}{
+		{"Signal S01E01 1080p.mkv", 1, 1, 1},
+		{"Signal S01E01 2026.mkv", 1, 1, 1},
+		{"Signal S01E01E02E03.mkv", 0, 0, 0},
+		{"Signal S01E01-E02-E03.mkv", 0, 0, 0},
+		{"Signal S01E01 E02.mkv", 0, 0, 0},
+		{"Signal S01E03-E01.mkv", 0, 0, 0},
+	} {
+		item := Item{path: test.name}
+		episodeFields(&item)
+		if item.Season != test.season || item.Episode != test.episode || item.EpisodeEnd != test.end {
+			t.Errorf("%s = S%dE%d-%d", test.name, item.Season, item.Episode, item.EpisodeEnd)
+		}
+	}
+}
+
 func TestTMDBTVUsesFirstAirYearAndOriginalName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "Bron Broen" {
@@ -207,5 +227,52 @@ func TestTMDBLookupHonorsCancellation(t *testing.T) {
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("cancelled lookup succeeded")
+	}
+}
+
+func TestTMDBEpisodeOrderGroupsAreBoundedAndCancellable(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/3/tv/7/episode_groups" {
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewTMDBWithOrigins(server.Client(), server.URL, server.URL).EpisodeOrderGroups(ctx, "token", "7")
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("cancelled episode-group lookup succeeded")
+	}
+}
+
+func TestTMDBEpisodeOrderGroupTypes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/3/tv/7/episode_groups":
+			_, _ = w.Write([]byte(`{"results":[{"id":"aired","name":"Aired","type":1},{"id":"absolute","name":"Absolute","type":2},{"id":"dvd","name":"DVD","type":3},{"id":"ignored","type":4}]}`))
+		case "/3/tv/episode_group/dvd":
+			_, _ = w.Write([]byte(`{"id":"dvd","name":"DVD","type":3,"groups":[{"order":2,"episodes":[{"order":1,"season_number":1,"episode_number":2}]},{"order":1,"episodes":[{"order":0,"season_number":0,"episode_number":1},{"order":1,"season_number":1,"episode_number":1}]}]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	provider := NewTMDBWithOrigins(server.Client(), server.URL, server.URL)
+	groups, err := provider.EpisodeOrderGroups(context.Background(), "token", "7")
+	if err != nil || len(groups) != 3 || groups[1].Order != "absolute" {
+		t.Fatalf("groups=%#v %v", groups, err)
+	}
+	group, err := provider.EpisodeOrderGroup(context.Background(), "token", "dvd")
+	if err != nil || len(group.Episodes) != 3 || !group.Episodes[0].Mapping.Special || group.Episodes[2].Mapping.Position != 3 || group.Episodes[1].Mapping.Season != 2 || group.Order != "dvd" {
+		t.Fatalf("group=%#v %v", group, err)
 	}
 }

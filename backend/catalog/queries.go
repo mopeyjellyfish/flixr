@@ -59,7 +59,11 @@ func (c *Catalog) Browse(query string, offset, limit int) ([]Item, int, error) {
 
 func (c *Catalog) browseMemory(query string, offset, limit int) []Item {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	cached := make(map[string]Item, len(c.items))
+	for id, item := range c.items {
+		cached[id] = item
+	}
+	c.mu.RUnlock()
 	all := make([]Item, 0, len(c.items)+len(c.series))
 	for _, item := range c.items {
 		if item.SeriesID == "" {
@@ -93,7 +97,11 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		return c.seriesMemory(seriesID)
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	cached := make(map[string]Item, len(c.items))
+	for id, item := range c.items {
+		cached[id] = item
+	}
+	c.mu.RUnlock()
 	var out Series
 	var local, playable, demo int
 	var genres string
@@ -108,7 +116,7 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 	if err != nil {
 		return Series{}, false
 	}
-	defer rows.Close()
+	defer rows.Close() // Also release the reader on scan/JSON errors below.
 	bySeason := map[int][]Item{}
 	for rows.Next() {
 		var x Item
@@ -120,11 +128,21 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		if json.Unmarshal([]byte(audio), &x.Audio) != nil || json.Unmarshal([]byte(subtitles), &x.Subtitles) != nil || json.Unmarshal([]byte(genres), &x.Genres) != nil {
 			return Series{}, false
 		}
-		x.Audio = append(x.Audio, externalAudioTracks(c.items[x.ID].Audio)...)
-		x.Subtitles = append(x.Subtitles, externalSubtitleTracks(c.items[x.ID].Subtitles)...)
+		x.Audio = append(x.Audio, externalAudioTracks(cached[x.ID].Audio)...)
+		x.Subtitles = append(x.Subtitles, externalSubtitleTracks(cached[x.ID].Subtitles)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
+		if span, ok := cached[x.ID]; ok {
+			x.Season, x.Episode, x.EpisodeEnd, x.AbsoluteEpisode = span.Season, span.Episode, span.EpisodeEnd, span.AbsoluteEpisode
+		}
 		bySeason[x.Season] = append(bySeason[x.Season], x)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Series{}, false
+	}
+	if err := rows.Close(); err != nil {
+		return Series{}, false
 	}
 	numbers := make([]int, 0, len(bySeason))
 	for n := range bySeason {
@@ -136,14 +154,27 @@ func (c *Catalog) Series(seriesID string) (Series, bool) {
 		sort.Slice(episodes, func(i, j int) bool { return episodes[i].Episode < episodes[j].Episode })
 		out.Seasons = append(out.Seasons, Season{ID: id("season", seriesID+"/"+strconv.Itoa(n)), Number: n, Episodes: episodes})
 	}
+	if order, err := c.EpisodeOrder(seriesID); err == nil && order.Revision > 0 {
+		out.EpisodeOrder, out.OrderNeedsRepair = order.Order, order.NeedsRepair
+		mapped := map[string]*EpisodeOrderPosition{}
+		for _, entry := range order.Entries {
+			mapped[entry.CatalogID] = entry.Mapping
+		}
+		for si := range out.Seasons {
+			for ei := range out.Seasons[si].Episodes {
+				out.Seasons[si].Episodes[ei].EpisodeOrder = mapped[out.Seasons[si].Episodes[ei].ID]
+				out.Seasons[si].Episodes[ei].OrderNeedsRepair = order.NeedsRepair
+			}
+		}
+	}
 	return out, true
 }
 
 func (c *Catalog) seriesMemory(seriesID string) (Series, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	out, ok := c.series[seriesID]
 	if !ok {
+		c.mu.RUnlock()
 		return Series{}, false
 	}
 	seasons := map[int][]Item{}
@@ -152,6 +183,7 @@ func (c *Catalog) seriesMemory(seriesID string) (Series, bool) {
 			seasons[item.Season] = append(seasons[item.Season], item)
 		}
 	}
+	c.mu.RUnlock()
 	numbers := make([]int, 0, len(seasons))
 	for n := range seasons {
 		numbers = append(numbers, n)
@@ -161,6 +193,19 @@ func (c *Catalog) seriesMemory(seriesID string) (Series, bool) {
 		episodes := seasons[n]
 		sort.Slice(episodes, func(i, j int) bool { return episodes[i].Episode < episodes[j].Episode })
 		out.Seasons = append(out.Seasons, Season{ID: id("season", seriesID+"/"+strconv.Itoa(n)), Number: n, Episodes: episodes})
+	}
+	if order, err := c.EpisodeOrder(seriesID); err == nil && order.Revision > 0 {
+		out.EpisodeOrder, out.OrderNeedsRepair = order.Order, order.NeedsRepair
+		mapped := map[string]*EpisodeOrderPosition{}
+		for _, entry := range order.Entries {
+			mapped[entry.CatalogID] = entry.Mapping
+		}
+		for si := range out.Seasons {
+			for ei := range out.Seasons[si].Episodes {
+				out.Seasons[si].Episodes[ei].EpisodeOrder = mapped[out.Seasons[si].Episodes[ei].ID]
+				out.Seasons[si].Episodes[ei].OrderNeedsRepair = order.NeedsRepair
+			}
+		}
 	}
 	return out, true
 }

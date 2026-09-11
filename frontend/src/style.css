@@ -357,6 +357,8 @@ body:has(dialog[open]) { overflow: hidden; }
 .episode-row > div { flex: 1; }
 .episode-row strong { font-size: 0.95rem; }
 .episode-row p { color: var(--muted); font-size: 0.75rem; margin: 0.35rem 0 0; }
+.episode-order-warning { margin: 0.75rem 0; padding: 0.75rem 0.9rem; border: 1px solid #ffb34766; border-radius: 0.7rem; color: #ffcf8a; background: #ffb34714; }
+.source-order-heading { margin: 1.5rem 0 0.25rem; color: var(--muted); font: 700 0.85rem Manrope, Arial, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; }
 .detail-notice { position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%); padding: 1rem; background: var(--surface); z-index: 10; border-radius: 0.5rem; }
 .owner { max-width: 100rem; margin: auto; }
 .owner-nav a { border-left: 2px solid transparent; border-radius: 0; color: var(--muted); }
@@ -639,6 +641,12 @@ textarea:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 .owner-section input, .owner-section textarea, .owner-section select { max-width: 36rem; }
 .owner-section select { width: 100%; background: var(--control-inset); border: 1px solid var(--strong); border-radius: 0.75rem; font-size: 1rem; padding-inline: 0.8rem; }
 .owner-section label.choice { max-width: none; }
+.episode-order-editor, .episode-order-draft, .episode-order-rows { display: grid; gap: 0.85rem; }
+.episode-order-results { display: grid; gap: 0.4rem; max-width: 36rem; }
+.episode-order-results button { width: 100%; text-align: left; }
+.episode-order-row { display: grid; gap: 0.7rem; padding: 0.9rem; border: 1px solid var(--hairline); border-radius: 0.75rem; background: #ffffff04; }
+.episode-order-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.6rem; }
+.episode-order-fields input { width: 100%; }
 .choice-list legend { margin-bottom: 0.25rem; font-weight: 700; }
 .review-alert { justify-content: space-between; text-align: left; }
 .review-alert p { flex: 1 1 16rem; }

@@ -363,3 +363,53 @@ requests can select exact `location_id` and `relative_path` pairs from a prior
 job, and scan policies expose the library's durable `last_success_at` timestamp.
 
 Player controls and local chapter/preview limits are described in [Watching with FlixR](player.md).
+
+## TV episode order
+
+The owner-only order API is local unless the owner explicitly requests provider
+choices or a preview:
+
+| Method and route | Request or result |
+| --- | --- |
+| `GET /api/v1/owner/episode-orders?q=&offset=0&limit=50` | Bounded series discovery: `series`, `total`, optional `next_offset` |
+| `GET /api/v1/owner/episode-orders/{id}` | Saved `series_id`, `title`, `order`, `revision`, `needs_repair`, `entries` |
+| `PUT /api/v1/owner/episode-orders/{id}` | Save `{order, revision, entries}` atomically; return the saved detail |
+| `GET /api/v1/owner/episode-orders/{id}/groups` | Explicit provider lookup returning `groups` with `id`, `name`, `order` |
+| `POST /api/v1/owner/episode-orders/{id}/preview` | Preview `{group_id}` as an editable detail without saving |
+
+An entry carries `catalog_id`, its source `season`, `episode`, `episode_end`, title,
+and an optional `mapping`. A mapping contains `position`, `end_position`, display
+`season`, `episode`, `episode_end`, and `special`. Source metadata in a write does
+not override catalog identity. Position and display spans must cover the same
+number of episodes as the source file. A stale revision returns HTTP 409
+`episode_order_conflict`; invalid input returns HTTP 400 `episode_order_invalid`.
+Incomplete mappings remain repair-required instead of silently choosing an order.
+Sending aired order with an empty entry list restores parsed source ordering.
+Provider routes require enabled metadata and return HTTP 503
+`metadata_unavailable` when lookup is unavailable. Failed previews never save.
+
+Public catalog items retain canonical source season/episode fields and add
+`episode_end`, optional `absolute_episode`, `episode_order`, and
+`order_needs_repair`. Series responses name the selected `episode_order` and repair
+state. Consumers must use the selected mapping for presentation, not reinterpret
+source coordinates as alternate numbers. The existing authorized playback-session
+`/next` route is authoritative for advancement and returns `context_unavailable`
+when ordering cannot be resolved safely.
+
+Run the isolated real-media acceptance check with FFmpeg/ffprobe and a built server:
+
+```sh
+(cd backend && go build -o /tmp/flixr-episode-order .)
+python3 scripts/episode-order-acceptance.py \
+  --binary /tmp/flixr-episode-order \
+  --output /tmp/flixr-episode-order-result.json
+```
+
+The script creates its own media, credentials, database and loopback server. It
+verifies a served decoded frame, multi-episode and long-number parsing, alternate
+Next Up, specials, repair, stale writes, owner authorization, restart and rescan.
+It deletes only its temporary fixture directory and records the tested binary's
+SHA-256 with the outcomes. It does not connect to a household server.
+To check an existing installation's upgrade, add `--previous-binary` with the
+path to the prior release binary. The fixture scans with that binary first, then
+starts the new binary against the same data and checks that episode IDs survive.

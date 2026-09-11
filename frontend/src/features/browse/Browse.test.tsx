@@ -113,6 +113,59 @@ describe('browse', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/v1/catalog/series/series-1', expect.anything());
   });
 
+  it('shows a saved alternate order with spans and specials without exposing source-season bulk actions', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/catalog/series/series-1')) return new Response(JSON.stringify({ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, episode_order: 'dvd', order_needs_repair: true, seasons: [{ id: 's1', number: 1, episodes: [
+        { id: 'episode-1', title: 'First file', kind: 'episode', season: 1, episode: 1, episode_end: 2, local_only: false, episode_order: { position: 2, end_position: 3, season: 1, episode: 4, episode_end: 5, special: false } },
+        { id: 'special-1', title: 'Pilot special', kind: 'episode', season: 0, episode: 1, local_only: false, episode_order: { position: 1, end_position: 1, season: 0, episode: 1, episode_end: 1, special: true } },
+        { id: 'episode-unmapped', title: 'Manual file', kind: 'episode', season: 1, episode: 3, local_only: false },
+      ] }] }));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Series', items: [{ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, listed: false }] }] }));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+    render(<Browse onExit={() => undefined} />);
+    fireEvent.click(await screen.findByTestId('card-series-1'));
+    expect(await screen.findByText(/DVD order/i)).toBeVisible();
+    expect(screen.getByText(/order needs repair/i)).toBeVisible();
+    expect(screen.getByText(/Special · Pilot special/i)).toBeVisible();
+    expect(screen.getByText(/S1 · E4–5/i)).toBeVisible();
+    expect(screen.getByText('Manual file')).toBeVisible();
+    expect(screen.getAllByText(/source order/i)).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /mark season watched/i })).not.toBeInTheDocument();
+  });
+
+  it('uses an owner-repaired aired mapping instead of restoring canonical season controls', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/catalog/series/series-1')) return new Response(JSON.stringify({ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, episode_order: 'aired', seasons: [{ id: 's1', number: 1, episodes: [{ id: 'episode-1', title: 'Repaired file', kind: 'episode', season: 1, episode: 1, local_only: false, episode_order: { position: 1, end_position: 1, season: 2, episode: 1, episode_end: 1, special: false } }] }] }));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Series', items: [{ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, listed: false }] }] }));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+    render(<Browse onExit={() => undefined} />);
+    fireEvent.click(await screen.findByTestId('card-series-1'));
+    expect(await screen.findByText('Aired order')).toBeVisible();
+    expect(screen.getByText(/S2 · E1 · Repaired file/i)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /mark season watched/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps repair feedback visible when a selected order has no usable mappings', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.includes('/catalog/series/series-1')) return new Response(JSON.stringify({ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, episode_order: 'dvd', order_needs_repair: true, seasons: [{ id: 's1', number: 1, episodes: [{ id: 'episode-1', title: 'Manual file', kind: 'episode', season: 1, episode: 1, local_only: false }] }] }));
+      if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Series', items: [{ id: 'series-1', title: 'Signal', kind: 'series', local_only: false, listed: false }] }] }));
+      throw new Error(`Unexpected request ${path}`);
+    });
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+    render(<Browse onExit={() => undefined} />);
+    fireEvent.click(await screen.findByTestId('card-series-1'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/order needs repair/i);
+    expect(screen.getByText('Episodes')).toBeVisible();
+    expect(screen.queryByText('DVD order')).not.toBeInTheDocument();
+  });
+
   it('closes an open detail route when the dialog is cancelled', async () => {
     const navigate = vi.fn();
     vi.spyOn(globalThis, 'fetch').mockImplementation(viewerFetch({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Films', items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false }] }] }));

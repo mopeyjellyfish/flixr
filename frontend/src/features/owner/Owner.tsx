@@ -13,6 +13,7 @@ import { LibrariesSection, type LibraryActions, type ScanActions } from './Libra
 import { IdentityRepair, MetadataRepair, ProviderStatus, TMDBForm } from './Metadata';
 import { MediaVersions } from './MediaVersions';
 import { ConnectedScreens, PlaybackPanel } from './Playback';
+import { EpisodeOrder } from './EpisodeOrder';
 
 type OwnerProps = {
   onLogout: () => void;
@@ -253,6 +254,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
             <h2 id="metadata-title">Metadata</h2><p>Optional online artwork and descriptions. Browsing and playback work without a provider.</p>
             <ProviderStatus settings={tmdbSettings} enabled={tmdbSettings?.enabled ?? true} locked={locked.has('metadata.enabled')} onToggle={(enabled) => void setMetadataEnabled(enabled)} />
             <TMDBForm settings={tmdbSettings} token={tmdbToken} onTokenChange={setTMDBToken} onSave={saveTMDB} onRemove={removeTMDB} locked={locked.has('metadata.tmdb_token')} />
+            <EpisodeOrder />
             <MetadataRepair items={unmatched} candidates={candidates} onFind={findMatches} onSelect={selectMatch} onClear={clearMatch} onUpdate={(updated) => setUnmatched((current) => current.map((item) => item.id === updated.id ? updated : item))} />
             <MediaVersions confirm={confirm} onOwnerRequired={requireOwner} />
             <IdentityRepair repairs={identityRepairs} error={identityError} actionError={identityActionError} confirm={confirm} onReload={() => loadIdentityRepairs()} onMerge={mergeIdentity} onUnmerge={unmergeIdentity} />

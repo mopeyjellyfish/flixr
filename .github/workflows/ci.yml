@@ -144,6 +144,15 @@ jobs:
           name: flixr-production-acceptance-evidence
           path: frontend/test-results
           if-no-files-found: warn
+      - name: Accept episode order with real media and restart
+        run: python3 scripts/episode-order-acceptance.py --binary bin/flixr --output output/episode-order-acceptance.json
+      - name: Upload episode order acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flixr-episode-order-acceptance-evidence
+          path: output/episode-order-acceptance.json
+          if-no-files-found: warn
       - name: Accept an internet-isolated media server
         run: make test-offline
       - name: Upload offline acceptance evidence

@@ -58,6 +58,16 @@ func (c *Catalog) MergeIdentity(kind, survivorID, sourceID string) (IdentityMerg
 	if count != 0 {
 		return IdentityMerge{}, ErrIdentityConflict
 	}
+	if kind == "series" {
+		// A selected order is scoped to a series. Rewriting its episode ownership
+		// without a reversible mapping snapshot would silently change Next Up.
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM catalog_episode_order_items WHERE series_id IN (?,?)`, survivorID, sourceID).Scan(&count); err != nil {
+			return IdentityMerge{}, err
+		}
+		if count != 0 {
+			return IdentityMerge{}, ErrIdentityConflict
+		}
+	}
 	decisions := c.identityAffectedDecisions(kind, survivorID, sourceID)
 	decisions = append(decisions, "Both original title records are retained. Existing survivor progress is kept; source-only progress is copied.")
 	encodedDecisions, err := json.Marshal(decisions)
