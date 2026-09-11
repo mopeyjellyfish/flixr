@@ -52,31 +52,46 @@ type localImportPlan struct {
 	fallbackProvider                          string
 	remove                                    bool
 	clearProviderArtwork                      bool
-	providerArtwork                           map[string]Artwork
+	captureIdentityArtwork                    bool
+	restoreIdentityArtwork                    bool
+	captureIdentityState                      bool
+	restoreIdentityState                      bool
+	priorIdentityProviderID                   string
+	priorIdentityProvider                     string
+	priorIdentityFields                       map[string]string
+	providerArtwork                           map[string]localArtworkDescriptor
+	providerArtworkRetries                    map[string]string
+	providerArtworkIdentity                   artworkIdentity
 	lockedArtwork                             map[string]bool
 	artwork                                   map[string]localArtworkPlan
 }
 
 type localArtworkPlan struct {
 	source, fingerprint string
-	artwork             Artwork
+	artwork             localArtworkDescriptor
 	fallbackValue       string
 	remove              bool
 }
 
 type localTarget struct{ kind, id, locationID, root, mediaPath string }
 type localNFOStage struct {
-	source, fingerprint  string
-	parsed               localNFO
-	found                bool
-	err                  error
-	identityIntent       bool
-	identityProviderID   string
-	priorProviderID      string
-	priorProvider        string
-	priorFields          map[string]string
-	clearProviderArtwork bool
-	providerArtwork      map[string]Artwork
+	source, fingerprint     string
+	parsed                  localNFO
+	found                   bool
+	err                     error
+	identityIntent          bool
+	identityProviderID      string
+	priorProviderID         string
+	priorProvider           string
+	priorFields             map[string]string
+	clearProviderArtwork    bool
+	captureIdentityArtwork  bool
+	restoreIdentityArtwork  bool
+	captureIdentityState    bool
+	restoreIdentityState    bool
+	providerArtwork         map[string]localArtworkDescriptor
+	providerArtworkRetries  map[string]string
+	providerArtworkIdentity artworkIdentity
 }
 
 func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO, error) {
@@ -348,8 +363,10 @@ func (c *Catalog) localIdentityHints(ctx context.Context, items map[string]Item,
 			return nil, nil, stateErr
 		}
 		desiredID, hasIntent := stage.parsed.ProviderID, stage.parsed.ProviderID != ""
+		restoringIdentity := false
 		if !hasIntent && hasState && state.providerID != "" && (found || completeLocations[target.locationID]) {
 			desiredID, hasIntent = state.fallbackProviderID, true
+			restoringIdentity = true
 		}
 		if !hasIntent {
 			continue
@@ -380,15 +397,17 @@ func (c *Catalog) localIdentityHints(ctx context.Context, items map[string]Item,
 		stage.priorProvider = currentProvider
 		stage.priorFields = priorFields
 		stage.clearProviderArtwork = currentID != ""
+		stage.captureIdentityArtwork = !restoringIdentity && state.providerID == ""
+		stage.restoreIdentityArtwork = restoringIdentity
 		stages[key] = stage
-		if desiredID != "" {
+		if desiredID != "" && !restoringIdentity {
 			hints[key] = desiredID
 		}
 	}
 	return hints, stages, nil
 }
 
-func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Item, series map[string]Series, scannedLocations, completeLocations map[string]bool, stages map[string]localNFOStage) ([]localImportPlan, []scanObservation, error) {
+func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Item, series map[string]Series, scannedLocations, completeLocations map[string]bool, stages map[string]localNFOStage, artworkStore *localArtworkStore) ([]localImportPlan, []scanObservation, error) {
 	targets, movieCounts := c.localTargets(items, scannedLocations)
 	var plans []localImportPlan
 	var observations []scanObservation
@@ -404,7 +423,8 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 		stage := stages[refreshKey(target.kind, target.id)]
 		nfoPath, found, candidateErr := stage.source, stage.found, stage.err
 		lockedFields := c.lockedMetadata(target.kind, target.id)
-		plan := localImportPlan{kind: target.kind, id: target.id, locationID: target.locationID, fields: map[string]string{}, fallback: map[string]string{}, previous: cloneStrings(state.fields), previousProviderID: state.providerID, clearProviderArtwork: stage.clearProviderArtwork, providerArtwork: stage.providerArtwork, lockedArtwork: lockedFields, artwork: map[string]localArtworkPlan{}}
+		plan := localImportPlan{kind: target.kind, id: target.id, locationID: target.locationID, fields: map[string]string{}, fallback: map[string]string{}, previous: cloneStrings(state.fields), previousProviderID: state.providerID, clearProviderArtwork: stage.clearProviderArtwork, captureIdentityArtwork: stage.captureIdentityArtwork, restoreIdentityArtwork: stage.restoreIdentityArtwork, captureIdentityState: stage.captureIdentityState, restoreIdentityState: stage.restoreIdentityState, priorIdentityProviderID: stage.priorProviderID, priorIdentityProvider: stage.priorProvider, priorIdentityFields: cloneStrings(stage.priorFields), providerArtwork: stage.providerArtwork, providerArtworkRetries: stage.providerArtworkRetries, providerArtworkIdentity: stage.providerArtworkIdentity, lockedArtwork: lockedFields, artwork: map[string]localArtworkPlan{}}
+		planAdded := false
 		if candidateErr != nil {
 			observations = append(observations, localObservation(target.locationID, target.kind, nfoPath, "local_metadata_invalid", candidateErr.Error()))
 		} else if found {
@@ -433,6 +453,7 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 				}
 				applyLocalPlan(&plan, items, series, c.lockedMetadata(target.kind, target.id))
 				plans = append(plans, plan)
+				planAdded = true
 				if len(parsed.Ignored) > 0 {
 					observations = append(observations, localObservation(target.locationID, target.kind, nfoPath, "local_metadata_ignored", "Unsupported NFO fields were ignored: "+strings.Join(parsed.Ignored, ", ")+"."))
 				}
@@ -445,6 +466,11 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 			plan.fallbackProviderID, plan.fallbackProvider = state.fallbackProviderID, state.fallbackProvider
 			applyLocalPlan(&plan, items, series, c.lockedMetadata(target.kind, target.id))
 			plans = append(plans, plan)
+			planAdded = true
+		}
+		if !planAdded && (plan.clearProviderArtwork || plan.captureIdentityArtwork || plan.restoreIdentityArtwork || plan.captureIdentityState || plan.restoreIdentityState || len(plan.providerArtwork) != 0 || len(plan.providerArtworkRetries) != 0) {
+			plans = append(plans, plan)
+			planAdded = true
 		}
 		for artworkKind, paths := range map[string][]string{"poster": candidates.poster, "backdrop": candidates.backdrop} {
 			assetPath, exists, candidateErr := firstRegularLocalFile(target.root, paths)
@@ -460,12 +486,19 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 				continue
 			}
 			if exists {
+				if artworkStore == nil {
+					continue
+				}
 				art, fingerprint, artErr := readLocalArtwork(ctx, target.root, assetPath)
 				if artErr != nil {
 					observations = append(observations, localObservation(target.locationID, target.kind, assetPath, "local_artwork_invalid", artErr.Error()))
 					continue
 				}
-				assetPlan := localArtworkPlan{source: assetPath, fingerprint: fingerprint, artwork: art, fallbackValue: currentArtworkValue(target.kind, target.id, artworkKind, items, series)}
+				descriptor, stageErr := artworkStore.Stage(ctx, art)
+				if stageErr != nil {
+					return nil, nil, stageErr
+				}
+				assetPlan := localArtworkPlan{source: assetPath, fingerprint: fingerprint, artwork: descriptor, fallbackValue: currentArtworkValue(target.kind, target.id, artworkKind, items, series)}
 				if len(plans) == 0 || plans[len(plans)-1].kind != target.kind || plans[len(plans)-1].id != target.id {
 					plans = append(plans, plan)
 				}
@@ -582,13 +615,14 @@ func readLocalArtwork(ctx context.Context, rootPath, relative string) (Artwork, 
 
 // stageLocalProviderArtwork keeps an identity transition's provider bytes out of
 // the published cache until the scan transaction commits the matching identity.
-func (c *Catalog) stageLocalProviderArtwork(ctx context.Context, kind, id string, enrichment Enrichment) (map[string]Artwork, bool) {
+func (c *Catalog) stageLocalProviderArtwork(ctx context.Context, kind, id string, enrichment Enrichment, store *localArtworkStore) (map[string]localArtworkDescriptor, map[string]string, bool, error) {
 	c.mu.RLock()
 	provider, ok := c.provider.(ArtworkProvider)
 	c.mu.RUnlock()
-	staged := map[string]Artwork{}
+	staged := map[string]localArtworkDescriptor{}
+	retries := map[string]string{}
 	if !ok || c.db == nil {
-		return staged, enrichment.Poster != "" || enrichment.Backdrop != ""
+		return staged, retries, enrichment.Poster != "" || enrichment.Backdrop != "", nil
 	}
 	locked := c.lockedMetadata(kind, id)
 	failed := false
@@ -599,11 +633,16 @@ func (c *Catalog) stageLocalProviderArtwork(ctx context.Context, kind, id string
 		art, err := provider.FetchArtwork(ctx, source)
 		if err != nil || !allowedArtworkContentType(art.ContentType) || len(art.Bytes) == 0 {
 			failed = true
+			retries[artworkKind] = source
 			continue
 		}
-		staged[artworkKind] = art
+		descriptor, err := store.Stage(ctx, art)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		staged[artworkKind] = descriptor
 	}
-	return staged, failed
+	return staged, retries, failed, nil
 }
 
 type localSnapshot struct {
@@ -655,6 +694,25 @@ func (c *Catalog) loadLocalDocument(kind, id string) (localDocumentState, bool, 
 	}
 	if jsonErr := json.Unmarshal([]byte(fallbackJSON), &state.fallback); jsonErr != nil {
 		return state, false, jsonErr
+	}
+	return state, true, nil
+}
+
+func (c *Catalog) loadLocalIdentityState(kind, id string) (localDocumentState, bool, error) {
+	state := localDocumentState{fields: map[string]string{}, fallback: map[string]string{}}
+	if c.db == nil {
+		return state, false, nil
+	}
+	var fieldsJSON string
+	err := c.db.QueryRow(`SELECT provider_id,provider,fields_json FROM catalog_local_identity_state WHERE catalog_kind=? AND catalog_id=?`, kind, id).Scan(&state.providerID, &state.fallbackProvider, &fieldsJSON)
+	if err == sql.ErrNoRows {
+		return state, false, nil
+	}
+	if err != nil {
+		return state, false, err
+	}
+	if err := json.Unmarshal([]byte(fieldsJSON), &state.fields); err != nil {
+		return state, false, err
 	}
 	return state, true, nil
 }
@@ -761,7 +819,11 @@ func applyLocalPlan(plan *localImportPlan, items map[string]Item, series map[str
 		x := series[plan.id]
 		item := Item{Title: x.Title, Synopsis: x.Synopsis, Year: x.Year, Poster: x.Poster, Backdrop: x.Backdrop}
 		if !plan.remove {
-			applyRemovedLocalFields(&item, plan.previous, plan.fields, plan.fallback, locked)
+			if plan.restoreIdentityArtwork {
+				applyFieldValues(&item, plan.fallback, locked)
+			} else {
+				applyRemovedLocalFields(&item, plan.previous, plan.fields, plan.fallback, locked)
+			}
 		}
 		applyFieldValues(&item, values, locked)
 		if !plan.remove && (plan.providerID != "" || plan.previousProviderID != "") {
@@ -776,7 +838,11 @@ func applyLocalPlan(plan *localImportPlan, items map[string]Item, series map[str
 	}
 	x := items[plan.id]
 	if !plan.remove {
-		applyRemovedLocalFields(&x, plan.previous, plan.fields, plan.fallback, locked)
+		if plan.restoreIdentityArtwork {
+			applyFieldValues(&x, plan.fallback, locked)
+		} else {
+			applyRemovedLocalFields(&x, plan.previous, plan.fields, plan.fallback, locked)
+		}
 	}
 	applyFieldValues(&x, values, locked)
 	if !plan.remove && (plan.providerID != "" || plan.previousProviderID != "") {
@@ -839,8 +905,40 @@ func setArtworkValue(kind, id, artworkKind, value string, items map[string]Item,
 	items[id] = x
 }
 
-func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (created, obsolete []string, err error) {
+func (c *Catalog) persistLocalMetadataTx(ctx context.Context, tx *sql.Tx, plans []localImportPlan, artworkStore *localArtworkStore) (created, obsolete []string, err error) {
 	for _, plan := range plans {
+		if plan.captureIdentityState {
+			fieldsJSON, marshalErr := json.Marshal(plan.priorIdentityFields)
+			if marshalErr != nil {
+				err = marshalErr
+				return
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_local_identity_state(catalog_kind,catalog_id,provider_id,provider,fields_json) VALUES(?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id) DO NOTHING`, plan.kind, plan.id, plan.priorIdentityProviderID, plan.priorIdentityProvider, string(fieldsJSON)); err != nil {
+				return
+			}
+		}
+		if plan.captureIdentityArtwork {
+			for _, artworkKind := range []string{"poster", "backdrop"} {
+				if plan.lockedArtwork[artworkKind] {
+					continue
+				}
+				var objectName, contentType, value string
+				localErr := tx.QueryRow(`SELECT fallback_object_name,fallback_content_type,fallback_value FROM catalog_local_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=? AND fallback_object_name<>''`, plan.kind, plan.id, artworkKind).Scan(&objectName, &contentType, &value)
+				if localErr == sql.ErrNoRows {
+					localErr = tx.QueryRow(`SELECT object_name,content_type FROM catalog_artwork WHERE catalog_id=? AND kind=?`, plan.id, artworkKind).Scan(&objectName, &contentType)
+					value = artworkURL(plan.id, artworkKind)
+				}
+				if localErr != nil && localErr != sql.ErrNoRows {
+					err = localErr
+					return
+				}
+				if localErr == nil && objectName != "" {
+					if _, err = tx.Exec(`INSERT INTO catalog_local_identity_artwork(catalog_kind,catalog_id,artwork_kind,object_name,content_type,value) VALUES(?,?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id,artwork_kind) DO NOTHING`, plan.kind, plan.id, artworkKind, objectName, contentType, value); err != nil {
+						return
+					}
+				}
+			}
+		}
 		if plan.clearProviderArtwork {
 			for _, artworkKind := range []string{"poster", "backdrop"} {
 				if plan.lockedArtwork[artworkKind] {
@@ -853,7 +951,13 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 					return
 				}
 				if rowErr == nil {
-					obsolete = append(obsolete, oldObject)
+					var retained int
+					if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=? AND object_name=?)`, plan.kind, plan.id, artworkKind, oldObject).Scan(&retained); err != nil {
+						return
+					}
+					if retained == 0 {
+						obsolete = append(obsolete, oldObject)
+					}
 					if _, err = tx.Exec(`DELETE FROM catalog_artwork WHERE catalog_id=? AND kind=?`, plan.id, artworkKind); err != nil {
 						return
 					}
@@ -865,7 +969,13 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 					return
 				}
 				if fallbackErr == nil {
-					obsolete = append(obsolete, oldFallback)
+					var retained int
+					if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=? AND object_name=?)`, plan.kind, plan.id, artworkKind, oldFallback).Scan(&retained); err != nil {
+						return
+					}
+					if retained == 0 {
+						obsolete = append(obsolete, oldFallback)
+					}
 					if _, err = tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name='',fallback_content_type='',fallback_value='' WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, plan.kind, plan.id, artworkKind); err != nil {
 						return
 					}
@@ -876,9 +986,14 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 			}
 		}
 		for _, artworkKind := range []string{"poster", "backdrop"} {
-			art, ok := plan.providerArtwork[artworkKind]
+			descriptor, ok := plan.providerArtwork[artworkKind]
 			if !ok {
 				continue
+			}
+			art, readErr := artworkStore.Read(ctx, descriptor)
+			if readErr != nil {
+				err = readErr
+				return
 			}
 			var localObject, localType, oldFallback string
 			localErr := tx.QueryRow(`SELECT l.local_object_name,a.content_type,l.fallback_object_name FROM catalog_local_artwork l JOIN catalog_artwork a ON a.catalog_id=l.catalog_id AND a.kind=l.artwork_kind WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=?`, plan.kind, plan.id, artworkKind).Scan(&localObject, &localType, &oldFallback)
@@ -902,6 +1017,55 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 				obsolete = append(obsolete, oldFallback)
 			} else {
 				obsolete = append(obsolete, previous)
+			}
+		}
+		for artworkKind, providerPath := range plan.providerArtworkRetries {
+			identity := plan.providerArtworkIdentity
+			if identity.providerID == "" || providerPath == "" {
+				continue
+			}
+			if _, err = tx.Exec(`INSERT INTO catalog_artwork_retries(catalog_kind,catalog_id,artwork_kind,provider_id,parent_catalog_id,parent_provider_id,provider_path) VALUES(?,?,?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id,artwork_kind) DO UPDATE SET provider_id=excluded.provider_id,parent_catalog_id=excluded.parent_catalog_id,parent_provider_id=excluded.parent_provider_id,provider_path=excluded.provider_path`, identity.catalogKind, identity.catalogID, artworkKind, identity.providerID, identity.parentCatalogID, identity.parentProviderID, providerPath); err != nil {
+				return
+			}
+		}
+		if plan.restoreIdentityArtwork {
+			for _, artworkKind := range []string{"poster", "backdrop"} {
+				if plan.lockedArtwork[artworkKind] {
+					continue
+				}
+				var objectName, contentType, value string
+				rowErr := tx.QueryRow(`SELECT object_name,content_type,value FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, plan.kind, plan.id, artworkKind).Scan(&objectName, &contentType, &value)
+				if rowErr == sql.ErrNoRows {
+					continue
+				}
+				if rowErr != nil {
+					err = rowErr
+					return
+				}
+				var localObject, oldFallback string
+				localErr := tx.QueryRow(`SELECT local_object_name,fallback_object_name FROM catalog_local_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, plan.kind, plan.id, artworkKind).Scan(&localObject, &oldFallback)
+				if localErr != nil && localErr != sql.ErrNoRows {
+					err = localErr
+					return
+				}
+				if localErr == nil {
+					if _, err = tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name=?,fallback_content_type=?,fallback_value=? WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, objectName, contentType, value, plan.kind, plan.id, artworkKind); err != nil {
+						return
+					}
+					obsolete = append(obsolete, oldFallback)
+				} else {
+					if _, err = tx.Exec(`INSERT INTO catalog_artwork(catalog_id,kind,content_type,object_name) VALUES(?,?,?,?) ON CONFLICT(catalog_id,kind) DO UPDATE SET content_type=excluded.content_type,object_name=excluded.object_name`, plan.id, artworkKind, contentType, objectName); err != nil {
+						return
+					}
+				}
+				if _, err = tx.Exec(`DELETE FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, plan.kind, plan.id, artworkKind); err != nil {
+					return
+				}
+			}
+		}
+		if plan.restoreIdentityState {
+			if _, err = tx.Exec(`DELETE FROM catalog_local_identity_state WHERE catalog_kind=? AND catalog_id=?`, plan.kind, plan.id); err != nil {
+				return
 			}
 		}
 		if plan.remove {
@@ -972,7 +1136,12 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 				err = rowErr
 				return
 			}
-			name, previousObject, replaceErr := c.replaceArtwork(tx, plan.id, artworkKind, asset.artwork)
+			art, readErr := artworkStore.Read(ctx, asset.artwork)
+			if readErr != nil {
+				err = readErr
+				return
+			}
+			name, previousObject, replaceErr := c.replaceArtwork(tx, plan.id, artworkKind, art)
 			if replaceErr != nil {
 				err = replaceErr
 				return

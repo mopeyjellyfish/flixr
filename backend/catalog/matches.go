@@ -269,6 +269,27 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 		return Item{}, err
 	}
 	defer tx.Rollback()
+	identityRows, err := tx.Query(`SELECT object_name FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID)
+	if err != nil {
+		return Item{}, err
+	}
+	for identityRows.Next() {
+		var name string
+		if err := identityRows.Scan(&name); err != nil {
+			identityRows.Close()
+			return Item{}, err
+		}
+		replaced = append(replaced, name)
+	}
+	if err := identityRows.Close(); err != nil {
+		return Item{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+		return Item{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_state WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+		return Item{}, err
+	}
 	if hasLocal {
 		fallback, err := json.Marshal(localState.fallback)
 		if err != nil {

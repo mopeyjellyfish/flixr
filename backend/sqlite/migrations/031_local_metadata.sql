@@ -41,3 +41,22 @@ CREATE TABLE catalog_local_artwork (
  fallback_value TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(catalog_kind,catalog_id,artwork_kind)
 );
+
+CREATE TABLE catalog_local_identity_artwork (
+ catalog_kind TEXT NOT NULL CHECK(catalog_kind IN ('film','series','episode')),
+ catalog_id TEXT NOT NULL,
+ artwork_kind TEXT NOT NULL CHECK(artwork_kind IN ('poster','backdrop')),
+ object_name TEXT NOT NULL,
+ content_type TEXT NOT NULL,
+ value TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(catalog_kind,catalog_id,artwork_kind)
+);
+
+CREATE TABLE catalog_local_identity_state (
+ catalog_kind TEXT NOT NULL CHECK(catalog_kind IN ('film','series','episode')),
+ catalog_id TEXT NOT NULL,
+ provider_id TEXT NOT NULL DEFAULT '',
+ provider TEXT NOT NULL DEFAULT '',
+ fields_json TEXT NOT NULL DEFAULT '{}',
+ PRIMARY KEY(catalog_kind,catalog_id)
+);

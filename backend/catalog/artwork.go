@@ -696,7 +696,7 @@ func (c *Catalog) cleanupArtworkObjectsLocked() error {
 			continue
 		}
 		var count int
-		if err := c.db.QueryRow(`SELECT (SELECT count(*) FROM catalog_artwork WHERE object_name=?)+(SELECT count(*) FROM catalog_local_artwork WHERE local_object_name=? OR fallback_object_name=?)`, entry.Name(), entry.Name(), entry.Name()).Scan(&count); err != nil {
+		if err := c.db.QueryRow(`SELECT (SELECT count(*) FROM catalog_artwork WHERE object_name=?)+(SELECT count(*) FROM catalog_local_artwork WHERE local_object_name=? OR fallback_object_name=?)+(SELECT count(*) FROM catalog_local_identity_artwork WHERE object_name=?)`, entry.Name(), entry.Name(), entry.Name(), entry.Name()).Scan(&count); err != nil {
 			return err
 		}
 		if count == 0 {

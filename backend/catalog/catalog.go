@@ -327,6 +327,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if db == nil {
 		return c, nil
 	}
+	if err := cleanupLocalArtworkOrphans(fs, db.DataDir()); err != nil {
+		return nil, fmt.Errorf("clean local artwork staging: %w", err)
+	}
 	if err := c.normalizeLocationTopology(); err != nil {
 		return nil, fmt.Errorf("normalize library locations: %w", err)
 	}
@@ -1135,6 +1138,11 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		}
 	}
 	c.mu.RUnlock()
+	var artworkStore *localArtworkStore
+	if c.db != nil {
+		artworkStore = newLocalArtworkStore(c.fs, c.db.DataDir())
+		defer artworkStore.Close()
+	}
 	localCompleteLocations := map[string]bool{}
 	for _, completed := range completedRoots {
 		localCompleteLocations[completed.locationID] = true
@@ -1143,11 +1151,11 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	if err != nil {
 		return err
 	}
-	observations, seriesState, err := c.enrich(ctx, next, localIdentityHints, localNFOStages)
+	observations, seriesState, err := c.enrich(ctx, next, localIdentityHints, localNFOStages, artworkStore)
 	if err != nil {
 		return err
 	}
-	localPlans, localObservations, err := c.prepareLocalMetadata(ctx, next, seriesState, localScannedLocations, localCompleteLocations, localNFOStages)
+	localPlans, localObservations, err := c.prepareLocalMetadata(ctx, next, seriesState, localScannedLocations, localCompleteLocations, localNFOStages, artworkStore)
 	if err != nil {
 		return err
 	}
@@ -1167,7 +1175,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	if len(completedRoots) == 0 && len(unavailableLocations) != 0 && len(removalReviews) == 0 {
 		return unavailableLocations[0]
 	}
-	if err := c.persist(ctx, next, sources, failures, observations, conflicts, seriesState, localPlans, scanID, completedRoots); err != nil {
+	if err := c.persist(ctx, next, sources, failures, observations, conflicts, seriesState, localPlans, artworkStore, scanID, completedRoots); err != nil {
 		return err
 	}
 	for _, failure := range unavailableLocations {
@@ -1283,7 +1291,7 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	return x, nil
 }
 
-func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentities map[string]string, localStages map[string]localNFOStage) ([]scanObservation, map[string]Series, error) {
+func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentities map[string]string, localStages map[string]localNFOStage, artworkStore *localArtworkStore) ([]scanObservation, map[string]Series, error) {
 	c.mu.RLock()
 	provider, token := c.provider, ""
 	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
@@ -1394,8 +1402,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentit
 			}
 			artworkFailed := false
 			if localTransition {
-				var staged map[string]Artwork
-				staged, artworkFailed = c.stageLocalProviderArtwork(ctx, "film", id, enrichment)
+				var staged map[string]localArtworkDescriptor
+				var retries map[string]string
+				staged, retries, artworkFailed, err = c.stageLocalProviderArtwork(ctx, "film", id, enrichment, artworkStore)
 				enrichment.Poster, enrichment.Backdrop = "", ""
 				if _, ok := staged["poster"]; ok {
 					enrichment.Poster = artworkURL(id, "poster")
@@ -1405,6 +1414,8 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentit
 				}
 				stage := localStages[key]
 				stage.providerArtwork = staged
+				stage.providerArtworkRetries = retries
+				stage.providerArtworkIdentity = identity
 				localStages[key] = stage
 			} else {
 				artworkFailed, err = c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
@@ -1519,8 +1530,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentit
 				artworkFailed := false
 				var artworkErr error
 				if localTransition {
-					var staged map[string]Artwork
-					staged, artworkFailed = c.stageLocalProviderArtwork(ctx, "series", id, enrichment)
+					var staged map[string]localArtworkDescriptor
+					var retries map[string]string
+					staged, retries, artworkFailed, artworkErr = c.stageLocalProviderArtwork(ctx, "series", id, enrichment, artworkStore)
 					enrichment.Poster, enrichment.Backdrop = "", ""
 					if _, ok := staged["poster"]; ok {
 						enrichment.Poster = artworkURL(id, "poster")
@@ -1530,6 +1542,8 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentit
 					}
 					stage := localStages[key]
 					stage.providerArtwork = staged
+					stage.providerArtworkRetries = retries
+					stage.providerArtworkIdentity = identity
 					localStages[key] = stage
 				} else {
 					artworkFailed, artworkErr = c.cacheEnrichmentArtwork(ctx, identity, &enrichment, value.Poster, value.Backdrop)
@@ -1561,85 +1575,133 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentit
 		}
 		series[id] = value
 	}
-	if episodeProvider, ok := provider.(EpisodeProvider); ok && token != "" {
-		for id, item := range next {
-			if !c.metadataAccessActive(token) {
-				break
+	episodeProvider, episodeProviderAvailable := provider.(EpisodeProvider)
+	for id, item := range next {
+		parent, found := series[item.SeriesID]
+		if item.Kind != "episode" || !found {
+			continue
+		}
+		parentStage := localStages[refreshKey("series", item.SeriesID)]
+		episodeKey := refreshKey("episode", id)
+		if parentStage.restoreIdentityArtwork {
+			prior, exists, stateErr := c.loadLocalIdentityState("episode", id)
+			if stateErr != nil {
+				return nil, nil, stateErr
 			}
-			parent, found := series[item.SeriesID]
-			if item.Kind != "episode" || !found || parent.ProviderID == "" {
-				continue
+			if exists {
+				applyFieldValues(&item, prior.fields, c.lockedMetadata("episode", id))
+				item.ProviderID, item.Provider = prior.providerID, prior.fallbackProvider
+				stage := localStages[episodeKey]
+				stage.clearProviderArtwork = true
+				stage.restoreIdentityArtwork = true
+				stage.restoreIdentityState = true
+				localStages[episodeKey] = stage
+				next[id] = item
 			}
-			var enrichment Enrichment
-			var err error
-			legacyReconciliation := false
-			identity := artworkIdentity{catalogKind: "episode", catalogID: id, providerID: item.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
-			if item.ProviderID != "" {
-				enrichment, err = c.pendingArtwork(identity)
-				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
-					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
-					if err == nil && !legacyReconciliation && !forceRefresh {
-						continue
-					}
-					if err == nil {
-						enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
-					}
+			continue
+		}
+		if parent.ProviderID == "" {
+			continue
+		}
+		if !episodeProviderAvailable || token == "" || !c.metadataAccessActive(token) {
+			continue
+		}
+		parentTransition := parentStage.identityIntent
+		var enrichment Enrichment
+		var err error
+		legacyReconciliation := false
+		identity := artworkIdentity{catalogKind: "episode", catalogID: id, providerID: item.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
+		if parentTransition {
+			enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+		} else if item.ProviderID != "" {
+			enrichment, err = c.pendingArtwork(identity)
+			if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
+				legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
+				if err == nil && !legacyReconciliation && !forceRefresh {
+					continue
 				}
-			} else {
-				enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
-			}
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, nil, ctx.Err()
-				}
-				c.noteMetadataFailure(err)
-				observations = append(observations, providerFailure("episode:"+id, "provider_failed"))
-				continue
-			}
-			if legacyReconciliation && enrichment.ProviderID != item.ProviderID {
-				if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
-					return nil, nil, err
-				}
-				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
-				continue
-			}
-			if enrichment.ProviderID == "" {
-				observations = append(observations, providerFailure("episode:"+id, "unmatched"))
-				continue
-			}
-			identity = artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
-			if legacyReconciliation || forceRefresh {
-				enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
-			}
-			if legacyReconciliation {
-				if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
-					return nil, nil, err
+				if err == nil {
+					enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
 				}
 			}
-			artworkFailed, err := c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
-			if err != nil {
-				return nil, nil, err
-			}
+		} else {
+			enrichment, err = episodeProvider.LookupEpisode(ctx, token, parent.ProviderID, item.Season, item.Episode)
+		}
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
-			if artworkFailed {
-				observations = append(observations, providerFailure("episode:"+id, "provider_artwork_failed"))
-			}
-			if item.ProviderID == "" || forceRefresh {
-				item.LocalOnly = false
-				item.Provider = "tmdb"
-				item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
-				if enrichment.Title != "" {
-					item.Title = enrichment.Title
-				}
-			}
-			item.Poster, item.Backdrop = enrichment.Poster, enrichment.Backdrop
-			if previous, ok := previousItems[scanKey{item.sourceLocationID, item.rootKind, item.path}]; ok {
-				c.applyLockedFields("episode", previous.ID, &item)
-			}
-			next[id] = item
+			c.noteMetadataFailure(err)
+			observations = append(observations, providerFailure("episode:"+id, "provider_failed"))
+			continue
 		}
+		if legacyReconciliation && enrichment.ProviderID != item.ProviderID {
+			if err := c.completeLegacyArtworkReconciliation(identity); err != nil {
+				return nil, nil, err
+			}
+			observations = append(observations, providerFailure("episode:"+id, "unmatched"))
+			continue
+		}
+		if enrichment.ProviderID == "" {
+			observations = append(observations, providerFailure("episode:"+id, "unmatched"))
+			continue
+		}
+		identity = artworkIdentity{catalogKind: "episode", catalogID: id, providerID: enrichment.ProviderID, parentCatalogID: item.SeriesID, parentProviderID: parent.ProviderID}
+		if legacyReconciliation || forceRefresh {
+			enrichment = missingArtwork(enrichment, item.Poster, item.Backdrop)
+		}
+		if legacyReconciliation {
+			if err := c.stageLegacyArtworkRetries(identity, enrichment); err != nil {
+				return nil, nil, err
+			}
+		}
+		artworkFailed := false
+		if parentTransition {
+			var staged map[string]localArtworkDescriptor
+			var retries map[string]string
+			staged, retries, artworkFailed, err = c.stageLocalProviderArtwork(ctx, "episode", id, enrichment, artworkStore)
+			enrichment.Poster, enrichment.Backdrop = "", ""
+			if _, ok := staged["poster"]; ok {
+				enrichment.Poster = artworkURL(id, "poster")
+			}
+			if _, ok := staged["backdrop"]; ok {
+				enrichment.Backdrop = artworkURL(id, "backdrop")
+			}
+			stage := localStages[episodeKey]
+			stage.clearProviderArtwork = item.ProviderID != ""
+			stage.captureIdentityArtwork = true
+			stage.captureIdentityState = true
+			stage.priorProviderID, stage.priorProvider = item.ProviderID, item.Provider
+			stage.priorFields = itemFieldValues(item)
+			stage.providerArtwork = staged
+			stage.providerArtworkRetries = retries
+			stage.providerArtworkIdentity = identity
+			localStages[episodeKey] = stage
+		} else {
+			artworkFailed, err = c.cacheEnrichmentArtwork(ctx, identity, &enrichment, item.Poster, item.Backdrop)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		if artworkFailed {
+			observations = append(observations, providerFailure("episode:"+id, "provider_artwork_failed"))
+		}
+		if item.ProviderID == "" || forceRefresh || parentTransition {
+			item.LocalOnly = false
+			item.Provider = "tmdb"
+			item.ProviderID, item.Year, item.Synopsis = enrichment.ProviderID, enrichment.Year, enrichment.Synopsis
+			if enrichment.Title != "" {
+				item.Title = enrichment.Title
+			}
+		}
+		item.Poster, item.Backdrop = enrichment.Poster, enrichment.Backdrop
+		if previous, ok := previousItems[scanKey{item.sourceLocationID, item.rootKind, item.path}]; ok {
+			c.applyLockedFields("episode", previous.ID, &item)
+		}
+		next[id] = item
 	}
 	for id, value := range previousSeries {
 		if _, present := series[id]; !present || value.Demo {
@@ -1659,7 +1721,7 @@ func providerFailure(identifier, outcome string) scanObservation {
 	return scanObservation{identifier: identifier, outcome: outcome, message: message}
 }
 
-func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series, localPlans []localImportPlan, scanID string, completedRoots []rootScan) error {
+func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series, localPlans []localImportPlan, artworkStore *localArtworkStore, scanID string, completedRoots []rootScan) error {
 	c.mu.RLock()
 	previous := make(map[string]Item, len(c.items))
 	for k, v := range c.items {
@@ -1703,7 +1765,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			return err
 		}
 		defer tx.Rollback()
-		createdLocalArtwork, obsoleteLocalArtwork, err := c.persistLocalMetadataTx(tx, localPlans)
+		createdLocalArtwork, obsoleteLocalArtwork, err := c.persistLocalMetadataTx(ctx, tx, localPlans, artworkStore)
 		if err != nil {
 			for _, name := range createdLocalArtwork {
 				c.removeArtworkObject(name)
