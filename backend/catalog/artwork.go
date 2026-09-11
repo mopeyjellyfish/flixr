@@ -208,6 +208,37 @@ func (c *Catalog) cacheArtworkAndClearRetry(identity artworkIdentity, kind strin
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=? AND provider_id=? AND parent_catalog_id=? AND parent_provider_id=?)`, identity.catalogKind, identity.catalogID, kind, identity.providerID, identity.parentCatalogID, identity.parentProviderID).Scan(&pending); err != nil {
 			return "", err
 		}
+		var localObject, localType, oldFallback string
+		localErr := tx.QueryRow(`SELECT l.local_object_name,a.content_type,l.fallback_object_name FROM catalog_local_artwork l JOIN catalog_artwork a ON a.catalog_id=l.catalog_id AND a.kind=l.artwork_kind WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=?`, identity.catalogKind, identity.catalogID, kind).Scan(&localObject, &localType, &oldFallback)
+		if localErr != nil && localErr != sql.ErrNoRows {
+			return "", localErr
+		}
+		if localErr == nil {
+			name, _, err := c.replaceArtwork(tx, identity.catalogID, kind, art)
+			if err != nil {
+				return "", err
+			}
+			if _, err := tx.Exec(`UPDATE catalog_artwork SET content_type=?,object_name=? WHERE catalog_id=? AND kind=?`, localType, localObject, identity.catalogID, kind); err != nil {
+				c.removeArtworkObject(name)
+				return "", err
+			}
+			if _, err := tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name=?,fallback_content_type=?,fallback_value=? WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, name, art.ContentType, artworkURL(identity.catalogID, kind), identity.catalogKind, identity.catalogID, kind); err != nil {
+				c.removeArtworkObject(name)
+				return "", err
+			}
+			if pending != 0 {
+				if _, err := tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=? AND provider_id=? AND parent_catalog_id=? AND parent_provider_id=?`, identity.catalogKind, identity.catalogID, kind, identity.providerID, identity.parentCatalogID, identity.parentProviderID); err != nil {
+					c.removeArtworkObject(name)
+					return "", err
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				c.removeArtworkObject(name)
+				return "", err
+			}
+			c.removeArtworkObject(oldFallback)
+			return artworkURL(identity.catalogID, kind), nil
+		}
 		name, previous, err := c.replaceArtwork(tx, identity.catalogID, kind, art)
 		if err != nil {
 			return "", err
@@ -388,15 +419,12 @@ func missingArtwork(enrichment Enrichment, existingPoster, existingBackdrop stri
 }
 
 func (c *Catalog) unlockedArtwork(kind, id string, enrichment Enrichment) Enrichment {
-	if kind == "episode" {
-		return enrichment
-	}
 	fields, err := c.MetadataFields(kind, id)
 	if err != nil {
 		return enrichment
 	}
 	for _, field := range fields {
-		if !field.Locked {
+		if !field.Locked && field.Source != "local" {
 			continue
 		}
 		switch field.Field {
@@ -668,7 +696,7 @@ func (c *Catalog) cleanupArtworkObjectsLocked() error {
 			continue
 		}
 		var count int
-		if err := c.db.QueryRow(`SELECT count(*) FROM catalog_artwork WHERE object_name=?`, entry.Name()).Scan(&count); err != nil {
+		if err := c.db.QueryRow(`SELECT (SELECT count(*) FROM catalog_artwork WHERE object_name=?)+(SELECT count(*) FROM catalog_local_artwork WHERE local_object_name=? OR fallback_object_name=?)+(SELECT count(*) FROM catalog_local_identity_artwork WHERE object_name=?)`, entry.Name(), entry.Name(), entry.Name(), entry.Name()).Scan(&count); err != nil {
 			return err
 		}
 		if count == 0 {

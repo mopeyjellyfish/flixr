@@ -918,7 +918,7 @@ func (c *Catalog) captureScanJobFilesTx(tx *sql.Tx, jobID, libraryID, scanID str
 	if _, err := tx.Exec(`UPDATE scan_job_files SET outcome='succeeded',error_code='',message='',retryable=0 WHERE job_id=? AND outcome='queued'`, jobID); err != nil {
 		return err
 	}
-	rows, err := c.db.Query(`SELECT relative_path,outcome,message FROM scan_files WHERE scan_id=? AND outcome IN ('failed','unmatched') ORDER BY relative_path`, scanID)
+	rows, err := c.db.Query(`SELECT relative_path,outcome,message FROM scan_files WHERE scan_id=? AND outcome IN ('failed','unmatched','local_metadata_invalid','local_metadata_ignored','local_artwork_invalid') ORDER BY relative_path`, scanID)
 	if err != nil {
 		return err
 	}
@@ -947,6 +947,18 @@ func (c *Catalog) captureScanJobFilesTx(tx *sql.Tx, jobID, libraryID, scanID str
 		}
 		code := "probe_failed"
 		retryable := outcome == "failed"
+		if strings.HasPrefix(outcome, "local_") {
+			code = outcome
+			retryable = false
+			message := strings.TrimSpace(strings.TrimPrefix(raw, outcome+":"))
+			if message == "" {
+				message = "The local metadata sidecar was ignored. Correct it and scan again."
+			}
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO scan_job_files(job_id,location_id,relative_path,outcome,error_code,message,retryable) VALUES(?,?,?,?,?,?,?)`, jobID, locationID, relative, outcome, code, message, retryable); err != nil {
+				return err
+			}
+			continue
+		}
 		if outcome == "unmatched" {
 			code = "metadata_unmatched"
 			retryable = false

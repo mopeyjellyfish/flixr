@@ -84,6 +84,37 @@ func TestSchedulerPollsLibraryAndSkipsUnchangedMedia(t *testing.T) {
 	}
 }
 
+func TestScanJobSurfacesSafeLocalMetadataDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "film.nfo"), []byte(`<!DOCTYPE movie SYSTEM "https://example.invalid/x"><movie/>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+	if err != nil || c.SetRoots(root, "") != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartScanScheduler(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Shutdown(context.Background())
+	job, err := c.QueueLibraryScan("films", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job = waitScanJob(t, c, job.ID)
+	if len(job.Files) != 1 || job.Files[0].RelativePath != "film.nfo" || job.Files[0].ErrorCode != "local_metadata_invalid" || job.Files[0].Retryable || strings.Contains(job.Files[0].Message, root) {
+		t.Fatalf("local diagnostic=%#v", job.Files)
+	}
+}
+
 func TestIncrementalScanDoesNotReprobeUnchangedMediaWithSidecars(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"film.mp4", "film.eng.aac"} {
