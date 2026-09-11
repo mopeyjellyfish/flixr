@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
 )
@@ -766,6 +767,144 @@ func TestSeriesIdentityTransitionStagesDependentEpisodeArtworkAtomically(t *test
 			got, _, err := c.Artwork(episode.ID, "poster")
 			if err != nil || !bytes.Equal(got, episodeOne) {
 				t.Fatalf("published episode art changed=%d %v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestSeriesOwnerIdentityChangeRetiresDependentEpisodeFallbacks(t *testing.T) {
+	for _, action := range []string{"match", "unmatch"} {
+		t.Run(action, func(t *testing.T) {
+			tv := t.TempDir()
+			show := filepath.Join(tv, "Show")
+			if err := os.MkdirAll(show, 0700); err != nil {
+				t.Fatal(err)
+			}
+			episodePath := filepath.Join(show, "Show.S01E01.mp4")
+			if err := os.WriteFile(episodePath, []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			seriesOne, seriesTwo := testPNG(t, 2, 2), testPNG(t, 3, 3)
+			episodeOne, episodeTwo, episodeLocal := testPNG(t, 4, 4), testPNG(t, 5, 5), testPNG(t, 6, 6)
+			provider := seriesIdentityArtworkProvider{art: map[string][]byte{"series-1": seriesOne, "series-2": seriesTwo, "series-9": testPNG(t, 7, 7), "episode-1": episodeOne, "episode-2": episodeTwo}}
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.SetProvider(provider)
+			if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots("", tv) != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			var episode Item
+			for _, value := range c.items {
+				if value.Kind == "episode" {
+					episode = value
+				}
+			}
+			if err := os.WriteFile(filepath.Join(show, "Show.S01E01-poster.png"), episodeLocal, 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(show, "tvshow.nfo"), []byte(`<tvshow><uniqueid type="tmdb">2</uniqueid></tvshow>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			rows, err := db.Query(`SELECT object_name FROM catalog_local_identity_artwork WHERE (catalog_kind='series' AND catalog_id=?) OR (catalog_kind='episode' AND catalog_id=?)`, episode.SeriesID, episode.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var retired []string
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err != nil {
+					rows.Close()
+					t.Fatal(err)
+				}
+				retired = append(retired, name)
+			}
+			if err := rows.Close(); err != nil || len(retired) < 2 {
+				t.Fatalf("identity objects=%v %v", retired, err)
+			}
+			if action == "match" {
+				if _, err := c.Match(context.Background(), "series", episode.SeriesID, "9", "", ""); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := c.Unmatch("series", episode.SeriesID); err != nil {
+				t.Fatal(err)
+			}
+			var stateRows, artRows int
+			if err := db.QueryRow(`SELECT count(*) FROM catalog_local_identity_state WHERE catalog_kind='episode' AND catalog_id=?`, episode.ID).Scan(&stateRows); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT count(*) FROM catalog_local_identity_artwork WHERE catalog_kind='episode' AND catalog_id=?`, episode.ID).Scan(&artRows); err != nil || stateRows != 0 || artRows != 0 {
+				t.Fatalf("dependent fallbacks state=%d art=%d err=%v", stateRows, artRows, err)
+			}
+			got, _, err := c.Artwork(episode.ID, "poster")
+			if err != nil || !bytes.Equal(got, episodeLocal) {
+				t.Fatalf("active local episode artwork=%d %v", len(got), err)
+			}
+			for _, name := range retired {
+				if _, err := os.Stat(filepath.Join(db.DataDir(), "artwork", "objects", name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("retired identity object %q remains: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDescriptorFreeIdentityArtworkMutationUsesArtworkLock(t *testing.T) {
+	for _, mode := range []string{"offline restore", "failed fetch retry"} {
+		t.Run(mode, func(t *testing.T) {
+			films := t.TempDir()
+			if err := os.WriteFile(filepath.Join(films, "Film.mp4"), []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			one, two := testPNG(t, 2, 2), testPNG(t, 3, 3)
+			provider := identityArtworkProvider{art: map[string][]byte{"poster-1": one, "poster-2": two}}
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.SetProvider(provider)
+			if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			nfoPath := filepath.Join(films, "Film.nfo")
+			if mode == "offline restore" {
+				if err := os.WriteFile(nfoPath, []byte(`<movie><uniqueid type="tmdb">2</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+					t.Fatal(err)
+				}
+				c.SetProvider(nil)
+				if err := os.WriteFile(nfoPath, []byte(`<movie/>`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				provider.fail = map[string]int{"poster-2": 1}
+				c.SetProvider(provider)
+				if err := os.WriteFile(nfoPath, []byte(`<movie><uniqueid type="tmdb">2</uniqueid></movie>`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.artworkMu.Lock()
+			done := make(chan error, 1)
+			go func() { done <- c.Scan(context.Background(), 1) }()
+			select {
+			case err := <-done:
+				c.artworkMu.Unlock()
+				t.Fatalf("scan bypassed artwork lock: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			c.artworkMu.Unlock()
+			if err := <-done; err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

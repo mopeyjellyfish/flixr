@@ -1751,7 +1751,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 	if c.db != nil {
 		hasLocalArtwork := false
 		for _, plan := range localPlans {
-			if len(plan.artwork) != 0 || len(plan.providerArtwork) != 0 {
+			if len(plan.artwork) != 0 || len(plan.providerArtwork) != 0 || len(plan.providerArtworkRetries) != 0 || plan.clearProviderArtwork || plan.captureIdentityArtwork || plan.restoreIdentityArtwork {
 				hasLocalArtwork = true
 				break
 			}

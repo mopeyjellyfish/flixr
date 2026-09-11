@@ -269,7 +269,7 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 		return Item{}, err
 	}
 	defer tx.Rollback()
-	identityRows, err := tx.Query(`SELECT object_name FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID)
+	identityRows, err := tx.Query(`SELECT object_name FROM catalog_local_identity_artwork WHERE (catalog_kind=? AND catalog_id=?) OR (?='series' AND catalog_kind='episode' AND catalog_id IN (SELECT id FROM catalog_items WHERE series_id=?))`, kind, item.ID, kind, item.ID)
 	if err != nil {
 		return Item{}, err
 	}
@@ -284,10 +284,10 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 	if err := identityRows.Close(); err != nil {
 		return Item{}, err
 	}
-	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_artwork WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_artwork WHERE (catalog_kind=? AND catalog_id=?) OR (?='series' AND catalog_kind='episode' AND catalog_id IN (SELECT id FROM catalog_items WHERE series_id=?))`, kind, item.ID, kind, item.ID); err != nil {
 		return Item{}, err
 	}
-	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_state WHERE catalog_kind=? AND catalog_id=?`, kind, item.ID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM catalog_local_identity_state WHERE (catalog_kind=? AND catalog_id=?) OR (?='series' AND catalog_kind='episode' AND catalog_id IN (SELECT id FROM catalog_items WHERE series_id=?))`, kind, item.ID, kind, item.ID); err != nil {
 		return Item{}, err
 	}
 	if hasLocal {
