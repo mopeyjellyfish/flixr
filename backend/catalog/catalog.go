@@ -1135,7 +1135,11 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		}
 	}
 	c.mu.RUnlock()
-	observations, seriesState, err := c.enrich(ctx, next)
+	localIdentityHints, localNFOStages, err := c.localIdentityHints(ctx, next, localScannedLocations)
+	if err != nil {
+		return err
+	}
+	observations, seriesState, err := c.enrich(ctx, next, localIdentityHints)
 	if err != nil {
 		return err
 	}
@@ -1143,7 +1147,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	for _, completed := range completedRoots {
 		localCompleteLocations[completed.locationID] = true
 	}
-	localPlans, localObservations, err := c.prepareLocalMetadata(ctx, next, seriesState, localScannedLocations, localCompleteLocations)
+	localPlans, localObservations, err := c.prepareLocalMetadata(ctx, next, seriesState, localScannedLocations, localCompleteLocations, localNFOStages)
 	if err != nil {
 		return err
 	}
@@ -1279,7 +1283,7 @@ func (c *Catalog) inspect(ctx context.Context, f scanFile) (Item, error) {
 	return x, nil
 }
 
-func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObservation, map[string]Series, error) {
+func (c *Catalog) enrich(ctx context.Context, next map[string]Item, localIdentities map[string]string) ([]scanObservation, map[string]Series, error) {
 	c.mu.RLock()
 	provider, token := c.provider, ""
 	if resolved, _ := c.effectiveTMDBTokenLocked(); resolved != "" {
@@ -1304,6 +1308,13 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			if previous.ProviderID != "" || previous.OwnerMatch || previous.OwnerUnmatch {
 				item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
 			}
+			localIdentity := localIdentities[refreshKey("film", id)]
+			if item.Kind == "film" && localIdentity != "" && providerIdentity(item.Provider, "film", item.ProviderID) != providerIdentity("tmdb", "film", localIdentity) {
+				item.Title, item.Year, item.Synopsis, item.Poster, item.Backdrop = title(item.path), 0, "", "", ""
+				item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence = "", "", "", "", 0
+				item.LocalOnly = true
+				c.applyLockedFields("film", previous.ID, &item)
+			}
 			next[id] = item
 		}
 	}
@@ -1319,7 +1330,17 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 			var err error
 			legacyReconciliation := false
 			identity := artworkIdentity{catalogKind: "film", catalogID: id, providerID: item.ProviderID}
-			if item.ProviderID != "" {
+			localIdentity := localIdentities[refreshKey("film", id)]
+			if localIdentity != "" {
+				if exact, ok := provider.(CandidateProvider); ok {
+					enrichment, err = exact.ByID(ctx, token, "film", localIdentity, item.Language, item.Region)
+					if err == nil && providerIdentity("tmdb", "film", enrichment.ProviderID) != providerIdentity("tmdb", "film", localIdentity) {
+						enrichment = Enrichment{}
+					}
+				} else {
+					continue
+				}
+			} else if item.ProviderID != "" {
 				enrichment, err = c.pendingArtwork(identity)
 				if err == nil && enrichment.Poster == "" && enrichment.Backdrop == "" {
 					legacyReconciliation, err = c.pendingLegacyArtworkReconciliation(identity)
@@ -1410,7 +1431,19 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 		attempted := false
 		legacyReconciliation := false
 		identity := artworkIdentity{catalogKind: "series", catalogID: id, providerID: previous.ProviderID}
-		if retained && (previous.ProviderID != "" || previous.OwnerUnmatch) {
+		localIdentity := localIdentities[refreshKey("series", id)]
+		if localIdentity != "" && retained && providerIdentity(previous.Provider, "series", previous.ProviderID) != providerIdentity("tmdb", "series", localIdentity) {
+			previous, retained = Series{}, false
+		}
+		if localIdentity != "" && provider != nil && c.metadataAccessActive(token) {
+			if exact, ok := provider.(CandidateProvider); ok {
+				enrichment, enrichmentErr = exact.ByID(ctx, token, "series", localIdentity, previous.Language, previous.Region)
+				if enrichmentErr == nil && providerIdentity("tmdb", "series", enrichment.ProviderID) != providerIdentity("tmdb", "series", localIdentity) {
+					enrichment = Enrichment{}
+				}
+				attempted = true
+			}
+		} else if retained && (previous.ProviderID != "" || previous.OwnerUnmatch) {
 			value.Title = previous.Title
 			value.ProviderID, value.Provider, value.Language, value.Region, value.Confidence, value.OwnerMatch, value.OwnerUnmatch, value.Year, value.Synopsis, value.Poster, value.Backdrop = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop
 			value.LocalOnly = previous.LocalOnly

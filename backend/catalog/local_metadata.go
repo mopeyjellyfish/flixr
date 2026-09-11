@@ -26,10 +26,11 @@ import (
 const maxLocalNFOBytes = 512 << 10
 
 type localNFO struct {
-	Fields     map[string]string
-	ProviderID string
-	Ignored    []string
-	Invalid    []string
+	Fields            map[string]string
+	ProviderID        string
+	Ignored           []string
+	Invalid           []string
+	providerIDInvalid bool
 }
 
 type localCandidates struct {
@@ -47,8 +48,10 @@ type localImportPlan struct {
 	fields, fallback                          map[string]string
 	previous                                  map[string]string
 	providerID, fallbackProviderID            string
+	previousProviderID                        string
 	fallbackProvider                          string
 	remove                                    bool
+	clearProviderArtwork                      bool
 	artwork                                   map[string]localArtworkPlan
 }
 
@@ -57,6 +60,15 @@ type localArtworkPlan struct {
 	artwork             Artwork
 	fallbackValue       string
 	remove              bool
+}
+
+type localTarget struct{ kind, id, locationID, root, mediaPath string }
+type localNFOStage struct {
+	source, fingerprint  string
+	parsed               localNFO
+	found                bool
+	err                  error
+	clearProviderArtwork bool
 }
 
 func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO, error) {
@@ -81,6 +93,7 @@ func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO,
 	decoder.Strict = true
 	depth := 0
 	root := ""
+	rootComplete := false
 	var tags, ignored []string
 	var yearFallback string
 	providerIDs := map[string]bool{}
@@ -97,6 +110,9 @@ func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO,
 		}
 		switch value := token.(type) {
 		case xml.StartElement:
+			if depth == 0 && rootComplete {
+				return localNFO{}, errors.New("local NFO must contain exactly one XML document root")
+			}
 			depth++
 			name := strings.ToLower(value.Name.Local)
 			if depth == 1 {
@@ -153,7 +169,10 @@ func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO,
 						namespace = strings.ToLower(strings.TrimSpace(attr.Value))
 					}
 				}
-				if namespace != "tmdb" || providerIdentity(namespace, kind, text) == "" {
+				if namespace == "tmdb" && providerIdentity(namespace, kind, text) == "" {
+					result.Invalid = append(result.Invalid, "uniqueid")
+					result.providerIDInvalid = true
+				} else if namespace != "tmdb" {
 					ignored = append(ignored, "uniqueid")
 				} else {
 					providerIDs[text] = true
@@ -163,9 +182,24 @@ func parseLocalNFO(ctx context.Context, kind string, input io.Reader) (localNFO,
 			}
 		case xml.EndElement:
 			depth--
+			if depth == 0 {
+				rootComplete = true
+			}
+		case xml.CharData:
+			if depth == 0 && strings.TrimSpace(string(value)) != "" {
+				return localNFO{}, errors.New("local NFO contains text outside its XML document root")
+			}
+		case xml.Comment, xml.Directive:
+			if depth == 0 {
+				return localNFO{}, errors.New("local NFO must contain only whitespace outside its XML document root")
+			}
+		case xml.ProcInst:
+			if depth == 0 && (!strings.EqualFold(value.Target, "xml") || root != "") {
+				return localNFO{}, errors.New("local NFO must contain only whitespace outside its XML document root")
+			}
 		}
 	}
-	if root == "" {
+	if root == "" || !rootComplete {
 		return localNFO{}, errors.New("local NFO is empty")
 	}
 	if result.Fields["year"] == "" && yearFallback != "" {
@@ -230,7 +264,7 @@ func artworkCandidates(dir, stem string) []string {
 	return out
 }
 
-func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Item, series map[string]Series, scannedLocations, completeLocations map[string]bool) ([]localImportPlan, []scanObservation, error) {
+func (c *Catalog) localTargets(items map[string]Item, scannedLocations map[string]bool) ([]localTarget, map[string]map[string]int) {
 	movieCounts := map[string]map[string]int{}
 	for _, item := range items {
 		if item.Kind != "film" {
@@ -241,9 +275,8 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 		}
 		movieCounts[item.sourceLocationID][path.Dir(item.path)]++
 	}
-	type target struct{ kind, id, locationID, root, mediaPath string }
-	targets := make([]target, 0, len(items)+len(series))
-	seriesSource := map[string]target{}
+	targets := make([]localTarget, 0, len(items))
+	seriesSource := map[string]localTarget{}
 	for _, item := range items {
 		if !scannedLocations[item.sourceLocationID] {
 			continue
@@ -252,11 +285,11 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 		if rootErr != nil {
 			continue
 		}
-		targets = append(targets, target{item.Kind, item.ID, item.sourceLocationID, root, item.path})
+		targets = append(targets, localTarget{item.Kind, item.ID, item.sourceLocationID, root, item.path})
 		if item.Kind == "episode" {
 			parts := strings.Split(filepath.ToSlash(item.path), "/")
 			if len(parts) > 1 {
-				candidate := target{"series", item.SeriesID, item.sourceLocationID, root, parts[0]}
+				candidate := localTarget{"series", item.SeriesID, item.sourceLocationID, root, parts[0]}
 				current, ok := seriesSource[item.SeriesID]
 				if !ok || candidate.locationID+"/"+candidate.mediaPath < current.locationID+"/"+current.mediaPath {
 					seriesSource[item.SeriesID] = candidate
@@ -264,11 +297,65 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 			}
 		}
 	}
-	for id := range series {
-		if source, ok := seriesSource[id]; ok {
-			targets = append(targets, source)
-		}
+	for _, source := range seriesSource {
+		targets = append(targets, source)
 	}
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].locationID+"/"+targets[i].mediaPath+"/"+targets[i].kind < targets[j].locationID+"/"+targets[j].mediaPath+"/"+targets[j].kind
+	})
+	return targets, movieCounts
+}
+
+func (c *Catalog) localIdentityHints(ctx context.Context, items map[string]Item, scannedLocations map[string]bool) (map[string]string, map[string]localNFOStage, error) {
+	targets, movieCounts := c.localTargets(items, scannedLocations)
+	hints := map[string]string{}
+	stages := map[string]localNFOStage{}
+	c.mu.RLock()
+	previousSeries := make(map[string]Series, len(c.series))
+	for id, value := range c.series {
+		previousSeries[id] = value
+	}
+	c.mu.RUnlock()
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		candidates := localSidecarCandidates(target.kind, target.mediaPath, movieCounts[target.locationID])
+		source, found, candidateErr := firstRegularLocalFile(target.root, candidates.nfo)
+		stage := localNFOStage{source: source, found: found, err: candidateErr}
+		if candidateErr == nil && found {
+			stage.parsed, stage.fingerprint, stage.err = readLocalNFO(ctx, target.kind, target.root, source)
+		}
+		key := refreshKey(target.kind, target.id)
+		stages[key] = stage
+		if stage.err != nil || stage.parsed.ProviderID == "" || stage.parsed.providerIDInvalid {
+			continue
+		}
+		ownerMatch, ownerUnmatch, currentID := false, false, ""
+		if target.kind == "series" {
+			value := previousSeries[target.id]
+			ownerMatch, ownerUnmatch, currentID = value.OwnerMatch, value.OwnerUnmatch, value.ProviderID
+		} else {
+			value := items[target.id]
+			ownerMatch, ownerUnmatch, currentID = value.OwnerMatch, value.OwnerUnmatch, value.ProviderID
+		}
+		if ownerUnmatch || (ownerMatch && providerIdentity("tmdb", target.kind, currentID) != providerIdentity("tmdb", target.kind, stage.parsed.ProviderID)) {
+			continue
+		}
+		stage.clearProviderArtwork = currentID != "" && providerIdentity("tmdb", target.kind, currentID) != providerIdentity("tmdb", target.kind, stage.parsed.ProviderID)
+		stages[key] = stage
+		if state, hasState, stateErr := c.loadLocalDocument(target.kind, target.id); stateErr != nil {
+			return nil, nil, stateErr
+		} else if hasState && providerIdentity("tmdb", target.kind, state.providerID) == providerIdentity("tmdb", target.kind, stage.parsed.ProviderID) {
+			continue
+		}
+		hints[key] = stage.parsed.ProviderID
+	}
+	return hints, stages, nil
+}
+
+func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Item, series map[string]Series, scannedLocations, completeLocations map[string]bool, stages map[string]localNFOStage) ([]localImportPlan, []scanObservation, error) {
+	targets, movieCounts := c.localTargets(items, scannedLocations)
 	var plans []localImportPlan
 	var observations []scanObservation
 	for _, target := range targets {
@@ -280,15 +367,19 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 			return nil, nil, err
 		}
 		candidates := localSidecarCandidates(target.kind, target.mediaPath, movieCounts[target.locationID])
-		nfoPath, found, candidateErr := firstRegularLocalFile(target.root, candidates.nfo)
-		plan := localImportPlan{kind: target.kind, id: target.id, locationID: target.locationID, fields: map[string]string{}, fallback: map[string]string{}, previous: cloneStrings(state.fields), artwork: map[string]localArtworkPlan{}}
+		stage := stages[refreshKey(target.kind, target.id)]
+		nfoPath, found, candidateErr := stage.source, stage.found, stage.err
+		plan := localImportPlan{kind: target.kind, id: target.id, locationID: target.locationID, fields: map[string]string{}, fallback: map[string]string{}, previous: cloneStrings(state.fields), previousProviderID: state.providerID, clearProviderArtwork: stage.clearProviderArtwork, artwork: map[string]localArtworkPlan{}}
 		if candidateErr != nil {
 			observations = append(observations, localObservation(target.locationID, target.kind, nfoPath, "local_metadata_invalid", candidateErr.Error()))
 		} else if found {
-			parsed, fingerprint, parseErr := readLocalNFO(ctx, target.kind, target.root, nfoPath)
+			parsed, fingerprint, parseErr := stage.parsed, stage.fingerprint, stage.err
 			if parseErr != nil {
 				observations = append(observations, localObservation(target.locationID, target.kind, nfoPath, "local_metadata_invalid", parseErr.Error()))
 			} else {
+				if parsed.providerIDInvalid && state.providerID != "" {
+					parsed.ProviderID = state.providerID
+				}
 				for _, field := range parsed.Invalid {
 					if previous, ok := state.fields[field]; ok {
 						parsed.Fields[field] = previous
@@ -316,11 +407,15 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 			applyLocalPlan(&plan, items, series, c.lockedMetadata(target.kind, target.id))
 			plans = append(plans, plan)
 		}
+		lockedFields := c.lockedMetadata(target.kind, target.id)
 		for artworkKind, paths := range map[string][]string{"poster": candidates.poster, "backdrop": candidates.backdrop} {
 			assetPath, exists, candidateErr := firstRegularLocalFile(target.root, paths)
 			hasAsset, priorFallbackValue, err := c.localArtworkState(target.kind, target.id, artworkKind)
 			if err != nil {
 				return nil, nil, err
+			}
+			if lockedFields[artworkKind] {
+				continue
 			}
 			if candidateErr != nil {
 				observations = append(observations, localObservation(target.locationID, target.kind, assetPath, "local_artwork_invalid", candidateErr.Error()))
@@ -337,13 +432,13 @@ func (c *Catalog) prepareLocalMetadata(ctx context.Context, items map[string]Ite
 					plans = append(plans, plan)
 				}
 				plans[len(plans)-1].artwork[artworkKind] = assetPlan
-				setArtworkValue(target.kind, target.id, artworkKind, artworkURL(target.id, artworkKind), items, series, c.lockedMetadata(target.kind, target.id)[artworkKind])
+				setArtworkValue(target.kind, target.id, artworkKind, artworkURL(target.id, artworkKind), items, series, false)
 			} else if hasAsset && completeLocations[target.locationID] {
 				if len(plans) == 0 || plans[len(plans)-1].kind != target.kind || plans[len(plans)-1].id != target.id {
 					plans = append(plans, plan)
 				}
 				plans[len(plans)-1].artwork[artworkKind] = localArtworkPlan{remove: true, fallbackValue: priorFallbackValue}
-				setArtworkValue(target.kind, target.id, artworkKind, priorFallbackValue, items, series, c.lockedMetadata(target.kind, target.id)[artworkKind])
+				setArtworkValue(target.kind, target.id, artworkKind, priorFallbackValue, items, series, false)
 			}
 		}
 	}
@@ -595,6 +690,8 @@ func applyLocalPlan(plan *localImportPlan, items map[string]Item, series map[str
 	provider := "tmdb"
 	if plan.remove {
 		values, providerID, provider = plan.fallback, plan.fallbackProviderID, plan.fallbackProvider
+	} else if plan.previousProviderID != "" && plan.providerID == "" {
+		providerID, provider = plan.fallbackProviderID, plan.fallbackProvider
 	}
 	if plan.kind == "series" {
 		x := series[plan.id]
@@ -603,7 +700,7 @@ func applyLocalPlan(plan *localImportPlan, items map[string]Item, series map[str
 			applyRemovedLocalFields(&item, plan.previous, plan.fields, plan.fallback, locked)
 		}
 		applyFieldValues(&item, values, locked)
-		if !plan.remove && plan.providerID != "" {
+		if !plan.remove && (plan.providerID != "" || plan.previousProviderID != "") {
 			x.ProviderID, x.Provider = providerID, provider
 		}
 		if plan.remove {
@@ -618,7 +715,7 @@ func applyLocalPlan(plan *localImportPlan, items map[string]Item, series map[str
 		applyRemovedLocalFields(&x, plan.previous, plan.fields, plan.fallback, locked)
 	}
 	applyFieldValues(&x, values, locked)
-	if !plan.remove && plan.providerID != "" {
+	if !plan.remove && (plan.providerID != "" || plan.previousProviderID != "") {
 		x.ProviderID, x.Provider = providerID, provider
 	}
 	if plan.remove {
@@ -680,6 +777,53 @@ func setArtworkValue(kind, id, artworkKind, value string, items map[string]Item,
 
 func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (created, obsolete []string, err error) {
 	for _, plan := range plans {
+		if plan.clearProviderArtwork {
+			rows, queryErr := tx.Query(`SELECT object_name FROM catalog_artwork a WHERE catalog_id=? AND NOT EXISTS (SELECT 1 FROM catalog_local_artwork l WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=a.kind)`, plan.id, plan.kind, plan.id)
+			if queryErr != nil {
+				err = queryErr
+				return
+			}
+			for rows.Next() {
+				var name string
+				if scanErr := rows.Scan(&name); scanErr != nil {
+					rows.Close()
+					err = scanErr
+					return
+				}
+				obsolete = append(obsolete, name)
+			}
+			if rowsErr := rows.Close(); rowsErr != nil {
+				err = rowsErr
+				return
+			}
+			if _, err = tx.Exec(`DELETE FROM catalog_artwork WHERE catalog_id=? AND NOT EXISTS (SELECT 1 FROM catalog_local_artwork l WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=catalog_artwork.kind)`, plan.id, plan.kind, plan.id); err != nil {
+				return
+			}
+			fallbackRows, queryErr := tx.Query(`SELECT fallback_object_name FROM catalog_local_artwork WHERE catalog_kind=? AND catalog_id=? AND fallback_object_name<>''`, plan.kind, plan.id)
+			if queryErr != nil {
+				err = queryErr
+				return
+			}
+			for fallbackRows.Next() {
+				var name string
+				if scanErr := fallbackRows.Scan(&name); scanErr != nil {
+					fallbackRows.Close()
+					err = scanErr
+					return
+				}
+				obsolete = append(obsolete, name)
+			}
+			if rowsErr := fallbackRows.Close(); rowsErr != nil {
+				err = rowsErr
+				return
+			}
+			if _, err = tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name='',fallback_content_type='',fallback_value='' WHERE catalog_kind=? AND catalog_id=?`, plan.kind, plan.id); err != nil {
+				return
+			}
+			if _, err = tx.Exec(`DELETE FROM catalog_artwork_retries WHERE catalog_kind=? AND catalog_id=?`, plan.kind, plan.id); err != nil {
+				return
+			}
+		}
 		if plan.remove {
 			for field, value := range plan.fallback {
 				if err = restoreLocalFieldTx(tx, plan.kind, plan.id, field, value, plan.fallbackProvider != ""); err != nil {
@@ -740,13 +884,15 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 			var oldLocal, fallbackObject, fallbackType, fallbackValue string
 			rowErr := tx.QueryRow(`SELECT local_object_name,fallback_object_name,fallback_content_type,fallback_value FROM catalog_local_artwork WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, plan.kind, plan.id, artworkKind).Scan(&oldLocal, &fallbackObject, &fallbackType, &fallbackValue)
 			if rowErr == sql.ErrNoRows {
-				_ = tx.QueryRow(`SELECT object_name,content_type FROM catalog_artwork WHERE catalog_id=? AND kind=?`, plan.id, artworkKind).Scan(&fallbackObject, &fallbackType)
 				fallbackValue = asset.fallbackValue
+				if fallbackValue != "" {
+					_ = tx.QueryRow(`SELECT object_name,content_type FROM catalog_artwork WHERE catalog_id=? AND kind=?`, plan.id, artworkKind).Scan(&fallbackObject, &fallbackType)
+				}
 			} else if rowErr != nil {
 				err = rowErr
 				return
 			}
-			name, _, replaceErr := c.replaceArtwork(tx, plan.id, artworkKind, asset.artwork)
+			name, previousObject, replaceErr := c.replaceArtwork(tx, plan.id, artworkKind, asset.artwork)
 			if replaceErr != nil {
 				err = replaceErr
 				return
@@ -754,6 +900,8 @@ func (c *Catalog) persistLocalMetadataTx(tx *sql.Tx, plans []localImportPlan) (c
 			created = append(created, name)
 			if oldLocal != "" {
 				obsolete = append(obsolete, oldLocal)
+			} else if fallbackObject == "" {
+				obsolete = append(obsolete, previousObject)
 			}
 			if _, err = tx.Exec(`INSERT INTO catalog_local_artwork(catalog_kind,catalog_id,artwork_kind,location_id,relative_path,fingerprint,local_object_name,fallback_object_name,fallback_content_type,fallback_value) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(catalog_kind,catalog_id,artwork_kind) DO UPDATE SET location_id=excluded.location_id,relative_path=excluded.relative_path,fingerprint=excluded.fingerprint,local_object_name=excluded.local_object_name`, plan.kind, plan.id, artworkKind, plan.locationID, asset.source, asset.fingerprint, name, fallbackObject, fallbackType, fallbackValue); err != nil {
 				return

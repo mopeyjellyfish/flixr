@@ -279,14 +279,20 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 		}
 	}
 	for _, artworkKind := range []string{"poster", "backdrop"} {
-		art, ok := artwork.available[artworkKind]
-		if !ok {
-			continue
-		}
 		var localObject, localType, oldFallback string
 		localErr := tx.QueryRow(`SELECT l.local_object_name,a.content_type,l.fallback_object_name FROM catalog_local_artwork l JOIN catalog_artwork a ON a.catalog_id=l.catalog_id AND a.kind=l.artwork_kind WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=?`, kind, item.ID, artworkKind).Scan(&localObject, &localType, &oldFallback)
 		if localErr != nil && localErr != sql.ErrNoRows {
 			return Item{}, localErr
+		}
+		art, ok := artwork.available[artworkKind]
+		if !ok {
+			if localErr == nil {
+				if _, err := tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name='',fallback_content_type='',fallback_value='' WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, kind, item.ID, artworkKind); err != nil {
+					return Item{}, err
+				}
+				replaced = append(replaced, oldFallback)
+			}
+			continue
 		}
 		name, previous, err := c.replaceArtwork(tx, item.ID, artworkKind, art)
 		if err != nil {

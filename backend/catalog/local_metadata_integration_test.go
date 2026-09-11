@@ -14,6 +14,37 @@ import (
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 )
 
+type mismatchedLocalIDProvider struct {
+	art     []byte
+	exactID string
+}
+
+func (p mismatchedLocalIDProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "99", Title: "Wrong 99", Synopsis: "Wrong synopsis", Year: 1999, Poster: "poster99"}, nil
+}
+func (p mismatchedLocalIDProvider) ByID(context.Context, string, string, string, string, string) (catalog.Enrichment, error) {
+	id := p.exactID
+	if id == "" {
+		id = "99"
+	}
+	return catalog.Enrichment{ProviderID: id, Title: "Exact title", Synopsis: "Exact synopsis", Year: 2024, Poster: "poster"}, nil
+}
+func (p mismatchedLocalIDProvider) Candidates(context.Context, string, string, string, string, string) ([]catalog.Candidate, error) {
+	return nil, nil
+}
+func (p mismatchedLocalIDProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	return catalog.Artwork{Bytes: p.art, ContentType: "image/png"}, nil
+}
+
+type lookupOnlyLocalIDProvider struct{ art []byte }
+
+func (p lookupOnlyLocalIDProvider) Lookup(context.Context, string, string, string) (catalog.Enrichment, error) {
+	return catalog.Enrichment{ProviderID: "99", Title: "Stale 99", Synopsis: "Stale synopsis", Year: 1999, Poster: "poster99"}, nil
+}
+func (p lookupOnlyLocalIDProvider) FetchArtwork(context.Context, string) (catalog.Artwork, error) {
+	return catalog.Artwork{Bytes: p.art, ContentType: "image/png"}, nil
+}
+
 func TestLocalMovieNFOOverridesOfflineAndRemovalRestoresFilename(t *testing.T) {
 	films, data := t.TempDir(), t.TempDir()
 	writeMedia(t, filepath.Join(films, "Filename.Title.2020.mp4"))
@@ -295,6 +326,161 @@ func TestLocalMetadataCancellationAndRestartPreserveCommittedState(t *testing.T)
 	if got := reopened.MetadataTargets()[0]; got.Title != "Committed" {
 		t.Fatalf("restarted state=%#v", got)
 	}
+}
+
+func TestLocalProviderIDsRespectOwnerUnmatchAndSurfaceConflicts(t *testing.T) {
+	t.Run("owner unmatch", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		if err := c.SetRoots(films, ""); err != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		item := c.MetadataTargets()[0]
+		if _, err := c.Unmatch("film", item.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		got := c.MetadataTargets()[0]
+		if !got.OwnerUnmatch || got.ProviderID != "" || got.Title != "Local" {
+			t.Fatalf("owner unmatch=%#v", got)
+		}
+	})
+	t.Run("owner match", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		c.SetProvider(mismatchedLocalIDProvider{exactID: "99"})
+		if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		item := c.MetadataTargets()[0]
+		if _, err := c.Match(context.Background(), "film", item.ID, "99", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Scan(context.Background(), 1); err != nil {
+			t.Fatal(err)
+		}
+		got := c.MetadataTargets()[0]
+		if !got.OwnerMatch || got.ProviderID != "99" || got.Title != "Local" {
+			t.Fatalf("owner match=%#v", got)
+		}
+	})
+	t.Run("valid duplicate identity", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		for _, name := range []string{"One", "Two"} {
+			writeMedia(t, filepath.Join(films, name+".mp4"))
+			if err := os.WriteFile(filepath.Join(films, name+".nfo"), []byte(`<movie><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		if err := c.SetRoots(films, ""); err != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		repairs, err := c.IdentityRepairs()
+		if err != nil || len(repairs.Conflicts) == 0 || repairs.Conflicts[0].Reason != "provider_identity" {
+			t.Fatalf("identity repairs=%#v %v", repairs, err)
+		}
+	})
+}
+
+func TestRemovingLocalProviderIDRestoresFallbackWhileInvalidIDRetainsLastGood(t *testing.T) {
+	films, data := t.TempDir(), t.TempDir()
+	writeMedia(t, filepath.Join(films, "Film.mp4"))
+	nfo := filepath.Join(films, "Film.nfo")
+	if err := os.WriteFile(nfo, []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, c := openCatalog(t, data)
+	defer db.Close()
+	if err := c.SetRoots(films, ""); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatal(err)
+	}
+	if got := c.MetadataTargets()[0]; got.ProviderID != "42" {
+		t.Fatalf("local ID=%#v", got)
+	}
+	if err := os.WriteFile(nfo, []byte(`<movie><title>Still Local</title><uniqueid type="tmdb">invalid</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatal(err)
+	}
+	if got := c.MetadataTargets()[0]; got.ProviderID != "42" {
+		t.Fatalf("invalid ID discarded last good=%#v", got)
+	}
+	if err := os.WriteFile(nfo, []byte(`<movie><title>No ID</title></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatal(err)
+	}
+	if got := c.MetadataTargets()[0]; got.ProviderID != "" || got.Provider != "" {
+		t.Fatalf("removed local ID did not restore fallback=%#v", got)
+	}
+}
+
+func TestLocalProviderIDNeverCachesMismatchedLookupMetadataOrArtwork(t *testing.T) {
+	t.Run("normalized exact identity is accepted", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local 42</title><uniqueid type="tmdb">042</uniqueid></movie>`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		c.SetProvider(mismatchedLocalIDProvider{art: encodePNG(t, 3, 3, color.Black), exactID: "42"})
+		if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		got := c.MetadataTargets()[0]
+		if got.ProviderID != "042" || got.Title != "Local 42" || got.Synopsis != "Exact synopsis" || got.Year != 2024 || got.Poster == "" {
+			t.Fatalf("normalized exact result=%#v", got)
+		}
+	})
+	t.Run("fresh partial NFO rejects mismatched exact result", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local 42</title><uniqueid type="tmdb">042</uniqueid></movie>`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		c.SetProvider(mismatchedLocalIDProvider{art: encodePNG(t, 3, 3, color.Black)})
+		if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		got := c.MetadataTargets()[0]
+		if got.ProviderID != "042" || got.Title != "Local 42" || got.Synopsis != "" || got.Year != 0 || got.Poster != "" {
+			t.Fatalf("mismatched exact leaked=%#v", got)
+		}
+	})
+	t.Run("existing guessed metadata is cleared when exact lookup unavailable", func(t *testing.T) {
+		films, data := t.TempDir(), t.TempDir()
+		writeMedia(t, filepath.Join(films, "Film.mp4"))
+		db, c := openCatalog(t, data)
+		defer db.Close()
+		c.SetProvider(lookupOnlyLocalIDProvider{encodePNG(t, 3, 3, color.Black)})
+		if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		item := c.MetadataTargets()[0]
+		if item.ProviderID != "99" || item.Poster == "" {
+			t.Fatalf("initial guessed=%#v", item)
+		}
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local 42</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+			t.Fatal(err)
+		}
+		got := c.MetadataTargets()[0]
+		if got.ProviderID != "42" || got.Title != "Local 42" || got.Synopsis != "" || got.Year != 0 || got.Poster != "" {
+			t.Fatalf("stale guessed metadata leaked=%#v", got)
+		}
+		if _, _, err := c.Artwork(item.ID, "poster"); err == nil {
+			t.Fatal("stale guessed artwork remained addressable")
+		}
+	})
 }
 
 func encodePNG(t *testing.T, width, height int, fill color.Color) []byte {
