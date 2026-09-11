@@ -104,7 +104,7 @@ func contradictoryIdentity(old, next Item) bool {
 	if old.Kind != next.Kind {
 		return true
 	}
-	if old.Kind == "episode" && (old.Season != next.Season || old.Episode != next.Episode || old.sourceSeriesID != next.sourceSeriesID) {
+	if old.Kind == "episode" && (old.Season != next.Season || old.Episode != next.Episode || old.EpisodeEnd != next.EpisodeEnd || old.AbsoluteEpisode != next.AbsoluteEpisode || old.sourceSeriesID != next.sourceSeriesID) {
 		return true
 	}
 	a, b := providerIdentity(old.Provider, old.Kind, old.ProviderID), providerIdentity(next.Provider, next.Kind, next.ProviderID)

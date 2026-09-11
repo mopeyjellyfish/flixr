@@ -148,30 +148,36 @@ func nonNegative64(value int64) int64 {
 }
 
 type Item struct {
-	ID           string         `json:"id"`
-	Title        string         `json:"title"`
-	Kind         string         `json:"kind"`
-	Season       int            `json:"season,omitempty"`
-	Episode      int            `json:"episode,omitempty"`
-	SeriesID     string         `json:"series_id,omitempty"`
-	LocalOnly    bool           `json:"local_only"`
-	ProviderID   string         `json:"provider_id,omitempty"`
-	Provider     string         `json:"metadata_provider,omitempty"`
-	Language     string         `json:"metadata_language,omitempty"`
-	Region       string         `json:"metadata_region,omitempty"`
-	Confidence   float64        `json:"match_confidence,omitempty"`
-	OwnerMatch   bool           `json:"owner_matched,omitempty"`
-	OwnerUnmatch bool           `json:"owner_unmatched,omitempty"`
-	Year         int            `json:"year,omitempty"`
-	Synopsis     string         `json:"synopsis,omitempty"`
-	Poster       string         `json:"poster,omitempty"`
-	Backdrop     string         `json:"backdrop,omitempty"`
-	Genres       []string       `json:"genres"`
-	AddedAt      int64          `json:"added_at"`
-	Playable     bool           `json:"playable"`
-	Demo         bool           `json:"demo"`
-	EditionLabel string         `json:"edition_label,omitempty"`
-	Versions     []MediaVersion `json:"versions,omitempty"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Kind    string `json:"kind"`
+	Season  int    `json:"season,omitempty"`
+	Episode int    `json:"episode,omitempty"`
+	// EpisodeEnd is the inclusive source episode span. It is kept separate
+	// from any owner-selected viewing order so filenames remain identity proof.
+	EpisodeEnd       int                   `json:"episode_end,omitempty"`
+	AbsoluteEpisode  int                   `json:"absolute_episode,omitempty"`
+	EpisodeOrder     *EpisodeOrderPosition `json:"episode_order,omitempty"`
+	OrderNeedsRepair bool                  `json:"order_needs_repair,omitempty"`
+	SeriesID         string                `json:"series_id,omitempty"`
+	LocalOnly        bool                  `json:"local_only"`
+	ProviderID       string                `json:"provider_id,omitempty"`
+	Provider         string                `json:"metadata_provider,omitempty"`
+	Language         string                `json:"metadata_language,omitempty"`
+	Region           string                `json:"metadata_region,omitempty"`
+	Confidence       float64               `json:"match_confidence,omitempty"`
+	OwnerMatch       bool                  `json:"owner_matched,omitempty"`
+	OwnerUnmatch     bool                  `json:"owner_unmatched,omitempty"`
+	Year             int                   `json:"year,omitempty"`
+	Synopsis         string                `json:"synopsis,omitempty"`
+	Poster           string                `json:"poster,omitempty"`
+	Backdrop         string                `json:"backdrop,omitempty"`
+	Genres           []string              `json:"genres"`
+	AddedAt          int64                 `json:"added_at"`
+	Playable         bool                  `json:"playable"`
+	Demo             bool                  `json:"demo"`
+	EditionLabel     string                `json:"edition_label,omitempty"`
+	Versions         []MediaVersion        `json:"versions,omitempty"`
 	MediaProperties
 
 	metadataVersion  uint64
@@ -200,27 +206,29 @@ type Season struct {
 
 // Series is a catalog entity, distinct from its playable episode records.
 type Series struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Kind         string   `json:"kind"`
-	LocalOnly    bool     `json:"local_only"`
-	ProviderID   string   `json:"provider_id,omitempty"`
-	Provider     string   `json:"metadata_provider,omitempty"`
-	Language     string   `json:"metadata_language,omitempty"`
-	Region       string   `json:"metadata_region,omitempty"`
-	Confidence   float64  `json:"match_confidence,omitempty"`
-	OwnerMatch   bool     `json:"owner_matched,omitempty"`
-	OwnerUnmatch bool     `json:"owner_unmatched,omitempty"`
-	Year         int      `json:"year,omitempty"`
-	Synopsis     string   `json:"synopsis,omitempty"`
-	Poster       string   `json:"poster,omitempty"`
-	Backdrop     string   `json:"backdrop,omitempty"`
-	Genres       []string `json:"genres"`
-	AddedAt      int64    `json:"added_at"`
-	Playable     bool     `json:"playable"`
-	Demo         bool     `json:"demo"`
-	EditionLabel string   `json:"edition_label,omitempty"`
-	Seasons      []Season `json:"seasons,omitempty"`
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Kind             string   `json:"kind"`
+	LocalOnly        bool     `json:"local_only"`
+	ProviderID       string   `json:"provider_id,omitempty"`
+	Provider         string   `json:"metadata_provider,omitempty"`
+	Language         string   `json:"metadata_language,omitempty"`
+	Region           string   `json:"metadata_region,omitempty"`
+	Confidence       float64  `json:"match_confidence,omitempty"`
+	OwnerMatch       bool     `json:"owner_matched,omitempty"`
+	OwnerUnmatch     bool     `json:"owner_unmatched,omitempty"`
+	Year             int      `json:"year,omitempty"`
+	Synopsis         string   `json:"synopsis,omitempty"`
+	Poster           string   `json:"poster,omitempty"`
+	Backdrop         string   `json:"backdrop,omitempty"`
+	Genres           []string `json:"genres"`
+	AddedAt          int64    `json:"added_at"`
+	Playable         bool     `json:"playable"`
+	Demo             bool     `json:"demo"`
+	EditionLabel     string   `json:"edition_label,omitempty"`
+	EpisodeOrder     string   `json:"episode_order,omitempty"`
+	OrderNeedsRepair bool     `json:"order_needs_repair,omitempty"`
+	Seasons          []Season `json:"seasons,omitempty"`
 }
 
 type ScanStatus struct {
@@ -364,6 +372,9 @@ func OpenWithFilesystem(db *sqlite.DB, prober Prober, fs afero.Fs) (*Catalog, er
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := c.loadEpisodeSpans(); err != nil {
+		return nil, err
+	}
 	if err := c.loadExternalAudio(); err != nil {
 		return nil, err
 	}
@@ -456,19 +467,51 @@ func boolInt(v bool) int {
 	return 0
 }
 
-var episodeRE = regexp.MustCompile(`(?i)(?:s(\d{1,2})e(\d{1,4})|(\d{1,2})x(\d{1,4}))`)
+var episodeRE = regexp.MustCompile(`(?i)(?:s(\d{1,3})e(\d{1,6})(?:e(\d{1,6})|-\s*e?(\d{1,6}))?|(\d{1,3})x(\d{1,6})(?:x(\d{1,6})|-\s*x?(\d{1,6}))?)`)
+var absoluteEpisodeRE = regexp.MustCompile(`(?i)(?:^|[ ._-])(?:absolute|abs)[ ._-]*(\d{1,6})(?:$|[ ._-])`)
 
 func episodeFields(x *Item) {
-	m := episodeRE.FindStringSubmatch(filepath.Base(x.path))
+	base := filepath.Base(x.path)
+	m := episodeRE.FindStringSubmatch(base)
 	if len(m) == 0 {
+		if absolute := absoluteEpisodeRE.FindStringSubmatch(base); len(absolute) != 0 {
+			fmt.Sscanf(absolute[1], "%d", &x.Episode)
+			x.EpisodeEnd, x.AbsoluteEpisode, x.Season = x.Episode, x.Episode, 1
+		}
+		return
+	}
+	match := episodeRE.FindStringIndex(base)
+	remainder := ""
+	if match != nil {
+		remainder = strings.ToLower(base[match[1]:])
+	}
+	if regexp.MustCompile(`^[\s-]*(?:e|x)\d`).MatchString(remainder) {
+		x.Season, x.Episode, x.EpisodeEnd, x.AbsoluteEpisode = 0, 0, 0, 0
 		return
 	}
 	if m[1] != "" {
 		fmt.Sscanf(m[1], "%d", &x.Season)
 		fmt.Sscanf(m[2], "%d", &x.Episode)
+		x.EpisodeEnd = x.Episode
+		if m[3] != "" {
+			fmt.Sscanf(m[3], "%d", &x.EpisodeEnd)
+		}
+		if m[4] != "" {
+			fmt.Sscanf(m[4], "%d", &x.EpisodeEnd)
+		}
 	} else {
-		fmt.Sscanf(m[3], "%d", &x.Season)
-		fmt.Sscanf(m[4], "%d", &x.Episode)
+		fmt.Sscanf(m[5], "%d", &x.Season)
+		fmt.Sscanf(m[6], "%d", &x.Episode)
+		x.EpisodeEnd = x.Episode
+		if m[7] != "" {
+			fmt.Sscanf(m[7], "%d", &x.EpisodeEnd)
+		}
+		if m[8] != "" {
+			fmt.Sscanf(m[8], "%d", &x.EpisodeEnd)
+		}
+	}
+	if x.EpisodeEnd < x.Episode {
+		x.Season, x.Episode, x.EpisodeEnd, x.AbsoluteEpisode = 0, 0, 0, 0
 	}
 }
 
@@ -1844,6 +1887,11 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 			if _, err = tx.Exec(`UPDATE catalog_items SET metadata_provider=?,metadata_language=?,metadata_region=?,match_confidence=?,owner_matched=?,owner_unmatched=? WHERE id=?`, x.Provider, x.Language, x.Region, x.Confidence, boolInt(x.OwnerMatch), boolInt(x.OwnerUnmatch), x.ID); err != nil {
 				return err
 			}
+			if x.Kind == "episode" && x.Episode > 0 && x.EpisodeEnd >= x.Episode {
+				if _, err = tx.Exec(`INSERT INTO catalog_episode_spans(catalog_id,source_season,source_start,source_end,absolute_episode) VALUES(?,?,?,?,?) ON CONFLICT(catalog_id) DO UPDATE SET source_season=excluded.source_season,source_start=excluded.source_start,source_end=excluded.source_end,absolute_episode=excluded.absolute_episode`, x.ID, x.Season, x.Episode, x.EpisodeEnd, x.AbsoluteEpisode); err != nil {
+					return err
+				}
+			}
 			if _, err = tx.Exec("DELETE FROM catalog_audio_sidecars WHERE catalog_id=?", x.ID); err != nil {
 				return err
 			}
@@ -2130,6 +2178,9 @@ func (c *Catalog) List(query string, offset, limit int) ([]Item, error) {
 		x.Subtitles = append(x.Subtitles, externalSubtitleTracks(c.items[x.ID].Subtitles)...)
 		x.LocalOnly, x.Playable, x.Demo = local != 0, playable != 0, demo != 0
 		episodeFields(&x)
+		if span, ok := c.items[x.ID]; ok {
+			x.Season, x.Episode, x.EpisodeEnd, x.AbsoluteEpisode = span.Season, span.Episode, span.EpisodeEnd, span.AbsoluteEpisode
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {

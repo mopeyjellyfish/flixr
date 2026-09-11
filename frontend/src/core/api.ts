@@ -13,6 +13,10 @@ export type CatalogItem = {
   kind: 'film' | 'series' | 'episode' | string;
   season?: number;
   episode?: number;
+  episode_end?: number;
+  absolute_episode?: number;
+  episode_order?: EpisodeOrderPosition | EpisodeOrderKind;
+  order_needs_repair?: boolean;
   series_id?: string;
   local_only: boolean;
   container?: string;
@@ -37,6 +41,12 @@ export type CatalogItem = {
   edition_label?: string;
   versions?: MediaVersion[];
 };
+export type EpisodeOrderKind = 'aired' | 'dvd' | 'absolute';
+export type EpisodeOrderPosition = { position: number; end_position: number; season: number; episode: number; episode_end: number; special: boolean };
+export type EpisodeOrderEntry = { catalog_id: string; title: string; season: number; episode: number; episode_end: number; absolute_episode?: number; mapping?: EpisodeOrderPosition };
+export type EpisodeOrderDetail = { series_id: string; title: string; order: EpisodeOrderKind; revision: number; needs_repair: boolean; entries: EpisodeOrderEntry[] };
+export type EpisodeOrderGroup = { id: string; name: string; order: EpisodeOrderKind };
+export type EpisodeOrderSeries = { id: string; title: string };
 export type MediaVersion = {
   id: string;
   label: string;
@@ -59,13 +69,13 @@ export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dism
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
 export type ViewerSection = { name: string; items: ViewerItem[] };
 export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
-export type Episode = CatalogItem & { kind: 'episode'; season: number; episode: number };
+export type Episode = Omit<CatalogItem, 'kind' | 'episode_order'> & { kind: 'episode'; season: number; episode: number; episode_order?: EpisodeOrderPosition };
 export type EpisodeSequence =
   | { state: 'next'; episode: Episode; selected_version_id?: string }
   | { state: 'version_unavailable'; episode: Episode; requested_version_id: string; alternatives: MediaVersion[] }
   | { state: 'end_of_series' | 'not_episodic' | 'context_unavailable'; episode?: never };
 export type Season = { id: string; number: number; episodes: Episode[] };
-export type SeriesDetail = Omit<CatalogItem, 'kind'> & { kind: 'series'; seasons: Season[] };
+export type SeriesDetail = Omit<CatalogItem, 'kind' | 'episode_order'> & { kind: 'series'; episode_order?: EpisodeOrderKind; seasons: Season[] };
 export type OwnerRoots = { films: string; tv: string };
 export type BackupPolicy = { enabled: boolean; destination: string; schedule_kind: 'interval' | 'daily'; interval_seconds: number; local_time: string; timezone: string; retain_count: number; retain_age_seconds: number; budget_bytes: number; next_run_at?: number; last_verified_at?: number; last_verified_file?: string; last_status: 'never' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; last_message?: string };
 export type BackupJob = { id: string; trigger: 'manual' | 'schedule'; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; queued_at: number; started_at?: number; finished_at?: number; archive_name?: string; size_bytes?: number; message?: string };
@@ -104,7 +114,8 @@ export type ApiErrorCode =
   | 'playback_session_invalid' | 'playback_not_direct' | 'playback_not_hls' | 'playback_asset_not_found' | 'playback_not_playable'
   | 'catalog_list_failed' | 'catalog_preferences_failed'
   | 'catalog_continue_watching_failed' | 'library_change_requires_preview'
-  | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review';
+  | 'invalid_playback_settings' | 'playback_active' | 'playback_settings_failed' | 'environment_locked' | 'import_requires_review'
+  | 'episode_order_invalid' | 'episode_order_conflict';
 export type PlaybackCapabilities = { containers: string[]; video_codecs: string[]; video_profiles?: string[]; audio_codecs: string[]; supports_fmp4_hls: boolean; supports_direct: boolean; supports_remux: boolean; supports_transcode: boolean; max_width?: number; max_height?: number; max_frame_rate_milli?: number; max_bit_depth?: number; max_audio_channels?: number; hdr?: string[] };
 export type PlaybackQuality = { mode: 'auto' | 'data_saver' | 'original'; max_video_bitrate?: number; max_width?: number; max_height?: number };
 export type AudioTrack = { index: number; codec: string; profile?: string; channels?: number; sample_rate?: number; bitrate?: number; language?: string; title?: string; default?: boolean; forced?: boolean; external?: boolean };
@@ -177,6 +188,8 @@ export function messageFor(code: string): string {
     playback_settings_failed: 'Flixr could not save playback settings.',
     environment_locked: 'This value is managed by the server environment and cannot be changed here.',
     import_requires_review: 'Import one supported setting scope at a time. Network and access settings require review.',
+    episode_order_invalid: 'Review the episode order fields and try again.',
+    episode_order_conflict: 'This episode order changed elsewhere. Reload it before saving again.',
     playback_session_invalid: 'This playback session expired. Start the title again.',
   } as Record<string, string>)[code] ?? 'Flixr could not complete that request. Please try again.';
 }

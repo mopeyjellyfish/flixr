@@ -318,7 +318,9 @@ export function Player({ catalogID, versionID, startPositionMS, active = true, c
       void api.series(item.series_id!).then((series) => {
         if (!active) return;
         setSeriesTitle(series.title);
-        setEpisodes(series.seasons.flatMap((season) => season.episodes).filter((episode) => episode.playable));
+        const playableEpisodes = series.seasons.flatMap((season) => season.episodes).filter((episode) => episode.playable);
+        const hasCompleteAlternateOrder = !series.order_needs_repair && playableEpisodes.some((episode) => episode.episode_order) && playableEpisodes.every((episode) => episode.episode_order);
+        setEpisodes(hasCompleteAlternateOrder ? [...playableEpisodes].sort((left, right) => (left.episode_order!.position - right.episode_order!.position) || (left.episode_order!.end_position - right.episode_order!.end_position)) : playableEpisodes);
       }).catch(() => undefined);
     }, 500);
     return () => { active = false; window.clearTimeout(timer); };

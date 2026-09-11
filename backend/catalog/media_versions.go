@@ -280,7 +280,7 @@ func (c *Catalog) validateSeriesCoordinates(ids []string) error {
 		coords := map[string]bool{}
 		for _, season := range series.Seasons {
 			for _, episode := range season.Episodes {
-				key := fmt.Sprintf("%d/%d", episode.Season, episode.Episode)
+				key := fmt.Sprintf("%d/%d-%d", episode.Season, episode.Episode, episode.EpisodeEnd)
 				if episode.Episode <= 0 || coords[key] {
 					return ErrMediaVersionConflict
 				}
@@ -398,14 +398,14 @@ func (c *Catalog) UngroupMediaVersion(ctx context.Context, kind, canonicalID, me
 	return c.groupObject(kind, canonicalID)
 }
 
-func (c *Catalog) episodeForSeries(seriesID string, season, episode int) (Item, bool) {
+func (c *Catalog) episodeForSeries(seriesID string, season, episode, episodeEnd int) (Item, bool) {
 	series, ok := c.Series(seriesID)
 	if !ok {
 		return Item{}, false
 	}
 	for _, s := range series.Seasons {
 		for _, x := range s.Episodes {
-			if x.Season == season && x.Episode == episode {
+			if x.Season == season && x.Episode == episode && x.EpisodeEnd == episodeEnd {
 				return x, true
 			}
 		}
@@ -450,7 +450,7 @@ func (c *Catalog) PlaybackVersions(ctx context.Context, profileID, catalogID str
 	for _, anchorID := range anchors {
 		sourceID := anchorID
 		if kind == "series" {
-			x, found := c.episodeForSeries(anchorID, logical.Season, logical.Episode)
+			x, found := c.episodeForSeries(anchorID, logical.Season, logical.Episode, logical.EpisodeEnd)
 			if !found {
 				continue
 			}
@@ -548,7 +548,7 @@ func (c *Catalog) SeriesMediaVersions(ctx context.Context, profileID, seriesID s
 		mapped := map[string]Item{}
 		for _, season := range member.Seasons {
 			for _, episode := range season.Episodes {
-				mapped[fmt.Sprintf("%d/%d", episode.Season, episode.Episode)] = episode
+				mapped[fmt.Sprintf("%d/%d-%d", episode.Season, episode.Episode, episode.EpisodeEnd)] = episode
 				sourceIDs = append(sourceIDs, episode.ID)
 			}
 		}
@@ -563,7 +563,7 @@ func (c *Catalog) SeriesMediaVersions(ctx context.Context, profileID, seriesID s
 	for _, season := range canonicalSeries.Seasons {
 		for _, logical := range season.Episodes {
 			versions, indexes := []MediaVersion{}, map[string]int{}
-			coordinate := fmt.Sprintf("%d/%d", logical.Season, logical.Episode)
+			coordinate := fmt.Sprintf("%d/%d-%d", logical.Season, logical.Episode, logical.EpisodeEnd)
 			for _, anchorID := range anchors {
 				source, found := coordinates[anchorID][coordinate]
 				if !found {
@@ -687,7 +687,7 @@ func (c *Catalog) groupedPhysicalSources(catalogID string) ([]physicalSource, er
 	for _, anchor := range anchors {
 		sourceID := anchor
 		if item.Kind == "episode" {
-			mapped, found := c.episodeForSeries(anchor, item.Season, item.Episode)
+			mapped, found := c.episodeForSeries(anchor, item.Season, item.Episode, item.EpisodeEnd)
 			if !found {
 				continue
 			}
