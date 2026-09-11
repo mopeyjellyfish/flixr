@@ -108,6 +108,8 @@ To refresh a locked field, clear **Lock this field** and save first. **Preview p
 
 Metadata and refreshed artwork references commit together. Provider, artwork-cache, cancellation, and database failures leave the previous committed values and artwork intact. Cached images remain local; failed refresh objects are removed, and bounded background maintenance collects objects abandoned by an interrupted process.
 
+Library scans can also import a bounded offline NFO and local-artwork subset. See [Local metadata and artwork](local-metadata.md) for supported names, fields, precedence, diagnostics, and safety limits.
+
 Official images resolve metadata access in this order: an explicit disabled setting,
 an environment/file or saved owner override, then the FlixR application credential.
 Removing an override returns to automatic application access. Disabling remote metadata

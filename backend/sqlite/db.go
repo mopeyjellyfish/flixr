@@ -26,7 +26,7 @@ const (
 	// means a new database or one without any applied migrations.
 	MinimumSchemaVersion = 0
 	// LatestSchemaVersion is the newest embedded schema this binary understands.
-	LatestSchemaVersion = 30
+	LatestSchemaVersion = 31
 )
 
 // ErrIncompatibleSchema identifies a database containing migrations that this

@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -72,6 +73,10 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 	if err := ctx.Err(); err != nil {
 		return Item{}, err
 	}
+	localState, hasLocal, localErr := c.loadLocalDocument(kind, id)
+	if localErr != nil {
+		return Item{}, localErr
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -117,6 +122,7 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		}
 	}
 	seen := map[string]bool{}
+	localFallbackChanged := false
 	for _, field := range edit.Fields {
 		field.Field = strings.TrimSpace(field.Field)
 		if !editableMetadataFields[field.Field] || seen[field.Field] || (field.Source != "owner" && field.Source != "local" && (!providerWrite || field.Source != "provider")) {
@@ -125,11 +131,39 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		seen[field.Field] = true
 		if providerWrite {
 			var locked int
-			err := tx.QueryRow(`SELECT locked FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field=?`, kind, id, field.Field).Scan(&locked)
+			var source string
+			err := tx.QueryRow(`SELECT locked,source FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field=?`, kind, id, field.Field).Scan(&locked, &source)
 			if err != nil && err != sql.ErrNoRows {
 				return Item{}, err
 			}
 			if locked != 0 {
+				continue
+			}
+			if hasLocal {
+				if _, local := localState.fields[field.Field]; local {
+					localState.fallback[field.Field] = field.Value
+					localFallbackChanged = true
+					continue
+				}
+			}
+			if source == "local" {
+				if art, ok := artwork[field.Field]; ok && (field.Field == "poster" || field.Field == "backdrop") {
+					var localObject, localType, oldFallback string
+					if err := tx.QueryRow(`SELECT l.local_object_name,a.content_type,l.fallback_object_name FROM catalog_local_artwork l JOIN catalog_artwork a ON a.catalog_id=l.catalog_id AND a.kind=l.artwork_kind WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=?`, kind, id, field.Field).Scan(&localObject, &localType, &oldFallback); err != nil {
+						return Item{}, err
+					}
+					name, _, err := c.replaceArtwork(tx, id, field.Field, art)
+					if err != nil {
+						return Item{}, err
+					}
+					created, replaced = append(created, name), append(replaced, oldFallback)
+					if _, err := tx.Exec(`UPDATE catalog_artwork SET content_type=?,object_name=? WHERE catalog_id=? AND kind=?`, localType, localObject, id, field.Field); err != nil {
+						return Item{}, err
+					}
+					if _, err := tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name=?,fallback_content_type=?,fallback_value=? WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, name, art.ContentType, artworkURL(id, field.Field), kind, id, field.Field); err != nil {
+						return Item{}, err
+					}
+				}
 				continue
 			}
 		}
@@ -170,6 +204,15 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 			item.Backdrop = field.Value
 		}
 	}
+	if localFallbackChanged {
+		encoded, err := json.Marshal(localState.fallback)
+		if err != nil {
+			return Item{}, err
+		}
+		if _, err := tx.Exec(`UPDATE catalog_local_metadata SET fallback_json=?,updated_at=? WHERE catalog_kind=? AND catalog_id=?`, string(encoded), time.Now().Unix(), kind, id); err != nil {
+			return Item{}, err
+		}
+	}
 	table := "catalog_items"
 	if kind == "series" {
 		table = "catalog_series"
@@ -184,7 +227,7 @@ func (c *Catalog) editMetadata(ctx context.Context, kind, id string, edit Metada
 		return Item{}, err
 	}
 	committed = true
-	if kind == "film" {
+	if kind == "film" || kind == "episode" {
 		c.items[id] = item
 	} else {
 		series := c.series[id]
@@ -207,7 +250,7 @@ func (c *Catalog) PreviewMetadata(kind, id string, edit MetadataEdit) ([]Metadat
 		if !editableMetadataFields[f.Field] {
 			return nil, fmt.Errorf("invalid metadata field")
 		}
-		if old, ok := known[f.Field]; ok && old.Locked {
+		if old, ok := known[f.Field]; ok && (old.Locked || old.Source == "local") {
 			continue
 		}
 		known[f.Field] = f
@@ -226,7 +269,7 @@ func (c *Catalog) applyLockedFields(kind, id string, item *Item) {
 		return
 	}
 	for _, f := range fields {
-		if !f.Locked {
+		if !f.Locked && f.Source != "local" {
 			continue
 		}
 		switch f.Field {

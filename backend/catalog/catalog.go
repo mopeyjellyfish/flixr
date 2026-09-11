@@ -900,6 +900,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 		}
 	}
 	var unavailableLocations []*locationScanError
+	localScannedLocations := map[string]bool{}
 	var removalReviews []struct {
 		root    rootScan
 		sources []activeSource
@@ -975,6 +976,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 			c.mu.Unlock()
 			continue
 		}
+		localScannedLocations[r.id] = true
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1137,11 +1139,20 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	if err != nil {
 		return err
 	}
+	localCompleteLocations := map[string]bool{}
+	for _, completed := range completedRoots {
+		localCompleteLocations[completed.locationID] = true
+	}
+	localPlans, localObservations, err := c.prepareLocalMetadata(ctx, next, seriesState, localScannedLocations, localCompleteLocations)
+	if err != nil {
+		return err
+	}
+	observations = append(observations, localObservations...)
 	c.mu.Lock()
 	for _, observation := range observations {
 		if observation.outcome == "unmatched" {
 			c.status.Unmatched++
-		} else {
+		} else if observation.outcome != "local_metadata_ignored" {
 			c.status.Failed++
 		}
 	}
@@ -1152,7 +1163,7 @@ func (c *Catalog) scan(ctx context.Context, workers int, request scanRequest) er
 	if len(completedRoots) == 0 && len(unavailableLocations) != 0 && len(removalReviews) == 0 {
 		return unavailableLocations[0]
 	}
-	if err := c.persist(ctx, next, sources, failures, observations, conflicts, seriesState, scanID, completedRoots); err != nil {
+	if err := c.persist(ctx, next, sources, failures, observations, conflicts, seriesState, localPlans, scanID, completedRoots); err != nil {
 		return err
 	}
 	for _, failure := range unavailableLocations {
@@ -1289,7 +1300,7 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 	var observations []scanObservation
 	for id, item := range next {
 		if previous, ok := previousItems[scanKey{item.sourceLocationID, item.rootKind, item.path}]; ok {
-			c.applyLockedFields("film", previous.ID, &item)
+			c.applyLockedFields(item.Kind, previous.ID, &item)
 			if previous.ProviderID != "" || previous.OwnerMatch || previous.OwnerUnmatch {
 				item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop, item.LocalOnly = previous.ProviderID, previous.Provider, previous.Language, previous.Region, previous.Confidence, previous.OwnerMatch, previous.OwnerUnmatch, previous.Year, previous.Synopsis, previous.Poster, previous.Backdrop, previous.LocalOnly
 			}
@@ -1549,6 +1560,9 @@ func (c *Catalog) enrich(ctx context.Context, next map[string]Item) ([]scanObser
 				}
 			}
 			item.Poster, item.Backdrop = enrichment.Poster, enrichment.Backdrop
+			if previous, ok := previousItems[scanKey{item.sourceLocationID, item.rootKind, item.path}]; ok {
+				c.applyLockedFields("episode", previous.ID, &item)
+			}
 			next[id] = item
 		}
 	}
@@ -1570,7 +1584,7 @@ func providerFailure(identifier, outcome string) scanObservation {
 	return scanObservation{identifier: identifier, outcome: outcome, message: message}
 }
 
-func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series, scanID string, completedRoots []rootScan) error {
+func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map[scanKey]Item, failures map[scanKey]string, observations []scanObservation, conflicts []identityPair, seriesState map[string]Series, localPlans []localImportPlan, scanID string, completedRoots []rootScan) error {
 	c.mu.RLock()
 	previous := make(map[string]Item, len(c.items))
 	for k, v := range c.items {
@@ -1598,11 +1612,39 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 		}
 	}
 	if c.db != nil {
+		hasLocalArtwork := false
+		for _, plan := range localPlans {
+			if len(plan.artwork) != 0 {
+				hasLocalArtwork = true
+				break
+			}
+		}
+		if hasLocalArtwork {
+			c.artworkMu.Lock()
+			defer c.artworkMu.Unlock()
+		}
 		tx, err := c.db.BeginTx(ctx)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback()
+		createdLocalArtwork, obsoleteLocalArtwork, err := c.persistLocalMetadataTx(tx, localPlans)
+		if err != nil {
+			for _, name := range createdLocalArtwork {
+				c.removeArtworkObject(name)
+			}
+			return err
+		}
+		localArtworkCommitted := false
+		defer func() {
+			cleanup := createdLocalArtwork
+			if localArtworkCommitted {
+				cleanup = obsoleteLocalArtwork
+			}
+			for _, name := range cleanup {
+				c.removeArtworkObject(name)
+			}
+		}()
 		for _, old := range unavailable {
 			if _, err = tx.Exec("UPDATE catalog_physical_files SET present=0,selected=0 WHERE catalog_id=?", old.ID); err != nil {
 				return err
@@ -1803,6 +1845,7 @@ func (c *Catalog) persist(ctx context.Context, next map[string]Item, sources map
 		if err != nil {
 			return err
 		}
+		localArtworkCommitted = true
 	}
 	c.mu.Lock()
 	c.items = next

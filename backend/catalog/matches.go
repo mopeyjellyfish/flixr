@@ -2,9 +2,12 @@ package catalog
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -151,10 +154,10 @@ func (c *Catalog) Unmatch(kind, id string) (Item, error) {
 }
 
 func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
-	if kind == "film" {
+	if kind == "film" || kind == "episode" {
 		item, ok := c.items[id]
 		item.metadataVersion = c.metadataVersions[refreshKey(kind, id)]
-		return item, ok && item.Kind == "film"
+		return item, ok && item.Kind == kind
 	}
 	if kind == "series" {
 		series, ok := c.series[id]
@@ -164,6 +167,12 @@ func (c *Catalog) metadataTarget(kind, id string) (Item, bool) {
 }
 
 func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, region string, owner bool, expected *Item, artwork stagedMatchArtwork) (Item, error) {
+	localState, hasLocal, err := c.loadLocalDocument(kind, id)
+	if err != nil {
+		return Item{}, err
+	}
+	locked := c.lockedMetadata(kind, id)
+	lockedValues := c.protectedMetadataValues(kind, id)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.scanning {
@@ -176,13 +185,19 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 	if expected != nil && !sameMetadataIdentity(current, *expected) {
 		return Item{}, ErrMetadataStale
 	}
-	if kind == "film" {
+	if kind == "film" || kind == "episode" {
 		item, ok := c.items[id]
-		if !ok || item.Kind != "film" {
+		if !ok || item.Kind != kind {
 			return Item{}, ErrMetadataNotFound
 		}
 		applyMatch(&item, enrichment, language, region, owner)
-		item, err := c.updateMatch(kind, item, artwork)
+		if hasLocal {
+			localState.fallback = itemFieldValues(item)
+			localState.fallbackProviderID, localState.fallbackProvider = item.ProviderID, item.Provider
+			applyFieldValues(&item, localState.fields, locked)
+		}
+		applyFieldValues(&item, lockedValues, nil)
+		item, err := c.updateMatch(kind, item, artwork, localState, hasLocal)
 		if err != nil {
 			return Item{}, err
 		}
@@ -197,9 +212,15 @@ func (c *Catalog) saveMatch(kind, id string, enrichment Enrichment, language, re
 		}
 		item := Item{ID: series.ID, Title: series.Title, Kind: "series", ProviderID: series.ProviderID, Provider: series.Provider, Language: series.Language, Region: series.Region, Confidence: series.Confidence, OwnerMatch: series.OwnerMatch, OwnerUnmatch: series.OwnerUnmatch, Year: series.Year, Synopsis: series.Synopsis, Poster: series.Poster, Backdrop: series.Backdrop}
 		applyMatch(&item, enrichment, language, region, owner)
+		if hasLocal {
+			localState.fallback = itemFieldValues(item)
+			localState.fallbackProviderID, localState.fallbackProvider = item.ProviderID, item.Provider
+			applyFieldValues(&item, localState.fields, locked)
+		}
+		applyFieldValues(&item, lockedValues, nil)
 		series.ProviderID, series.Provider, series.Language, series.Region, series.Confidence, series.OwnerMatch, series.OwnerUnmatch, series.Year, series.Synopsis, series.Poster, series.Backdrop = item.ProviderID, item.Provider, item.Language, item.Region, item.Confidence, item.OwnerMatch, item.OwnerUnmatch, item.Year, item.Synopsis, item.Poster, item.Backdrop
 		series.LocalOnly = !owner
-		item, err := c.updateMatch(kind, item, artwork)
+		item, err := c.updateMatch(kind, item, artwork, localState, hasLocal)
 		if err != nil {
 			return Item{}, err
 		}
@@ -222,7 +243,7 @@ func applyMatch(item *Item, enrichment Enrichment, language, region string, owne
 	}
 }
 
-func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork) (Item, error) {
+func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork, localState localDocumentState, hasLocal bool) (Item, error) {
 	if c.db == nil {
 		return item, nil
 	}
@@ -248,14 +269,38 @@ func (c *Catalog) updateMatch(kind string, item Item, artwork stagedMatchArtwork
 		return Item{}, err
 	}
 	defer tx.Rollback()
+	if hasLocal {
+		fallback, err := json.Marshal(localState.fallback)
+		if err != nil {
+			return Item{}, err
+		}
+		if _, err := tx.Exec(`UPDATE catalog_local_metadata SET fallback_json=?,fallback_provider_id=?,fallback_provider=?,updated_at=? WHERE catalog_kind=? AND catalog_id=?`, string(fallback), localState.fallbackProviderID, localState.fallbackProvider, time.Now().Unix(), kind, item.ID); err != nil {
+			return Item{}, err
+		}
+	}
 	for _, artworkKind := range []string{"poster", "backdrop"} {
 		art, ok := artwork.available[artworkKind]
 		if !ok {
 			continue
 		}
+		var localObject, localType, oldFallback string
+		localErr := tx.QueryRow(`SELECT l.local_object_name,a.content_type,l.fallback_object_name FROM catalog_local_artwork l JOIN catalog_artwork a ON a.catalog_id=l.catalog_id AND a.kind=l.artwork_kind WHERE l.catalog_kind=? AND l.catalog_id=? AND l.artwork_kind=?`, kind, item.ID, artworkKind).Scan(&localObject, &localType, &oldFallback)
+		if localErr != nil && localErr != sql.ErrNoRows {
+			return Item{}, localErr
+		}
 		name, previous, err := c.replaceArtwork(tx, item.ID, artworkKind, art)
 		if err != nil {
 			return Item{}, err
+		}
+		if localErr == nil {
+			if _, err := tx.Exec(`UPDATE catalog_artwork SET content_type=?,object_name=? WHERE catalog_id=? AND kind=?`, localType, localObject, item.ID, artworkKind); err != nil {
+				return Item{}, err
+			}
+			if _, err := tx.Exec(`UPDATE catalog_local_artwork SET fallback_object_name=?,fallback_content_type=?,fallback_value=? WHERE catalog_kind=? AND catalog_id=? AND artwork_kind=?`, name, art.ContentType, artworkURL(item.ID, artworkKind), kind, item.ID, artworkKind); err != nil {
+				return Item{}, err
+			}
+			created, replaced = append(created, name), append(replaced, oldFallback)
+			continue
 		}
 		created, replaced = append(created, name), append(replaced, previous)
 		if artworkKind == "poster" {
