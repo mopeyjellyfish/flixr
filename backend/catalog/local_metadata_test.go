@@ -28,6 +28,27 @@ func (p localArtworkProvider) ByID(context.Context, string, string, string, stri
 	return Enrichment{ProviderID: "77", Title: "Matched without artwork"}, nil
 }
 
+type identityArtworkProvider struct {
+	art    map[string][]byte
+	cancel context.CancelFunc
+}
+
+func (p identityArtworkProvider) Lookup(context.Context, string, string, string) (Enrichment, error) {
+	return Enrichment{ProviderID: "1", Title: "Provider One", Poster: "poster-1"}, nil
+}
+func (p identityArtworkProvider) ByID(_ context.Context, _, _, providerID, _, _ string) (Enrichment, error) {
+	return Enrichment{ProviderID: providerID, Title: "Provider " + providerID, Synopsis: "Synopsis " + providerID, Poster: "poster-" + providerID}, nil
+}
+func (p identityArtworkProvider) Candidates(context.Context, string, string, string, string, string) ([]Candidate, error) {
+	return nil, nil
+}
+func (p identityArtworkProvider) FetchArtwork(_ context.Context, source string) (Artwork, error) {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	return Artwork{Bytes: p.art[source], ContentType: "image/png"}, nil
+}
+
 func TestParseLocalNFOAllowsBuiltInEntitiesAndReportsUnsupportedFields(t *testing.T) {
 	got, err := parseLocalNFO(context.Background(), "film", strings.NewReader(`<movie><title>Fish &amp; Chips</title><plot>Offline</plot><year>2024</year><mpaa>PG</mpaa><tag>Family</tag><genre>Comedy</genre><studio>Ignored</studio><uniqueid type="tmdb">42</uniqueid></movie>`))
 	if err != nil {
@@ -335,6 +356,165 @@ func TestLockedCachedArtworkBytesCannotBeReplacedByLocalSidecar(t *testing.T) {
 	var localRows int
 	if err := db.QueryRow(`SELECT count(*) FROM catalog_local_artwork WHERE catalog_id=?`, item.ID).Scan(&localRows); err != nil || localRows != 0 {
 		t.Fatalf("locked local rows=%d %v", localRows, err)
+	}
+}
+
+func TestLocalIdentityTransitionPublishesMatchingProviderArtworkAtomically(t *testing.T) {
+	for _, withLocal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "provider artwork", true: "local artwork fallback"}[withLocal], func(t *testing.T) {
+			films := t.TempDir()
+			if err := os.WriteFile(filepath.Join(films, "Film.mp4"), []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			one, two, local := testPNG(t, 2, 2), testPNG(t, 3, 3), testPNG(t, 4, 4)
+			provider := identityArtworkProvider{art: map[string][]byte{"poster-1": one, "poster-2": two}}
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.SetProvider(provider)
+			if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			item := c.MetadataTargets()[0]
+			localPath := filepath.Join(films, "Film-poster.png")
+			if withLocal {
+				if err := os.WriteFile(localPath, local, 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><uniqueid type="tmdb">2</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			if got := c.MetadataTargets()[0]; got.ProviderID != "2" || got.Synopsis != "Synopsis 2" {
+				t.Fatalf("transitioned item=%#v", got)
+			}
+			want := two
+			if withLocal {
+				got, _, err := c.Artwork(item.ID, "poster")
+				if err != nil || !bytes.Equal(got, local) {
+					t.Fatalf("active local artwork=%d %v", len(got), err)
+				}
+				if err := os.Remove(localPath); err != nil || c.Scan(context.Background(), 1) != nil {
+					t.Fatal(err)
+				}
+			}
+			got, _, err := c.Artwork(item.ID, "poster")
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("identity-two artwork=%d %v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestLocalIdentityTransitionRollbackAndCancellationPreservePublishedIdentity(t *testing.T) {
+	for _, mode := range []string{"database failure", "cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			films := t.TempDir()
+			if err := os.WriteFile(filepath.Join(films, "Film.mp4"), []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			one, two := testPNG(t, 2, 2), testPNG(t, 3, 3)
+			provider := identityArtworkProvider{art: map[string][]byte{"poster-1": one, "poster-2": two}}
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.SetProvider(provider)
+			if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+				t.Fatal(err)
+			}
+			item := c.MetadataTargets()[0]
+			if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><uniqueid type="tmdb">2</uniqueid></movie>`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if mode == "database failure" {
+				if _, err := db.Exec(`CREATE TRIGGER fail_identity_transition BEFORE UPDATE ON catalog_items BEGIN SELECT RAISE(FAIL,'injected'); END`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				provider.cancel = cancel
+				c.SetProvider(provider)
+			}
+			if err := c.Scan(ctx, 1); err == nil {
+				t.Fatal("identity transition unexpectedly committed")
+			}
+			if got := c.MetadataTargets()[0]; got.ProviderID != "1" {
+				t.Fatalf("published identity changed=%#v", got)
+			}
+			got, _, err := c.Artwork(item.ID, "poster")
+			if err != nil || !bytes.Equal(got, one) {
+				t.Fatalf("published artwork changed=%d %v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestForcedRefreshAfterLocalIdentityRemovalUsesRestoredIdentityArtwork(t *testing.T) {
+	films := t.TempDir()
+	if err := os.WriteFile(filepath.Join(films, "Film.mp4"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	one, two, local := testPNG(t, 2, 2), testPNG(t, 3, 3), testPNG(t, 4, 4)
+	provider := identityArtworkProvider{art: map[string][]byte{"poster-1": one, "poster-2": two}}
+	db, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c, err := OpenWithProber(db, ProberFunc(func(context.Context, *os.File) (MediaProperties, error) { return MediaProperties{}, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetProvider(provider)
+	if err := c.SetTMDBToken("secret"); err != nil || c.SetRoots(films, "") != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatal(err)
+	}
+	item := c.MetadataTargets()[0]
+	nfoPath, localPath := filepath.Join(films, "Film.nfo"), filepath.Join(films, "Film-poster.png")
+	if err := os.WriteFile(nfoPath, []byte(`<movie><uniqueid type="tmdb">2</uniqueid></movie>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPath, local, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nfoPath, []byte(`<movie><title>Local title</title></movie>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.forceMetadataRefresh = true
+	c.mu.Unlock()
+	if err := c.Scan(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.forceMetadataRefresh = false
+	c.mu.Unlock()
+	if got := c.MetadataTargets()[0]; got.ProviderID != "1" || got.Title != "Local title" {
+		t.Fatalf("restored identity=%#v", got)
+	}
+	if err := os.Remove(localPath); err != nil || c.Scan(context.Background(), 1) != nil {
+		t.Fatal(err)
+	}
+	got, _, err := c.Artwork(item.ID, "poster")
+	if err != nil || !bytes.Equal(got, one) {
+		t.Fatalf("restored identity artwork=%d %v", len(got), err)
 	}
 }
 

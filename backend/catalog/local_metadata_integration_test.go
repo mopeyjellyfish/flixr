@@ -341,7 +341,10 @@ func TestLocalProviderIDsRespectOwnerUnmatchAndSurfaceConflicts(t *testing.T) {
 		if _, err := c.Unmatch("film", item.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil || c.Scan(context.Background(), 1) != nil {
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Scan(context.Background(), 1); err != nil {
 			t.Fatal(err)
 		}
 		got := c.MetadataTargets()[0]
@@ -352,9 +355,6 @@ func TestLocalProviderIDsRespectOwnerUnmatchAndSurfaceConflicts(t *testing.T) {
 	t.Run("owner match", func(t *testing.T) {
 		films, data := t.TempDir(), t.TempDir()
 		writeMedia(t, filepath.Join(films, "Film.mp4"))
-		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
-			t.Fatal(err)
-		}
 		db, c := openCatalog(t, data)
 		defer db.Close()
 		c.SetProvider(mismatchedLocalIDProvider{exactID: "99"})
@@ -363,6 +363,9 @@ func TestLocalProviderIDsRespectOwnerUnmatchAndSurfaceConflicts(t *testing.T) {
 		}
 		item := c.MetadataTargets()[0]
 		if _, err := c.Match(context.Background(), "film", item.ID, "99", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(films, "Film.nfo"), []byte(`<movie><title>Local</title><uniqueid type="tmdb">42</uniqueid></movie>`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := c.Scan(context.Background(), 1); err != nil {
