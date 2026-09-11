@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type RefObject } from 'react';
+import { flushSync } from 'react-dom';
 import { api } from '../../api/client';
 import { ApiError, type Profile } from '../../core/api';
 import { Wordmark } from '../../modules/productChrome/Wordmark';
@@ -14,6 +15,7 @@ export function ProfileChooser({ onSelected, owner, onReady }: { onSelected: () 
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
   const busy = useRef(false);
+  const pinInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let active = true;
     setLoading(true); setError('');
@@ -36,7 +38,12 @@ export function ProfileChooser({ onSelected, owner, onReady }: { onSelected: () 
   const open = (profile: Profile) => {
     setError('');
     if (!profile.protected) void choose(profile);
-    else setPending(profile);
+    else {
+      // Mount the portal before requesting focus within the selection gesture,
+      // so touch browsers can open their software keyboard.
+      flushSync(() => setPending(profile));
+      pinInput.current?.focus({ preventScroll: true });
+    }
   };
   return <section className="profile-choice">
     <header><Wordmark /><button className="quiet-button" onClick={owner}>Owner settings <span aria-hidden="true">↗</span></button></header>
@@ -46,15 +53,14 @@ export function ProfileChooser({ onSelected, owner, onReady }: { onSelected: () 
       {!loading && profiles.length === 0 && !error && <div className="empty-state"><p className="eyebrow">NO PROFILES YET</p><h2>Set up your household</h2><p>Each profile keeps its own list and viewing progress. The owner adds profiles from settings.</p><button className="primary" onClick={owner}>Sign in as owner</button></div>}
       <p className="local-note"><span aria-hidden="true">●</span> On your server. Always at home.</p>
     </div>
-    {pending && <PinDialog profile={pending} error={error} busy={Boolean(selecting)} onSubmit={(pin) => choose(pending, pin)} onClose={() => { if (!busy.current) { setPending(undefined); setError(''); } }} />}
+    {pending && <PinDialog input={pinInput} profile={pending} error={error} busy={Boolean(selecting)} onSubmit={(pin) => choose(pending, pin)} onClose={() => { if (!busy.current) { setPending(undefined); setError(''); } }} />}
   </section>;
 }
 
-function PinDialog({ profile, error, busy, onSubmit, onClose }: { profile: Profile; error: string; busy: boolean; onSubmit: (pin: string) => Promise<boolean>; onClose: () => void }) {
+function PinDialog({ input, profile, error, busy, onSubmit, onClose }: { input: RefObject<HTMLInputElement | null>; profile: Profile; error: string; busy: boolean; onSubmit: (pin: string) => Promise<boolean>; onClose: () => void }) {
   const [longPin, setLongPin] = useState(false);
   const [pin, setPin] = useState('');
   const [attempt, setAttempt] = useState(0);
-  const input = useRef<HTMLInputElement>(null);
   const hintId = useId();
   const submit = async (value: string) => {
     if (!value) return;
@@ -67,12 +73,12 @@ function PinDialog({ profile, error, busy, onSubmit, onClose }: { profile: Profi
   };
   const switchMode = () => { setLongPin((value) => !value); setPin(''); setAttempt((value) => value + 1); };
   const complete = longPin ? pin.length >= 4 : pin.length === 4;
-  return <AppModal open onClose={onClose} locked={busy} className="pin-dialog" title={`Enter PIN for ${profile.name}`} description="This profile is locked. Enter its PIN to continue.">
+  return <AppModal open initialFocusRef={input} onClose={onClose} locked={busy} className="pin-dialog" title={`Enter PIN for ${profile.name}`} description="This profile is locked. Enter its PIN to continue.">
     <form onSubmit={(event) => { event.preventDefault(); void submit(pin); }} aria-busy={busy}>
       <Avatar name={profile.name} src={profile.avatar} />
       {longPin
         ? <label>Profile PIN<input ref={input} required autoFocus autoComplete="current-password" inputMode="numeric" type="password" value={pin} disabled={busy} aria-describedby={hintId} aria-invalid={Boolean(error) || undefined} onChange={(event) => setPin(event.target.value)} /></label>
-        : <PinCells key={attempt} label="Profile PIN" autoFocus disabled={busy} invalid={Boolean(error)} describedBy={hintId} onChange={setPin} onComplete={(value) => void submit(value)} />}
+        : <PinCells key={attempt} firstInputRef={input} label="Profile PIN" autoFocus={attempt > 0} disabled={busy} invalid={Boolean(error)} describedBy={hintId} onChange={setPin} onComplete={(value) => void submit(value)} />}
       <p id={hintId} className={error ? 'form-error' : 'field-hint'} role={error ? 'alert' : undefined}>{error || (longPin ? 'Enter your full PIN, then continue.' : 'Four digits. The profile opens on the last one.')}</p>
       <button type="button" className="link-button" disabled={busy} onClick={switchMode}>{longPin ? 'Use a 4-digit PIN' : 'My PIN is longer than 4 digits'}</button>
       <div className="actions"><button type="button" disabled={busy} className="quiet-button" onClick={onClose}>Cancel</button><BusyButton className="primary" busy={busy} disabled={!complete}>Continue</BusyButton></div>
