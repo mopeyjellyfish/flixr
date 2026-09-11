@@ -168,7 +168,16 @@ func snapshotEntries(ctx context.Context, snapshot, dataDir string, beforeArtwor
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&schemaVersion); err != nil {
 		return nil, 0, fmt.Errorf("read snapshot schema: %w", err)
 	}
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT object_name FROM catalog_artwork WHERE object_name<>'' ORDER BY object_name`)
+	artworkQuery := `SELECT DISTINCT object_name FROM catalog_artwork WHERE object_name<>'' ORDER BY object_name`
+	if schemaVersion >= 31 {
+		artworkQuery = `
+			SELECT object_name FROM catalog_artwork WHERE object_name<>''
+			UNION SELECT local_object_name FROM catalog_local_artwork WHERE local_object_name<>''
+			UNION SELECT fallback_object_name FROM catalog_local_artwork WHERE fallback_object_name<>''
+			UNION SELECT object_name FROM catalog_local_identity_artwork WHERE object_name<>''
+			ORDER BY object_name`
+	}
+	rows, err := db.QueryContext(ctx, artworkQuery)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read snapshot artwork references: %w", err)
 	}
