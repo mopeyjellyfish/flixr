@@ -1,8 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, type RefObject } from 'react';
 import { useOtpInput } from '../../vendor/interior/otp-input';
 
 type PinCellsProps = {
   label: string;
+  firstInputRef?: RefObject<HTMLInputElement | null>;
   length?: number;
   disabled?: boolean;
   autoFocus?: boolean;
@@ -13,7 +14,7 @@ type PinCellsProps = {
 };
 
 /** Masked digit cells for household PINs. Native password masking keeps contrast checks honest. Remount with a new `key` to clear it. */
-export function PinCells({ label, length = 4, disabled = false, autoFocus = false, invalid = false, describedBy, onChange, onComplete }: PinCellsProps) {
+export function PinCells({ firstInputRef, label, length = 4, disabled = false, autoFocus = false, invalid = false, describedBy, onChange, onComplete }: PinCellsProps) {
   const otp = useOtpInput({ length, mode: 'numeric', disabled, onChange, onComplete });
   const { focusAt } = otp;
   useEffect(() => { if (autoFocus && !disabled) focusAt(0); }, [autoFocus, disabled, focusAt]);
@@ -21,7 +22,7 @@ export function PinCells({ label, length = 4, disabled = false, autoFocus = fals
     {otp.chars.map((char, index) => {
       const { ref, ...cell } = otp.getCellProps(index);
       return <span key={index} className={`pin-cell ${char ? 'is-filled' : ''} ${otp.focusedIndex === index ? 'is-focused' : ''}`}>
-        <input ref={ref} {...cell} type="password" aria-label={`${label} digit ${index + 1} of ${length}`} className="pin-cell-input" />
+        <input ref={(element) => { ref(element); if (index === 0 && firstInputRef) firstInputRef.current = element; }} {...cell} type="password" aria-label={`${label} digit ${index + 1} of ${length}`} className="pin-cell-input" />
       </span>;
     })}
   </div>;

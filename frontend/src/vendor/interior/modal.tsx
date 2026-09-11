@@ -120,7 +120,11 @@ export function useModal({
   initialFocusRef,
   container,
 }: UseModalOptions): UseModalResult {
-  const [target, setTarget] = useState<HTMLElement | null>(null);
+  // Make client-side dialogs available in the opening gesture (e.g. a PIN
+  // input needs synchronous focus to request a mobile software keyboard).
+  const [target, setTarget] = useState<HTMLElement | null>(() =>
+    container === undefined ? (typeof document === "undefined" ? null : document.body) : container,
+  );
 
   const overlayRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
