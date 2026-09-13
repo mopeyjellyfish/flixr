@@ -18,7 +18,7 @@
   "dependencies": {
     "@fontsource/atkinson-hyperlegible-next": "^5.3.0",
     "@fontsource/manrope": "^5.3.0",
-    "@tanstack/react-virtual": "^3.14.10",
+    "@tanstack/react-virtual": "^3.14.11",
     "hls.js": "^1.7.1",
     "motion": "^13.2.0",
     "react": "^19.2.8",
