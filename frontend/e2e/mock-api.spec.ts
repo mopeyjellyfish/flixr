@@ -28,6 +28,7 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/playback/activity' ? { json: { capacity: { max_generations: 2, starting: 0, active_sessions: 0, generation_bytes: 268435456, global_bytes: 536870912, cache_bytes: 0, generations: [] }, sessions: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/media-version-groups' ? { json: { groups: [], candidates: [], total: 0 } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/scan/jobs' ? { json: { jobs: [] } } : undefined)
@@ -251,6 +252,7 @@ for (const viewport of viewports) {
     await open(page, '/search?q=relay');
     await expect(page.getByTestId('card-series-1')).toBeVisible();
 
+    let playbackStopped = false;
     await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed: true, readiness: { ffprobe: false, ffmpeg: true } } };
       if (path.endsWith('/owner/roots')) return { json: { films: '/media/films', tv: '/media/tv' } };
@@ -268,6 +270,8 @@ for (const viewport of viewports) {
       if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
       if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
+      if (path.endsWith('/owner/playback/activity')) return { json: { capacity: { max_generations: 2, starting: 0, active_sessions: playbackStopped ? 0 : 1, generation_bytes: 268435456, global_bytes: 536870912, cache_bytes: 0, generations: [] }, sessions: playbackStopped ? [] : [{ owner_handle: 'safe-owner-handle', catalog_id: 'film-1', title: 'Cobalt Sky', kind: 'direct', reason: 'Original media is compatible', quality_mode: 'original', width: 1920, height: 1080, started_at: 1700000000, device: 'Unknown device' }] } };
+      if (path.endsWith('/owner/playback/sessions/safe-owner-handle/stop') && method === 'POST') { playbackStopped = true; return { json: { stopped: true } }; }
       if (path.endsWith('/scan/status')) return { json: { scan: { status: 'partial', scanned: 2, unmatched: 1, failed: 1 } } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return undefined;
@@ -276,6 +280,13 @@ for (const viewport of viewports) {
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
     await expect(page.getByText(/partial: 2 scanned/i)).toBeVisible();
     await expect(page.getByLabel(/TMDB API Read Access Token/i)).toHaveValue('');
+    await page.getByRole('navigation', { name: 'Server settings' }).getByRole('link', { name: 'Playback & screens' }).click();
+    await expect(page.getByRole('heading', { name: 'Active playback' })).toBeVisible();
+    await expect(page.getByText('Unknown device', { exact: false })).toBeVisible();
+    await page.locator('#playback').screenshot({ path: testInfo.outputPath('owner-playback.png') });
+    await page.getByRole('button', { name: 'Stop Cobalt Sky' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Stop playback' }).click();
+    await expect(page.getByText(/No playback sessions are active/i)).toBeVisible();
     await page.getByText('Edit metadata').click();
     await expect(page.getByLabel('Tags')).toHaveValue('family');
     await page.getByRole('button', { name: /preview provider refresh/i }).click();

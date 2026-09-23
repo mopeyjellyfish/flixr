@@ -29,7 +29,7 @@ The plan and behavior share this PR. No parallel writers: the owner response, pl
 
 Prove the current owner status includes compatibility generations but not individual direct sessions → add safe bounded activity and stop seam → render it in the incumbent owner panel → verify authorization, recovery, accessibility and CI. One serial lane, one PR. Expensive gates: Go race, page bounds under many direct sessions, and browser/real-media acceptance. No SQL migration or new persistent device identity. Invalidation: manager changes rerun manager/web lifecycle and race tests; HTTP contract changes rerun owner/profile auth and typed client; UI changes rerun owner tests plus desktop/phone browser checks; the final frozen diff receives independent security/lifecycle review. The CI release job is a post-merge gate, not authorization to merge.
 
-## [ ] 001 — Provide bounded, owner-only playback activity
+## [x] 001 — Provide bounded, owner-only playback activity
 
 ### Outcome and requirement trace
 
@@ -63,7 +63,7 @@ Manager snapshot and owner activity HTTP contract with focused tests; delivery u
 
 The owner gets a bounded, path-free session page and capacity facts; no other principal can see them and existing plan/status contracts still work.
 
-## [ ] 002 — Stop one active session safely and explain capacity
+## [x] 002 — Stop one active session safely and explain capacity
 
 ### Outcome and requirement trace
 
@@ -97,7 +97,7 @@ Owner stop route and capacity remedy with regression tests; delivery unit 1.
 
 Only owners stop the exact live session they select; all other clients see no owner handles or diagnostics, and capacity failure has a useful next action.
 
-## [ ] 003 — Show owner activity and recovery in the incumbent interface
+## [x] 003 — Show owner activity and recovery in the incumbent interface
 
 ### Outcome and requirement trace
 

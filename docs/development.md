@@ -42,6 +42,20 @@ browser request shows its support ID; include that ID only when you choose to
 share the archive with support. The records are in memory, so restarting Flixr
 clears them. See [SUPPORT.md](../SUPPORT.md) before opening a public issue.
 
+## Owner playback activity
+
+The owner-only **Playback & screens** section shows a bounded live page of direct,
+remux, and transcode sessions plus configured generation and cache capacity. The
+page uses a separate in-memory owner handle to stop one exact session. It does not
+show playback bearer IDs, media paths, input URLs, credentials, or FFmpeg logs.
+Unbound sessions are labelled **Unknown device**. Activity is a live view rather
+than a snapshot; refresh from the first page after sessions change.
+
+Mocked Chromium checks cover the owner activity section at 1440×900 and 390×844,
+including exact Stop confirmation and the resulting empty state. The screenshots
+were inspected against `DESIGN.md`; the mismatch ledger is empty. These mocks do
+not prove production media playback or a real bound device.
+
 ## Development demo
 
 For UI development with live reload and the same 50-film / 50-show catalogue:
