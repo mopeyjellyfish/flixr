@@ -193,7 +193,7 @@ describe('browse', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
     rerender(<Browse mode="search" query="" onExit={() => undefined} />);
     expect(await screen.findByRole('heading', { name: /no matching titles/i })).toBeInTheDocument();
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it('renders persistent destinations and lets the route update the active destination', async () => {
@@ -265,6 +265,7 @@ it('uses the current search route query for direct search membership', async () 
   const demo = { id: 'demo-1', title: 'Demo Signal', kind: 'film', local_only: false, playable: false, demo: true, listed: true };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
+    if (path.includes('state_id=demo-1')) return new Response(JSON.stringify({ state: { listed: true, continue_watching_dismissed: false } }));
     if (path.includes('/catalog/search')) return new Response(JSON.stringify({ items: [demo] }));
     if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [demo] }, { name: 'Drama', items: [demo] }, { name: 'My List', items: [demo] }] }));
     if (path.includes('/catalog/list/')) return new Response(JSON.stringify({ listed: false }));
@@ -281,10 +282,11 @@ it('uses the current search route query for direct search membership', async () 
 
 it('adds a repeated title to My List only once', async () => {
   const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: false, listed: false };
+  let listed = false;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
-    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }, { name: 'Drama', items: [title] }, { name: 'My List', items: [] }] }));
-    if (path.includes('/catalog/list/')) return new Response(JSON.stringify({ listed: true }));
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ ...title, listed }] }, { name: 'Drama', items: [{ ...title, listed }] }, { name: 'My List', items: listed ? [{ ...title, listed }] : [] }] }));
+    if (path.includes('/catalog/list/')) { listed = true; return new Response(JSON.stringify({ listed })); }
     throw new Error(`Unexpected request ${path}`);
   });
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
@@ -390,6 +392,7 @@ it('carries Continue Watching dismissal state into search details', async () => 
   const title = { id: 'film-1', title: 'Signal', kind: 'film', local_only: true, listed: false, continue_watching_dismissed: true };
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     const path = String(input);
+    if (path.includes('state_id=film-1')) return new Response(JSON.stringify({ state: { listed: false, continue_watching_dismissed: true } }));
     if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }] }));
     if (path.includes('/catalog/search')) return new Response(JSON.stringify({ items: [{ id: 'film-1', title: 'Signal', kind: 'film', local_only: true }] }));
     throw new Error(`Unexpected request ${path}`);
@@ -449,6 +452,64 @@ it('reconciles My List and Continue Watching state when a deep detail loads befo
   expect(screen.getByRole('button', { name: 'Restore to Continue Watching' })).toBeInTheDocument();
 });
 
+it('appends a bounded section page without duplicates or moving keyboard focus', async () => {
+  const first = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  const second = { id: 'b', title: 'Beta', kind: 'film', local_only: true, listed: false };
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('section=New')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [first, second] }] }));
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [first], next_cursor: 'page-2' }] }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  render(<Browse onExit={() => undefined} />);
+  const card = await screen.findByTestId('card-a');
+  card.focus();
+  fireEvent.click(screen.getByRole('button', { name: 'Load more New' }));
+  expect(await screen.findByTestId('card-b')).toBeInTheDocument();
+  expect(screen.getAllByTestId('card-a')).toHaveLength(1);
+  expect(card).toHaveFocus();
+  expect(fetcher.mock.calls.some(([input]) => String(input).includes('section=New') && String(input).includes('cursor=page-2'))).toBe(true);
+});
+
+it('keeps an existing section visible and retries a failed next page', async () => {
+  const first = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  let attempts = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('section=New')) {
+      attempts += 1;
+      if (attempts === 1) return new Response('{}', { status: 500 });
+      return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ id: 'b', title: 'Beta', kind: 'film', local_only: true, listed: false }] }] }));
+    }
+    return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [first], next_cursor: 'page-2' }] }));
+  });
+  render(<Browse onExit={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load more New' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('More titles could not be loaded');
+  expect(screen.getByTestId('card-a')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry New' }));
+  expect(await screen.findByTestId('card-b')).toBeInTheDocument();
+});
+
+it('aborts an obsolete viewer request and search does not preload a viewer model', async () => {
+  let initialSignal: AbortSignal | undefined;
+  const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/view')) {
+      initialSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    }
+    if (path.includes('/catalog/search')) return new Response(JSON.stringify({ items: [] }));
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const { rerender } = render(<Browse onExit={() => undefined} />);
+  await waitFor(() => expect(initialSignal).toBeDefined());
+  rerender(<Browse mode="search" query="signal" onExit={() => undefined} />);
+  await waitFor(() => expect(initialSignal?.aborted).toBe(true));
+  await waitFor(() => expect(fetcher.mock.calls.some(([input]) => String(input).includes('/catalog/search'))).toBe(true));
+  expect(fetcher.mock.calls.filter(([input]) => String(input).includes('/catalog/view'))).toHaveLength(1);
+});
+
 it('does not let a completed preference save replace a newer destination', async () => {
   let resolvePreference: ((response: Response) => void) | undefined;
   const filmModel = { preference: { view: 'grid', sort: 'title' }, items: [{ id: 'film', title: 'Film destination', kind: 'film', local_only: true, listed: false }] };
@@ -469,6 +530,275 @@ it('does not let a completed preference save replace a newer destination', async
   await waitFor(() => expect(screen.getAllByText('Series destination')).not.toHaveLength(0));
   expect(screen.queryByText('Film destination')).not.toBeInTheDocument();
 });
+it('keeps focus when the last page finishes after keyboard-style activation', async () => {
+  const first = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    if (String(input).includes('section=New')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ id: 'b', title: 'Beta', kind: 'film', local_only: true, listed: false }] }] }));
+    return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [first], next_cursor: 'last-page' }] }));
+  });
+  render(<Browse onExit={() => undefined} />);
+  const load = await screen.findByRole('button', { name: 'Load more New' });
+  load.focus();
+  fireEvent.click(load);
+  await screen.findByTestId('card-b');
+  expect(screen.getByRole('button', { name: 'All New loaded' })).toHaveFocus();
+});
+
+it('rejects a late old-sort page after changing the preference', async () => {
+  let resolveOld: ((response: Response) => void) | undefined;
+  let oldSignal: AbortSignal | null | undefined;
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/preferences/')) return new Response(JSON.stringify({ view: 'grid', sort: 'year' }));
+    if (path.includes('cursor=old-page')) {
+      oldSignal = init?.signal;
+      return new Promise<Response>((resolve) => { resolveOld = resolve; });
+    }
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify(views++ === 0
+      ? { preference: { view: 'grid', sort: 'title' }, items: [{ id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false }], next_cursor: 'old-page' }
+      : { preference: { view: 'grid', sort: 'year' }, items: [{ id: 'b', title: 'Beta', kind: 'film', local_only: true, listed: false }], next_cursor: 'new-page' }));
+    throw new Error(`Unexpected ${path}`);
+  });
+  render(<Browse mode="movies" onExit={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load more Titles' }));
+  await waitFor(() => expect(resolveOld).toBeTypeOf('function'));
+  fireEvent.change(screen.getByLabelText('Sort'), { target: { value: 'year' } });
+  expect(await screen.findByTestId('card-b')).toBeInTheDocument();
+  expect(oldSignal?.aborted).toBe(true);
+  await act(async () => { resolveOld?.(new Response(JSON.stringify({ preference: { view: 'grid', sort: 'title' }, items: [{ id: 'old', title: 'Old sort', kind: 'film', local_only: true, listed: false }] }))); });
+  expect(screen.queryByTestId('card-old')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Load more Titles' })).toBeEnabled();
+});
+
+it('keeps authoritative My List state for a detail beyond the loaded page', async () => {
+  const deep = { id: 'deep', title: 'Deep title', kind: 'film', local_only: true, listed: false };
+  let listed = false;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('state_id=deep')) return new Response(JSON.stringify({ state: { listed: false, continue_watching_dismissed: false } }));
+    if (path.includes('/catalog/items/deep')) return new Response(JSON.stringify(deep));
+    if (path.includes('/catalog/list/film/deep')) { listed = true; return new Response(JSON.stringify({ listed })); }
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ id: 'other', title: 'Other', kind: 'film', local_only: true, listed: false }] }, { name: 'My List', items: listed ? [{ ...deep, listed }] : [] }] }));
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse detailID="deep" onExit={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add to My List' }));
+  expect(await screen.findByRole('button', { name: 'Remove from My List' })).toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: 'My List' })).getByTestId('card-deep')).toBeInTheDocument();
+});
+
+it('invalidates pending My List pages after removing a title', async () => {
+  const title = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: true };
+  let resolvePage: ((response: Response) => void) | undefined;
+  let pageSignal: AbortSignal | null | undefined;
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('state_id=a')) return new Response(JSON.stringify({ state: { listed: true, continue_watching_dismissed: false } }));
+    if (path.includes('/catalog/items/a')) return new Response(JSON.stringify(title));
+    if (path.includes('/catalog/list/film/a')) return new Response(JSON.stringify({ listed: false }));
+    if (path.includes('section=My+List')) { pageSignal = init?.signal; return new Promise<Response>((resolve) => { resolvePage = resolve; }); }
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify(views++ === 0
+      ? { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }, { name: 'My List', items: [title], next_cursor: 'old' }] }
+      : { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ ...title, listed: false }] }, { name: 'My List', items: [] }] }));
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse onExit={() => undefined} />);
+  fireEvent.click(await within(await screen.findByRole('region', { name: 'New' })).findByTestId('card-a'));
+  fireEvent.click(screen.getByRole('button', { name: 'Load more My List' }));
+  await waitFor(() => expect(resolvePage).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'Remove from My List' }));
+  await waitFor(() => expect(pageSignal?.aborted).toBe(true));
+  await act(async () => { resolvePage?.(new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'My List', items: [title] }] }))); });
+  await waitFor(() => expect(within(screen.getByRole('region', { name: 'My List' })).queryByTestId('card-a')).not.toBeInTheDocument());
+});
+
+it('does not allow unknown detail membership to be changed before state loads and permits retry', async () => {
+  let resolveState: ((response: Response) => void) | undefined;
+  let attempts = 0;
+  const deep = { id: 'deep', title: 'Deep title', kind: 'film', local_only: true };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('state_id=deep')) {
+      attempts += 1;
+      if (attempts === 1) return new Promise<Response>((resolve) => { resolveState = resolve; });
+      if (attempts === 2) return new Response('{}', { status: 500 });
+      return new Response(JSON.stringify({ state: { listed: true, continue_watching_dismissed: true } }));
+    }
+    if (path.includes('/catalog/items/deep')) return new Response(JSON.stringify(deep));
+    if (path.includes('/catalog/view')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [{ id: 'other', title: 'Other', kind: 'film', local_only: true, listed: false }] }] }));
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse detailID="deep" onExit={() => undefined} />);
+  await waitFor(() => expect(resolveState).toBeTypeOf('function'));
+  await screen.findByRole('dialog');
+  expect(screen.getByRole('button', { name: 'Add to My List' })).toBeDisabled();
+  await act(async () => { resolveState?.(new Response('{}', { status: 500 })); });
+  expect(await screen.findByRole('alert')).toHaveTextContent('Title state could not be loaded');
+  expect(screen.getByRole('button', { name: 'Add to My List' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry title state' }));
+  await waitFor(() => expect(attempts).toBe(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry title state' })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Retry title state' }));
+  expect(await screen.findByRole('button', { name: 'Remove from My List' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Restore to Continue Watching' })).toBeInTheDocument();
+});
+
+it('does not start an old-cursor page while a mutation refresh is pending', async () => {
+  const title = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  let resolveFresh: ((response: Response) => void) | undefined;
+  let firstPages = 0;
+  let oldPages = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('state_id=a')) return new Response(JSON.stringify({ state: { listed: false, continue_watching_dismissed: false } }));
+    if (path.includes('/catalog/items/a')) return new Response(JSON.stringify(title));
+    if (path.includes('/catalog/list/film/a')) return new Response(JSON.stringify({ listed: true }));
+    if (path.includes('cursor=old')) { oldPages += 1; return new Response(JSON.stringify({ preference: { view: 'grid', sort: 'title' }, items: [] })); }
+    if (path.includes('/catalog/view')) return firstPages++ === 0
+      ? new Response(JSON.stringify({ preference: { view: 'grid', sort: 'title' }, items: [title], next_cursor: 'old' }))
+      : new Promise<Response>((resolve) => { resolveFresh = resolve; });
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+  render(<Browse mode="movies" onExit={() => undefined} />);
+  fireEvent.click(await screen.findByTestId('card-a'));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add to My List' }));
+  await waitFor(() => expect(resolveFresh).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+  const load = screen.getByRole('button', { name: /more Titles/i });
+  fireEvent.click(load);
+  expect(oldPages).toBe(0);
+  await act(async () => { resolveFresh?.(new Response(JSON.stringify({ preference: { view: 'grid', sort: 'title' }, items: [{ ...title, listed: true }, { id: 'new', title: 'New title', kind: 'film', local_only: true, listed: false }], next_cursor: 'new' }))); });
+  expect(await screen.findByTestId('card-new')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Load more Titles' })).toBeEnabled();
+});
+
+it('does not let a completed My List write refresh the previous destination', async () => {
+  const film = { id: 'film', title: 'Film destination', kind: 'film', local_only: true, listed: false };
+  const series = { id: 'series', title: 'Series destination', kind: 'series', local_only: true, listed: false };
+  let resolveWrite: ((response: Response) => void) | undefined;
+  let filmViews = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('state_id=film')) return new Response(JSON.stringify({ state: { listed: false, continue_watching_dismissed: false } }));
+    if (path.includes('/catalog/items/film')) return new Response(JSON.stringify(film));
+    if (path.includes('/catalog/list/film/film')) return new Promise<Response>((resolve) => { resolveWrite = resolve; });
+    if (path.includes('media=film')) { filmViews += 1; return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [film] }, { name: 'My List', items: [] }] })); }
+    if (path.includes('media=series')) return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [series] }] }));
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+  const { rerender } = render(<Browse mode="movies" detailID="film" onExit={() => undefined} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add to My List' }));
+  await waitFor(() => expect(resolveWrite).toBeTypeOf('function'));
+  rerender(<Browse mode="tv" onExit={() => undefined} />);
+  expect(await screen.findByTestId('card-series')).toBeInTheDocument();
+  await act(async () => { resolveWrite?.(new Response(JSON.stringify({ listed: true }))); });
+  expect(screen.getByTestId('card-series')).toBeInTheDocument();
+  expect(screen.queryByTestId('card-film')).not.toBeInTheDocument();
+  expect(filmViews).toBe(1);
+});
+
+it('reconciles two concurrent Continue Watching dismissals in one destination', async () => {
+  const a = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  const b = { id: 'b', title: 'Beta', kind: 'film', local_only: true, listed: false };
+  const dismissed = new Set<string>();
+  let resolveA: ((response: Response) => void) | undefined;
+  let resolveB: ((response: Response) => void) | undefined;
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const path = String(input);
+    if (path.includes('/catalog/continue-watching/film/a')) return new Promise<Response>((resolve) => { resolveA = resolve; });
+    if (path.includes('/catalog/continue-watching/film/b')) return new Promise<Response>((resolve) => { resolveB = resolve; });
+    if (path.includes('/catalog/view')) {
+      views += 1;
+      return new Response(JSON.stringify({ preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: [a, b].filter((item) => !dismissed.has(item.id)) }, { name: 'New', items: [a, b] }] }));
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  render(<Browse onExit={() => undefined} />);
+  const row = await screen.findByRole('region', { name: 'Continue Watching' });
+  fireEvent.click(within(row).getByRole('button', { name: 'Hide Alpha from Continue Watching' }));
+  fireEvent.click(within(row).getByRole('button', { name: 'Hide Beta from Continue Watching' }));
+  await waitFor(() => expect(resolveA && resolveB).toBeTruthy());
+  dismissed.add('a');
+  await act(async () => { resolveA?.(new Response(JSON.stringify({ dismissed: true }))); });
+  await waitFor(() => expect(views).toBe(2));
+  expect(within(row).getByTestId('card-b')).toBeInTheDocument();
+  dismissed.add('b');
+  await act(async () => { resolveB?.(new Response(JSON.stringify({ dismissed: true }))); });
+  await waitFor(() => expect(views).toBe(3));
+  expect(within(row).queryByTestId('card-b')).not.toBeInTheDocument();
+});
+
+it('loads the saved preference after a concurrent dismissal refresh', async () => {
+  const title = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  let resolvePreference: ((response: Response) => void) | undefined;
+  let saved = false;
+  let dismissed = false;
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/preferences/all') && init?.method === 'PUT') return new Promise<Response>((resolve) => { resolvePreference = resolve; });
+    if (path.includes('/catalog/continue-watching/film/a')) { dismissed = true; return new Response(JSON.stringify({ dismissed })); }
+    if (path.includes('/catalog/view')) {
+      views += 1;
+      return new Response(JSON.stringify(saved
+        ? { preference: { view: 'grid', sort: 'title' }, items: [title] }
+        : { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Continue Watching', items: dismissed ? [] : [title] }, { name: 'New', items: [title] }] }));
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  render(<Browse onExit={() => undefined} />);
+  const row = await screen.findByRole('region', { name: 'Continue Watching' });
+  fireEvent.change(await screen.findByLabelText('View'), { target: { value: 'grid' } });
+  await waitFor(() => expect(resolvePreference).toBeTypeOf('function'));
+  fireEvent.click(within(row).getByRole('button', { name: 'Hide Alpha from Continue Watching' }));
+  await waitFor(() => expect(views).toBe(2));
+  saved = true;
+  await act(async () => { resolvePreference?.(new Response(JSON.stringify({ view: 'grid', sort: 'title' }))); });
+  expect(await screen.findByRole('region', { name: 'Titles' })).toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Continue Watching' })).not.toBeInTheDocument();
+});
+
+it('loads the saved preference after a concurrent watched-state reload', async () => {
+  const title = { id: 'a', title: 'Alpha', kind: 'film', local_only: true, listed: false };
+  let resolvePreference: ((response: Response) => void) | undefined;
+  let saved = false;
+  let views = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.includes('/catalog/preferences/all') && init?.method === 'PUT') return new Promise<Response>((resolve) => { resolvePreference = resolve; });
+    if (path.includes('/catalog/watched/film/a')) return new Response(JSON.stringify({ watched: true }));
+    if (path.includes('state_id=a')) return new Response(JSON.stringify({ state: { listed: false } }));
+    if (path.includes('/catalog/view')) {
+      views += 1;
+      return new Response(JSON.stringify(saved
+        ? { preference: { view: 'grid', sort: 'title' }, items: [title] }
+        : { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [title] }] }));
+    }
+    throw new Error(`Unexpected ${path}`);
+  });
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  render(<Browse onExit={() => undefined} />);
+  await screen.findByRole('region', { name: 'New' });
+  fireEvent.change(screen.getByLabelText('View'), { target: { value: 'grid' } });
+  await waitFor(() => expect(resolvePreference).toBeTypeOf('function'));
+  fireEvent.click(screen.getByTestId('card-a'));
+  fireEvent.click(await screen.findByRole('button', { name: 'Mark watched' }));
+  await waitFor(() => expect(views).toBe(2));
+  saved = true;
+  await act(async () => { resolvePreference?.(new Response(JSON.stringify({ view: 'grid', sort: 'title' }))); });
+  expect(await screen.findByRole('region', { name: 'Titles' })).toBeInTheDocument();
+});
+
 });
 
 function pendingResponse() {

@@ -3,6 +3,10 @@ package playback
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -91,6 +95,12 @@ type pendingHandoff struct {
 	replacementGeneration string
 }
 
+type preparingReplacement struct {
+	oldID          string
+	newID          string
+	ownerStoppedID string
+}
+
 type resolvedHandoff struct {
 	viewerID  string
 	profileID string
@@ -143,51 +153,91 @@ type Status struct {
 	Generations []GenerationStatus `json:"generations"`
 }
 
+// ActivitySession is a path-free owner summary of one live playback authority.
+type ActivitySession struct {
+	OwnerHandle      string      `json:"owner_handle"`
+	CatalogID        string      `json:"catalog_id"`
+	Title            string      `json:"title,omitempty"`
+	Kind             Kind        `json:"kind"`
+	Reason           string      `json:"reason"`
+	AudioStreamIndex *int        `json:"audio_stream_index,omitempty"`
+	AudioExternal    bool        `json:"audio_external,omitempty"`
+	SubtitleIndex    *int        `json:"subtitle_stream_index,omitempty"`
+	SubtitleExternal bool        `json:"subtitle_external,omitempty"`
+	QualityMode      QualityMode `json:"quality_mode,omitempty"`
+	Width            int         `json:"width,omitempty"`
+	Height           int         `json:"height,omitempty"`
+	VideoBitrate     int64       `json:"video_bitrate,omitempty"`
+	StartedAt        int64       `json:"started_at"`
+	Device           string      `json:"device"`
+}
+
+type ActivityCapacity struct {
+	MaxGenerations  int                `json:"max_generations"`
+	Starting        int                `json:"starting"`
+	ActiveSessions  int                `json:"active_sessions"`
+	GenerationBytes int64              `json:"generation_bytes"`
+	GlobalBytes     int64              `json:"global_bytes"`
+	CacheBytes      int64              `json:"cache_bytes"`
+	Generations     []GenerationStatus `json:"generations"`
+}
+
+type ActivityPage struct {
+	Capacity   ActivityCapacity  `json:"capacity"`
+	Sessions   []ActivitySession `json:"sessions"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
 // Manager owns profile-bound sessions, FFmpeg generations, leases and temporary output.
 type Manager struct {
-	mu                sync.Mutex
-	settings          Settings
-	db                *sqlite.DB
-	files             afero.Afero
-	inputBase         string
-	executor          Executor
-	manifestWait      time.Duration
-	sessions          map[string]Session
-	generations       map[string]*generation
-	inputs            map[string]inputAuthority
-	revokedViewers    map[string]struct{}
-	pendingViewers    map[string]int
-	starting          int
-	pendingJobs       map[string]struct{}
-	replacements      map[string]string
-	preparingHandoffs map[string]time.Time
-	handoffs          map[string]pendingHandoff
-	sessionHandoffs   map[string]string
-	resolvedHandoffs  map[string]resolvedHandoff
-	subtitleJobs      map[string]map[string]context.CancelFunc
-	startWG           sync.WaitGroup
-	cancel            context.CancelFunc
-	janitorDone       chan struct{}
-	closed            bool
+	mu                    sync.Mutex
+	settings              Settings
+	db                    *sqlite.DB
+	files                 afero.Afero
+	inputBase             string
+	executor              Executor
+	manifestWait          time.Duration
+	sessions              map[string]Session
+	generations           map[string]*generation
+	inputs                map[string]inputAuthority
+	revokedViewers        map[string]struct{}
+	pendingViewers        map[string]int
+	starting              int
+	pendingJobs           map[string]struct{}
+	replacements          map[string]string
+	preparingHandoffs     map[string]time.Time
+	preparingReplacements map[string]*preparingReplacement
+	handoffs              map[string]pendingHandoff
+	sessionHandoffs       map[string]string
+	resolvedHandoffs      map[string]resolvedHandoff
+	subtitleJobs          map[string]map[string]context.CancelFunc
+	startWG               sync.WaitGroup
+	cancel                context.CancelFunc
+	janitorDone           chan struct{}
+	closed                bool
+	cursorSecret          string
 }
 
 // NewDirectManager creates a no-goroutine manager for direct-only tests and callers.
 func NewDirectManager() *Manager {
+	secret, _ := randomToken()
 	return &Manager{
-		settings:          DefaultSettings(os.TempDir()),
-		files:             afero.Afero{Fs: afero.NewOsFs()},
-		sessions:          map[string]Session{},
-		generations:       map[string]*generation{},
-		inputs:            map[string]inputAuthority{},
-		revokedViewers:    map[string]struct{}{},
-		pendingViewers:    map[string]int{},
-		pendingJobs:       map[string]struct{}{},
-		replacements:      map[string]string{},
-		preparingHandoffs: map[string]time.Time{},
-		handoffs:          map[string]pendingHandoff{},
-		sessionHandoffs:   map[string]string{},
-		resolvedHandoffs:  map[string]resolvedHandoff{},
-		subtitleJobs:      map[string]map[string]context.CancelFunc{},
+		settings:              DefaultSettings(os.TempDir()),
+		files:                 afero.Afero{Fs: afero.NewOsFs()},
+		sessions:              map[string]Session{},
+		generations:           map[string]*generation{},
+		inputs:                map[string]inputAuthority{},
+		revokedViewers:        map[string]struct{}{},
+		pendingViewers:        map[string]int{},
+		pendingJobs:           map[string]struct{}{},
+		replacements:          map[string]string{},
+		preparingHandoffs:     map[string]time.Time{},
+		preparingReplacements: map[string]*preparingReplacement{},
+		handoffs:              map[string]pendingHandoff{},
+		sessionHandoffs:       map[string]string{},
+		resolvedHandoffs:      map[string]resolvedHandoff{},
+		subtitleJobs:          map[string]map[string]context.CancelFunc{},
+		cursorSecret:          secret,
 	}
 }
 
@@ -216,28 +266,35 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	manager := &Manager{
-		settings:          config.Settings,
-		db:                config.DB,
-		files:             files,
-		inputBase:         base,
-		executor:          config.Executor,
-		manifestWait:      config.ManifestWait,
-		sessions:          map[string]Session{},
-		generations:       map[string]*generation{},
-		inputs:            map[string]inputAuthority{},
-		revokedViewers:    map[string]struct{}{},
-		pendingViewers:    map[string]int{},
-		pendingJobs:       map[string]struct{}{},
-		replacements:      map[string]string{},
-		preparingHandoffs: map[string]time.Time{},
-		handoffs:          map[string]pendingHandoff{},
-		sessionHandoffs:   map[string]string{},
-		resolvedHandoffs:  map[string]resolvedHandoff{},
-		subtitleJobs:      map[string]map[string]context.CancelFunc{},
-		cancel:            cancel,
-		janitorDone:       make(chan struct{}),
+	secret, err := randomToken()
+	if err != nil {
+		cancel()
+		return nil, err
 	}
+	manager := &Manager{
+		settings:              config.Settings,
+		db:                    config.DB,
+		files:                 files,
+		inputBase:             base,
+		executor:              config.Executor,
+		manifestWait:          config.ManifestWait,
+		sessions:              map[string]Session{},
+		generations:           map[string]*generation{},
+		inputs:                map[string]inputAuthority{},
+		revokedViewers:        map[string]struct{}{},
+		pendingViewers:        map[string]int{},
+		pendingJobs:           map[string]struct{}{},
+		replacements:          map[string]string{},
+		preparingHandoffs:     map[string]time.Time{},
+		preparingReplacements: map[string]*preparingReplacement{},
+		handoffs:              map[string]pendingHandoff{},
+		sessionHandoffs:       map[string]string{},
+		resolvedHandoffs:      map[string]resolvedHandoff{},
+		subtitleJobs:          map[string]map[string]context.CancelFunc{},
+		cancel:                cancel,
+		janitorDone:           make(chan struct{}),
+	}
+	manager.cursorSecret = secret
 	go manager.janitor(ctx)
 	return manager, nil
 }
@@ -274,15 +331,15 @@ func CleanupOrphans(fs afero.Fs, segmentDir string) error {
 }
 
 func (m *Manager) Create(profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
-	return m.create(context.Background(), "", profileID, catalogID, plan, positionMS, "", false, progressGeneration...)
+	return m.create(context.Background(), "", profileID, catalogID, plan, positionMS, "", "", false, progressGeneration...)
 }
 
 // CreateForViewer binds playback authority to one authenticated viewer session.
 func (m *Manager) CreateForViewer(viewerID, profileID, catalogID string, plan Plan, positionMS int64, progressGeneration ...int64) (Session, error) {
-	return m.create(context.Background(), viewerID, profileID, catalogID, plan, positionMS, "", false, progressGeneration...)
+	return m.create(context.Background(), viewerID, profileID, catalogID, plan, positionMS, "", "", false, progressGeneration...)
 }
 
-func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID string, plan Plan, positionMS int64, replacingGeneration string, retainReplacementCredit bool, progressGeneration ...int64) (Session, error) {
+func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID string, plan Plan, positionMS int64, replacingGeneration, replacingSessionID string, retainReplacementCredit bool, progressGeneration ...int64) (Session, error) {
 	if err := ctx.Err(); err != nil {
 		return Session{}, err
 	}
@@ -312,8 +369,12 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 	if err != nil {
 		return Session{}, err
 	}
+	ownerHandle, err := randomToken()
+	if err != nil {
+		return Session{}, err
+	}
 	if plan.Kind == Direct {
-		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, ExpiresAt: now.Add(directSessionTTL)}
+		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, OwnerHandle: ownerHandle, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, CreatedAt: now, ExpiresAt: now.Add(directSessionTTL)}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		_, viewerRevoked := m.revokedViewers[viewerID]
@@ -321,6 +382,7 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 			return Session{}, ErrSessionInvalid
 		}
 		m.sessions[session.ID] = session
+		m.linkPreparingReplacementLocked(replacingSessionID, session.ID)
 		return session, nil
 	}
 	if plan.Kind != Remux && plan.Kind != Transcode {
@@ -344,9 +406,10 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 	if existing := m.shareableGenerationLocked(jobKey, positionMS); existing != nil {
 		// Media timestamps stay relative to the generation start when the HLS
 		// playlist slides. The retained start is only an admission boundary.
-		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, ExpiresAt: now.Add(m.settings.LeaseTTL)}
+		session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, OwnerHandle: ownerHandle, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: existing.startMS, GenerationID: existing.id, CreatedAt: now, ExpiresAt: now.Add(m.settings.LeaseTTL)}
 		existing.leases[session.ID] = session.ExpiresAt
 		m.sessions[session.ID] = session
+		m.linkPreparingReplacementLocked(replacingSessionID, session.ID)
 		m.renewInputsLocked(existing, session.ExpiresAt)
 		m.mu.Unlock()
 		return session, nil
@@ -454,7 +517,7 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 		_ = m.files.RemoveAll(dir)
 		return Session{}, fmt.Errorf("start FFmpeg: %w", err)
 	}
-	session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, ExpiresAt: now.Add(settings.LeaseTTL)}
+	session := Session{ProgressGeneration: progress, ViewerID: viewerID, ID: sessionID, OwnerHandle: ownerHandle, ProfileID: profileID, CatalogID: catalogID, Plan: plan, PositionMS: positionMS, StreamOffsetMS: positionMS, GenerationID: generationID, CreatedAt: now, ExpiresAt: now.Add(settings.LeaseTTL)}
 	gen := &generation{
 		id: generationID, jobKey: jobKey, kind: plan.Kind, startMS: positionMS, dir: dir,
 		inputs: inputTokens, leases: map[string]time.Time{session.ID: session.ExpiresAt},
@@ -481,6 +544,7 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 	}
 	m.generations[generationID] = gen
 	m.sessions[session.ID] = session
+	m.linkPreparingReplacementLocked(replacingSessionID, session.ID)
 	for _, token := range inputTokens {
 		if authority, ok := m.inputs[token]; ok {
 			authority.pendingViewerID = ""
@@ -497,6 +561,7 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 			}
 			_, viewerRevoked = m.revokedViewers[viewerID]
 			delete(m.pendingJobs, jobKey)
+			m.clearPreparingReplacementLocked(session.ID)
 			m.mu.Unlock()
 			if viewerID != "" && viewerRevoked {
 				return Session{}, ErrSessionInvalid
@@ -520,6 +585,7 @@ func (m *Manager) create(ctx context.Context, viewerID, profileID, catalogID str
 		if m.replacements[replacingGeneration] == sessionID {
 			delete(m.replacements, replacingGeneration)
 		}
+		m.clearPreparingReplacementLocked(session.ID)
 		m.mu.Unlock()
 		return Session{}, ErrSessionInvalid
 	}
@@ -677,6 +743,35 @@ func (m *Manager) LookupForViewer(id, viewerID, profileID string, touch bool) (S
 		}
 	}
 	m.mu.Unlock()
+	return session, true
+}
+
+// LookupStopForViewer authorizes Stop against a live session, a resolved
+// handoff predecessor, or an owner-stopped predecessor still being replaced.
+// Other playback lookups intentionally do not follow preparing aliases.
+func (m *Manager) LookupStopForViewer(id, viewerID, profileID string) (Session, bool) {
+	now := time.Now()
+	m.expireHandoffForSession(id, now)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruneResolvedHandoffsLocked(now)
+	session, ok := m.sessions[id]
+	if !ok {
+		for _, resolved := range m.resolvedHandoffs {
+			if resolved.stoppedID == id && resolved.profileID == profileID && (viewerID == "" || resolved.viewerID == viewerID) {
+				session, ok = m.sessions[resolved.keptID]
+				break
+			}
+		}
+	}
+	if !ok {
+		if preparation := m.preparingReplacements[id]; preparation != nil && preparation.oldID == id && preparation.ownerStoppedID == id {
+			session, ok = m.sessions[preparation.newID]
+		}
+	}
+	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID || !now.Before(session.ExpiresAt) {
+		return Session{}, false
+	}
 	return session, true
 }
 
@@ -848,7 +943,7 @@ func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewer
 	}
 	plan, catalogID := session.Plan, session.CatalogID
 	m.mu.Unlock()
-	replacement, err := m.create(ctx, viewerID, profileID, catalogID, plan, positionMS, session.GenerationID, false, session.ProgressGeneration)
+	replacement, err := m.create(ctx, viewerID, profileID, catalogID, plan, positionMS, session.GenerationID, id, false, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
@@ -858,8 +953,29 @@ func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewer
 	_, viewerRevoked := m.revokedViewers[viewerID]
 	oldValid = oldValid && current.ViewerID == viewerID && current.ProfileID == profileID && current.GenerationID == session.GenerationID && current.ProgressGeneration == session.ProgressGeneration && time.Now().Before(current.ExpiresAt)
 	candidateValid = candidateValid && candidate.ViewerID == viewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
-	if ctx.Err() != nil || !oldValid || !candidateValid || (viewerID != "" && viewerRevoked) {
+	if contextErr := ctx.Err(); contextErr != nil {
+		m.clearPreparingReplacementLocked(replacement.ID)
+		m.mu.Unlock()
+		_ = m.StopForViewer(replacement.ID, viewerID, profileID)
+		return Session{}, contextErr
+	}
+	preparation := m.preparingReplacements[replacement.ID]
+	if preparation != nil && preparation.ownerStoppedID == id && candidateValid && (viewerID == "" || !viewerRevoked) {
+		if commit != nil {
+			if err := commit(); err != nil {
+				m.clearPreparingReplacementLocked(replacement.ID)
+				m.mu.Unlock()
+				_ = m.StopForViewer(replacement.ID, viewerID, profileID)
+				return Session{}, err
+			}
+		}
+		m.clearPreparingReplacementLocked(replacement.ID)
+		m.mu.Unlock()
+		return candidate, nil
+	}
+	if !oldValid || !candidateValid || (viewerID != "" && viewerRevoked) {
 		contextErr := ctx.Err()
+		m.clearPreparingReplacementLocked(replacement.ID)
 		m.mu.Unlock()
 		_ = m.StopForViewer(replacement.ID, viewerID, profileID)
 		if contextErr != nil {
@@ -869,11 +985,13 @@ func (m *Manager) SeekForViewerContextWithCommit(ctx context.Context, id, viewer
 	}
 	if commit != nil {
 		if err := commit(); err != nil {
+			m.clearPreparingReplacementLocked(replacement.ID)
 			m.mu.Unlock()
 			_ = m.StopForViewer(replacement.ID, viewerID, profileID)
 			return Session{}, err
 		}
 	}
+	m.clearPreparingReplacementLocked(replacement.ID)
 	delete(m.sessions, id)
 	m.cancelSubtitleJobsLocked(id)
 	var retire *generation
@@ -961,6 +1079,9 @@ func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profi
 	defer func() {
 		m.mu.Lock()
 		delete(m.preparingHandoffs, id)
+		if replacementID != "" {
+			m.clearPreparingReplacementLocked(replacementID)
+		}
 		if !activated {
 			if old.GenerationID != "" && m.replacements[old.GenerationID] == replacementID {
 				delete(m.replacements, old.GenerationID)
@@ -982,7 +1103,7 @@ func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profi
 	}()
 	prepareCtx, cancelPrepare := context.WithDeadline(ctx, preparationDeadline)
 	defer cancelPrepare()
-	replacement, err := m.create(prepareCtx, old.ViewerID, profileID, old.CatalogID, plan, positionMS, old.GenerationID, true, old.ProgressGeneration)
+	replacement, err := m.create(prepareCtx, old.ViewerID, profileID, old.CatalogID, plan, positionMS, old.GenerationID, id, true, old.ProgressGeneration)
 	if err != nil {
 		return Handoff{}, err
 	}
@@ -996,7 +1117,21 @@ func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profi
 	_, viewerRevoked := m.revokedViewers[old.ViewerID]
 	oldValid = oldValid && current.ViewerID == old.ViewerID && current.ProfileID == profileID && current.GenerationID == old.GenerationID && current.ProgressGeneration == old.ProgressGeneration && now.Before(current.ExpiresAt)
 	candidateValid = candidateValid && candidate.ViewerID == old.ViewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
-	if ctx.Err() != nil || !oldValid || !candidateValid || m.sessionHandoffs[id] != "" || (old.ViewerID != "" && viewerRevoked) {
+	if contextErr := ctx.Err(); contextErr != nil {
+		m.mu.Unlock()
+		_ = m.StopForViewer(replacement.ID, old.ViewerID, profileID)
+		return Handoff{}, contextErr
+	}
+	preparation := m.preparingReplacements[replacement.ID]
+	if preparation != nil && preparation.ownerStoppedID == id && candidateValid && (old.ViewerID == "" || !viewerRevoked) {
+		delete(m.preparingHandoffs, id)
+		m.clearPreparingReplacementLocked(replacement.ID)
+		m.resolvedHandoffs[handoffID] = resolvedHandoff{viewerID: old.ViewerID, profileID: profileID, attached: true, expiresAt: candidate.ExpiresAt, stoppedID: id, keptID: candidate.ID}
+		activated = true
+		m.mu.Unlock()
+		return Handoff{ID: handoffID, Session: candidate, ExpiresAt: candidate.ExpiresAt}, nil
+	}
+	if !oldValid || !candidateValid || m.sessionHandoffs[id] != "" || (old.ViewerID != "" && viewerRevoked) {
 		contextErr := ctx.Err()
 		m.mu.Unlock()
 		_ = m.StopForViewer(replacement.ID, old.ViewerID, profileID)
@@ -1025,6 +1160,7 @@ func (m *Manager) PrepareHandoffContextWithCommit(ctx context.Context, id, profi
 	m.handoffs[handoffID] = record
 	m.sessionHandoffs[id] = handoffID
 	m.sessionHandoffs[candidate.ID] = handoffID
+	m.clearPreparingReplacementLocked(replacement.ID)
 	activated = true
 	m.mu.Unlock()
 	return Handoff{ID: handoffID, Session: candidate, ExpiresAt: deadline}, nil
@@ -1051,7 +1187,25 @@ func (m *Manager) IsHandoffControlBlocked(id, viewerID, profileID string) bool {
 
 func (m *Manager) handoffControlBlockedLocked(id string) bool {
 	_, preparing := m.preparingHandoffs[id]
-	return preparing || m.sessionHandoffs[id] != ""
+	return preparing || m.preparingReplacements[id] != nil || m.sessionHandoffs[id] != ""
+}
+
+func (m *Manager) linkPreparingReplacementLocked(oldID, newID string) {
+	if oldID == "" || newID == "" {
+		return
+	}
+	record := &preparingReplacement{oldID: oldID, newID: newID}
+	m.preparingReplacements[oldID] = record
+	m.preparingReplacements[newID] = record
+}
+
+func (m *Manager) clearPreparingReplacementLocked(id string) {
+	record := m.preparingReplacements[id]
+	if record == nil {
+		return
+	}
+	delete(m.preparingReplacements, record.oldID)
+	delete(m.preparingReplacements, record.newID)
 }
 
 // ResolveHandoff promotes an attached candidate or restores its predecessor.
@@ -1220,6 +1374,7 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 	defer func() {
 		m.mu.Lock()
 		delete(m.preparingHandoffs, id)
+		m.clearPreparingReplacementLocked(id)
 		if !accepted {
 			if current, ok := m.sessions[id]; ok {
 				ttl := directSessionTTL
@@ -1238,7 +1393,7 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 	}()
 	prepareCtx, cancelPrepare := context.WithDeadline(ctx, preparationDeadline)
 	defer cancelPrepare()
-	replacement, err := m.create(prepareCtx, session.ViewerID, profileID, session.CatalogID, plan, positionMS, session.GenerationID, false, session.ProgressGeneration)
+	replacement, err := m.create(prepareCtx, session.ViewerID, profileID, session.CatalogID, plan, positionMS, session.GenerationID, id, false, session.ProgressGeneration)
 	if err != nil {
 		return Session{}, err
 	}
@@ -1247,7 +1402,19 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 	candidate, candidateValid := m.sessions[replacement.ID]
 	oldValid = oldValid && current.ViewerID == session.ViewerID && current.ProfileID == profileID && current.GenerationID == session.GenerationID && current.ProgressGeneration == session.ProgressGeneration
 	candidateValid = candidateValid && candidate.ViewerID == session.ViewerID && candidate.ProfileID == profileID && candidate.GenerationID == replacement.GenerationID
-	if ctx.Err() != nil || !oldValid || !candidateValid {
+	if contextErr := ctx.Err(); contextErr != nil {
+		m.mu.Unlock()
+		_ = m.StopForViewer(replacement.ID, session.ViewerID, profileID)
+		return Session{}, contextErr
+	}
+	preparation := m.preparingReplacements[replacement.ID]
+	if preparation != nil && preparation.ownerStoppedID == id && candidateValid {
+		m.clearPreparingReplacementLocked(replacement.ID)
+		accepted = true
+		m.mu.Unlock()
+		return candidate, nil
+	}
+	if !oldValid || !candidateValid {
 		contextErr := ctx.Err()
 		m.mu.Unlock()
 		_ = m.StopForViewer(replacement.ID, session.ViewerID, profileID)
@@ -1257,6 +1424,7 @@ func (m *Manager) ReplaceContextWithCommit(ctx context.Context, id, profileID st
 		return Session{}, ErrSessionInvalid
 	}
 	delete(m.preparingHandoffs, id)
+	m.clearPreparingReplacementLocked(replacement.ID)
 	retire := m.stopSessionLocked(id)
 	accepted = true
 	m.mu.Unlock()
@@ -1318,6 +1486,12 @@ func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {
 			}
 		}
 	}
+	if !ok {
+		if preparation := m.preparingReplacements[id]; preparation != nil && preparation.oldID == id && preparation.ownerStoppedID == id {
+			id = preparation.newID
+			session, ok = m.sessions[id]
+		}
+	}
 	if !ok || (viewerID != "" && session.ViewerID != viewerID) || session.ProfileID != profileID {
 		m.mu.Unlock()
 		return false
@@ -1348,6 +1522,87 @@ func (m *Manager) StopForViewer(id, viewerID, profileID string) bool {
 	m.mu.Unlock()
 	for _, gen := range retire {
 		m.retireGeneration(context.Background(), gen)
+	}
+	return true
+}
+
+// StopOwnerSession revokes only the live session identified by an independent
+// owner handle. It deliberately does not follow viewer handoff aliases.
+func (m *Manager) StopOwnerSession(ownerHandle string) bool {
+	var retire *generation
+	now := time.Now()
+	m.mu.Lock()
+	var selectedID string
+	for id, session := range m.sessions {
+		if session.OwnerHandle == ownerHandle && now.Before(session.ExpiresAt) {
+			selectedID = id
+			break
+		}
+	}
+	if selectedID == "" {
+		m.mu.Unlock()
+		return false
+	}
+	if preparation := m.preparingReplacements[selectedID]; preparation != nil {
+		preparation.ownerStoppedID = selectedID
+		delete(m.preparingHandoffs, preparation.oldID)
+		survivorID := preparation.oldID
+		if survivorID == selectedID {
+			survivorID = preparation.newID
+		}
+		if old, exists := m.sessions[preparation.oldID]; exists && m.replacements[old.GenerationID] == preparation.newID {
+			delete(m.replacements, old.GenerationID)
+		}
+		if survivor, exists := m.sessions[survivorID]; exists {
+			ttl := directSessionTTL
+			if survivor.GenerationID != "" {
+				ttl = m.settings.LeaseTTL
+			}
+			survivor.ExpiresAt = now.Add(ttl)
+			m.sessions[survivorID] = survivor
+			if gen := m.generations[survivor.GenerationID]; gen != nil {
+				gen.leases[survivorID] = survivor.ExpiresAt
+				m.renewInputsLocked(gen, survivor.ExpiresAt)
+			}
+		}
+	} else {
+		delete(m.preparingHandoffs, selectedID)
+	}
+	if handoffID := m.sessionHandoffs[selectedID]; handoffID != "" {
+		if record, ok := m.handoffs[handoffID]; ok {
+			delete(m.handoffs, handoffID)
+			delete(m.sessionHandoffs, record.oldID)
+			delete(m.sessionHandoffs, record.newID)
+			if record.replacementGeneration != "" && m.replacements[record.replacementGeneration] == record.newID {
+				delete(m.replacements, record.replacementGeneration)
+			}
+			survivorID := record.oldID
+			if survivorID == selectedID {
+				survivorID = record.newID
+			}
+			if survivor, exists := m.sessions[survivorID]; exists {
+				ttl := directSessionTTL
+				if survivor.GenerationID != "" {
+					ttl = m.settings.LeaseTTL
+				}
+				survivor.ExpiresAt = now.Add(ttl)
+				m.sessions[survivorID] = survivor
+				if gen := m.generations[survivor.GenerationID]; gen != nil {
+					gen.leases[survivorID] = survivor.ExpiresAt
+					m.renewInputsLocked(gen, survivor.ExpiresAt)
+				}
+			}
+		}
+	}
+	for id, record := range m.resolvedHandoffs {
+		if record.stoppedID == selectedID || record.keptID == selectedID {
+			delete(m.resolvedHandoffs, id)
+		}
+	}
+	retire = m.stopSessionLocked(selectedID)
+	m.mu.Unlock()
+	if retire != nil {
+		m.retireGeneration(context.Background(), retire)
 	}
 	return true
 }
@@ -1590,6 +1845,115 @@ func (m *Manager) Status() Status {
 	}
 	sort.Slice(out.Generations, func(i, j int) bool { return out.Generations[i].StartedAt < out.Generations[j].StartedAt })
 	return out
+}
+
+type activityCursor struct {
+	CreatedAt   int64  `json:"created_at"`
+	OwnerHandle string `json:"owner_handle"`
+}
+
+func (m *Manager) encodeActivityCursor(cursor activityCursor) string {
+	payload, _ := json.Marshal(cursor)
+	mac := hmac.New(sha256.New, []byte(m.cursorSecret))
+	_, _ = mac.Write(payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (m *Manager) decodeActivityCursor(value string) (activityCursor, error) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 2 {
+		return activityCursor{}, ErrInvalidCursor
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return activityCursor{}, ErrInvalidCursor
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return activityCursor{}, ErrInvalidCursor
+	}
+	mac := hmac.New(sha256.New, []byte(m.cursorSecret))
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(signature, mac.Sum(nil)) {
+		return activityCursor{}, ErrInvalidCursor
+	}
+	var cursor activityCursor
+	if json.Unmarshal(payload, &cursor) != nil || cursor.CreatedAt <= 0 || cursor.OwnerHandle == "" {
+		return activityCursor{}, ErrInvalidCursor
+	}
+	return cursor, nil
+}
+
+// Activity returns a bounded, live page of sanitized playback sessions. Cache
+// directory measurements happen after the manager lock is released.
+func (m *Manager) Activity(limit int, cursorValue string) (ActivityPage, error) {
+	if limit < 1 || limit > 100 {
+		return ActivityPage{}, ErrInvalidCursor
+	}
+	var after activityCursor
+	var err error
+	if cursorValue != "" {
+		after, err = m.decodeActivityCursor(cursorValue)
+		if err != nil {
+			return ActivityPage{}, err
+		}
+	}
+	now := time.Now()
+	m.mu.Lock()
+	settings, starting := m.settings, m.starting
+	sessions := make([]Session, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		if now.Before(session.ExpiresAt) {
+			sessions = append(sessions, session)
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(sessions, func(i, j int) bool {
+		left, right := sessions[i].CreatedAt.UnixNano(), sessions[j].CreatedAt.UnixNano()
+		if left == right {
+			return sessions[i].OwnerHandle < sessions[j].OwnerHandle
+		}
+		return left < right
+	})
+	start := 0
+	for start < len(sessions) {
+		created := sessions[start].CreatedAt.UnixNano()
+		if created > after.CreatedAt || (created == after.CreatedAt && sessions[start].OwnerHandle > after.OwnerHandle) {
+			break
+		}
+		start++
+	}
+	end := min(len(sessions), start+limit)
+	page := ActivityPage{Sessions: make([]ActivitySession, 0, end-start)}
+	for _, session := range sessions[start:end] {
+		reason := "Original media is compatible"
+		if session.Plan.Kind == Remux {
+			reason = "Container conversion required"
+		} else if session.Plan.Kind == Transcode {
+			reason = "Video or audio conversion required"
+		}
+		item := ActivitySession{OwnerHandle: session.OwnerHandle, CatalogID: session.CatalogID, Kind: session.Plan.Kind, Reason: reason, AudioExternal: session.Plan.AudioExternal, SubtitleExternal: session.Plan.SubtitleExternal, QualityMode: session.Plan.QualityMode, Width: session.Plan.Width, Height: session.Plan.Height, VideoBitrate: session.Plan.VideoBitrate, StartedAt: session.CreatedAt.Unix(), Device: "Unknown device"}
+		if session.Plan.AudioSelected {
+			index := session.Plan.AudioStreamIndex
+			item.AudioStreamIndex = &index
+		}
+		if session.Plan.SubtitleSelected {
+			index := session.Plan.SubtitleSelectionIndex
+			item.SubtitleIndex = &index
+		}
+		page.Sessions = append(page.Sessions, item)
+	}
+	if end < len(sessions) {
+		last := sessions[end-1]
+		page.NextCursor = m.encodeActivityCursor(activityCursor{CreatedAt: last.CreatedAt.UnixNano(), OwnerHandle: last.OwnerHandle})
+	}
+	status := m.Status()
+	capacity := ActivityCapacity{MaxGenerations: settings.MaxGenerations, Starting: starting, ActiveSessions: len(sessions), GenerationBytes: settings.GenerationBytes, GlobalBytes: settings.GlobalBytes, Generations: status.Generations}
+	for _, generation := range status.Generations {
+		capacity.CacheBytes += generation.Bytes
+	}
+	page.Capacity = capacity
+	return page, nil
 }
 
 func directoryBytes(fs afero.Fs, dir string) (int64, error) {

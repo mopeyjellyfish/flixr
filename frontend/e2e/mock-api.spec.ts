@@ -28,6 +28,7 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/screens' ? { json: { screens: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/sessions' ? { json: { sessions: [] } } : undefined)
+      ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/playback/activity' ? { json: { capacity: { max_generations: 2, starting: 0, active_sessions: 0, generation_bytes: 268435456, global_bytes: 536870912, cache_bytes: 0, generations: [] }, sessions: [] } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/media-version-groups' ? { json: { groups: [], candidates: [], total: 0 } } : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/libraries' ? ownerLibrariesResponse : undefined)
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/owner/scan/jobs' ? { json: { jobs: [] } } : undefined)
@@ -37,6 +38,60 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
       ?? (request.method() === 'GET' && url.pathname === '/api/v1/history' ? { json: { events: [] } } : undefined);
     if (!response) return route.fulfill({ status: 599, json: { error: { code: 'unexpected_test_request' }, request: { path: url.pathname, method: request.method(), query: url.search } } });
     return route.fulfill({ status: response.status ?? 200, json: response.json });
+  });
+}
+
+for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
+  test(`bounded browse paging retains keyboard focus and recovers: ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const alpha = { ...film, listed: false };
+    const beta = { ...series, listed: false };
+    const genre = { ...film, id: 'genre-1', title: 'Drama title', listed: false };
+    let attempts = 0;
+    await mock(page, (path, _method, query) => {
+      if (path.endsWith('/setup/status')) return { json: ready };
+      if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+      if (path.endsWith('/select')) return { json: {} };
+      if (path.endsWith('/catalog/view')) {
+        if (query.includes('section=Drama')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Drama', items: [genre] }] } };
+        if (query.includes('cursor=next')) {
+          attempts += 1;
+          return attempts === 1 ? { status: 500, json: { error: { code: 'request_failed' } } } : { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [beta] }] } };
+        }
+        return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [alpha], next_cursor: 'next' }, { name: 'Drama', items: [], next_cursor: 'drama-next' }] } };
+      }
+      return undefined;
+    });
+    await open(page, '/home');
+    const firstCard = page.getByTestId('card-film-1');
+    await firstCard.focus();
+    await firstCard.press('ArrowRight');
+    const load = page.getByRole('button', { name: 'Load more New' });
+    await expect(load).toBeFocused();
+    await load.press('Enter');
+    await expect(page.getByRole('alert')).toContainText('More titles could not be loaded');
+    await expect(page.getByTestId('card-film-1')).toBeVisible();
+    const retry = page.getByRole('button', { name: 'Retry New' });
+    await retry.focus();
+    await retry.press('Enter');
+    await expect(page.getByTestId('card-series-1')).toBeVisible();
+    const completed = page.getByRole('button', { name: 'All New loaded' });
+    await expect(completed).toBeFocused();
+    await completed.press('ArrowLeft');
+    const secondCard = page.getByTestId('card-series-1');
+    await expect(secondCard).toBeFocused();
+    await secondCard.press('ArrowDown');
+    const genreLoad = page.getByRole('button', { name: 'Load more Drama' });
+    await expect(genreLoad).toBeFocused();
+    await genreLoad.press('Enter');
+    await expect(page.getByTestId('card-genre-1')).toBeVisible();
+    await page.getByRole('button', { name: 'All Drama loaded' }).press('ArrowLeft');
+    await expect(page.getByTestId('card-genre-1')).toBeFocused();
+    await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`bounded-home-${viewport.name}.png`), fullPage: true });
   });
 }
 
@@ -197,6 +252,7 @@ for (const viewport of viewports) {
     await open(page, '/search?q=relay');
     await expect(page.getByTestId('card-series-1')).toBeVisible();
 
+    let playbackStopped = false;
     await mock(page, (path, method) => {
       if (path.endsWith('/setup/status')) return { json: { claimed: true, readiness: { ffprobe: false, ffmpeg: true } } };
       if (path.endsWith('/owner/roots')) return { json: { films: '/media/films', tv: '/media/tv' } };
@@ -214,6 +270,8 @@ for (const viewport of viewports) {
       if (path.endsWith('/metadata/film/film-1/refresh/preview')) return { json: { fields: [{ field: 'synopsis', value: 'Provider refresh', source: 'provider', locked: false }] } };
       if (path.endsWith('/settings/playback')) return { json: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 } };
       if (path.endsWith('/playback/status')) return { json: { settings: { segment_dir: '/tmp/flixr-segments', generation_bytes: 268435456, global_bytes: 536870912, max_generations: 2 }, generations: [] } };
+      if (path.endsWith('/owner/playback/activity')) return { json: { capacity: { max_generations: 2, starting: 0, active_sessions: playbackStopped ? 0 : 1, generation_bytes: 268435456, global_bytes: 536870912, cache_bytes: 0, generations: [] }, sessions: playbackStopped ? [] : [{ owner_handle: 'safe-owner-handle', catalog_id: 'film-1', title: 'Cobalt Sky', kind: 'direct', reason: 'Original media is compatible', quality_mode: 'original', width: 1920, height: 1080, started_at: 1700000000, device: 'Unknown device' }] } };
+      if (path.endsWith('/owner/playback/sessions/safe-owner-handle/stop') && method === 'POST') { playbackStopped = true; return { json: { stopped: true } }; }
       if (path.endsWith('/scan/status')) return { json: { scan: { status: 'partial', scanned: 2, unmatched: 1, failed: 1 } } };
       if (path.endsWith('/profiles')) return { json: { profiles: [] } };
       return undefined;
@@ -222,6 +280,13 @@ for (const viewport of viewports) {
     await expect(page.getByText(/ffprobe is unavailable/i)).toBeVisible();
     await expect(page.getByText(/partial: 2 scanned/i)).toBeVisible();
     await expect(page.getByLabel(/TMDB API Read Access Token/i)).toHaveValue('');
+    await page.getByRole('navigation', { name: 'Server settings' }).getByRole('link', { name: 'Playback & screens' }).click();
+    await expect(page.getByRole('heading', { name: 'Active playback' })).toBeVisible();
+    await expect(page.getByText('Unknown device', { exact: false })).toBeVisible();
+    await page.locator('#playback').screenshot({ path: testInfo.outputPath('owner-playback.png') });
+    await page.getByRole('button', { name: 'Stop Cobalt Sky' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Stop playback' }).click();
+    await expect(page.getByText(/No playback sessions are active/i)).toBeVisible();
     await page.getByText('Edit metadata').click();
     await expect(page.getByLabel('Tags')).toHaveValue('family');
     await page.getByRole('button', { name: /preview provider refresh/i }).click();
@@ -473,6 +538,9 @@ test('mocked playback planning and capacity error states', async ({ page }, test
     await page.screenshot({ path: testInfo.outputPath(`player-${viewport.name}.png`), fullPage: true });
     await page.getByRole('button', { name: /back to library/i }).click();
     await expect(page).toHaveURL(/\/home$/);
+    // Settle Home's catalog request before the next full navigation. WebKit can
+    // report an interrupted fetch as a page error even when the app cancels it.
+    await expect(page.getByRole('heading', { name: 'Your library is waiting' })).toBeVisible();
   }
   expect(errors).toEqual([]);
 
