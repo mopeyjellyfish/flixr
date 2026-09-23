@@ -13,12 +13,14 @@ type Session struct {
 	ProgressGeneration int64     `json:"-"`
 	ViewerID           string    `json:"-"`
 	ID                 string    `json:"id"`
+	OwnerHandle        string    `json:"-"`
 	ProfileID          string    `json:"-"`
 	CatalogID          string    `json:"catalog_id"`
 	Plan               Plan      `json:"plan"`
 	PositionMS         int64     `json:"position_ms"`
 	StreamOffsetMS     int64     `json:"-"`
 	GenerationID       string    `json:"generation_id,omitempty"`
+	CreatedAt          time.Time `json:"-"`
 	ExpiresAt          time.Time `json:"expires_at"`
 }
 
