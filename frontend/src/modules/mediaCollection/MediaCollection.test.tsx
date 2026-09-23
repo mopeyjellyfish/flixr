@@ -43,3 +43,24 @@ it('uses one measured grid geometry for the card width, gap, and directional foc
   fireEvent.keyDown(first, { key: 'ArrowDown' });
   expect(screen.getByTestId(`card-${columns}`)).toHaveFocus();
 });
+
+it('reaches pagination from the last card with arrows and returns to the appended card', () => {
+  const onLoadMore = () => undefined;
+  const { rerender } = render(<MediaCollection layout="rail" label="New" items={items.slice(0, 1)} onOpen={() => undefined} onLoadMore={onLoadMore} />);
+  const first = screen.getByTestId('card-0');
+  first.focus();
+  fireEvent.keyDown(first, { key: 'ArrowRight' });
+  const control = screen.getByRole('button', { name: 'Load more New' });
+  expect(control).toHaveFocus();
+  rerender(<MediaCollection layout="rail" label="New" items={items.slice(0, 2)} onOpen={() => undefined} onLoadMore={onLoadMore} />);
+  fireEvent.keyDown(control, { key: 'ArrowLeft' });
+  expect(screen.getByTestId('card-1')).toHaveFocus();
+});
+
+it('reaches an empty genre page from the previous rail using arrows only', () => {
+  render(<main><MediaCollection layout="rail" label="New" items={items.slice(0, 1)} onOpen={() => undefined} /><MediaCollection layout="rail" label="Drama" items={[]} onOpen={() => undefined} onLoadMore={() => undefined} /></main>);
+  const first = screen.getByTestId('card-0');
+  first.focus();
+  fireEvent.keyDown(first, { key: 'ArrowDown' });
+  expect(screen.getByRole('button', { name: 'Load more Drama' })).toHaveFocus();
+});

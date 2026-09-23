@@ -75,6 +75,25 @@ func (f *pauseSuccessfulManifestStatFS) Stat(name string) (os.FileInfo, error) {
 	return info, err
 }
 
+type switchablePauseManifestFS struct {
+	afero.Fs
+	active   atomic.Bool
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (f *switchablePauseManifestFS) Stat(name string) (os.FileInfo, error) {
+	info, err := f.Fs.Stat(name)
+	if err == nil && f.active.Load() && filepath.Base(name) == "master.m3u8" {
+		f.once.Do(func() {
+			close(f.observed)
+			<-f.release
+		})
+	}
+	return info, err
+}
+
 func (e *fakeExecutor) StartContext(ctx context.Context, name string, args []string, _ io.Writer) (Process, error) {
 	if name != "ffmpeg" {
 		return nil, errors.New("unexpected executable")
@@ -1633,6 +1652,379 @@ func TestReplacementInheritsCurrentSubtitleState(t *testing.T) {
 			}
 			if replacement.Plan.SourceKey != "video-key" || !replacement.Plan.SubtitleSelected || replacement.Plan.SubtitleSelectionIndex != 2 || !reflect.DeepEqual(replacement.Plan.SubtitleSources, subtitles) {
 				t.Fatalf("replacement inherited stale source state: %#v", replacement.Plan)
+			}
+		})
+	}
+}
+
+func TestActivityIncludesBoundedDirectSessionsWithoutBearerIDs(t *testing.T) {
+	manager := NewDirectManager()
+	plan := Plan{Kind: Direct, SourceKey: "/private/media/film.mkv", Description: "Original media", Width: 1920, Height: 1080, AudioStreamIndex: 2, AudioSelected: true, SubtitleSelectionIndex: 4, SubtitleSelected: true, QualityMode: QualityOriginal}
+	first, err := manager.Create("profile-a", "private-film", plan, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 105; index++ {
+		if _, err := manager.Create("profile-a", fmt.Sprintf("film-%03d", index), plan, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := manager.Activity(100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Sessions) != 100 || page.NextCursor == "" {
+		t.Fatalf("page = %d sessions, cursor %q", len(page.Sessions), page.NextCursor)
+	}
+	if page.Capacity.ActiveSessions != 106 || page.Sessions[0].Kind != Direct {
+		t.Fatalf("activity = %+v", page)
+	}
+	encoded := fmt.Sprintf("%+v", page)
+	if strings.Contains(encoded, first.ID) || strings.Contains(encoded, "/private/media") {
+		t.Fatalf("activity leaked bearer or private path: %s", encoded)
+	}
+	if page.Sessions[0].OwnerHandle == "" || page.Sessions[0].OwnerHandle == first.ID {
+		t.Fatalf("unsafe owner handle %q", page.Sessions[0].OwnerHandle)
+	}
+	second, err := manager.Activity(100, page.NextCursor)
+	if err != nil || len(second.Sessions) != 6 {
+		t.Fatalf("second page = %+v, %v", second, err)
+	}
+	if _, err := manager.Activity(100, page.NextCursor+"tampered"); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("tampered cursor error = %v", err)
+	}
+}
+
+func TestStopOwnerSessionPreservesPendingHandoffPartner(t *testing.T) {
+	for _, stop := range []string{"predecessor", "candidate"} {
+		t.Run(stop, func(t *testing.T) {
+			manager, _ := testManager(t, nil)
+			plan := Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+			old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-a", plan, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handoff, err := manager.PrepareHandoffContext(context.Background(), old.ID, "profile-a", Plan{Kind: Direct, SourceKey: "source-a"}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected, survivor := old, handoff.Session
+			if stop == "candidate" {
+				selected, survivor = handoff.Session, old
+			}
+			if !manager.StopOwnerSession(selected.OwnerHandle) {
+				t.Fatalf("owner stop did not stop pending %s", stop)
+			}
+			if _, ok := manager.LookupForViewer(survivor.ID, "viewer-a", "profile-a", false); !ok {
+				t.Fatalf("owner stop revoked pending %s survivor", stop)
+			}
+			if manager.StopOwnerSession(selected.OwnerHandle) {
+				t.Fatal("stale owner handle stopped another session")
+			}
+			for _, attached := range []bool{false, true} {
+				if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", attached); !errors.Is(err, ErrSessionInvalid) {
+					t.Fatalf("removed handoff resolved with attached=%v: %v", attached, err)
+				}
+			}
+			manager.mu.Lock()
+			if len(manager.handoffs) != 0 || len(manager.sessionHandoffs) != 0 || len(manager.replacements) != 0 {
+				t.Fatalf("pending cleanup leaked handoffs=%d sessions=%d replacements=%d", len(manager.handoffs), len(manager.sessionHandoffs), len(manager.replacements))
+			}
+			manager.mu.Unlock()
+		})
+	}
+}
+
+func TestStopOwnerSessionRejectsResolvedStaleHandle(t *testing.T) {
+	manager, _ := testManager(t, nil)
+	old, err := manager.CreateForViewer("viewer-a", "profile-a", "film-a", Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := manager.PrepareHandoffContext(context.Background(), old.ID, "profile-a", Plan{Kind: Direct, SourceKey: "source-a"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ResolveHandoff(handoff.ID, "viewer-a", "profile-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if manager.StopOwnerSession(old.OwnerHandle) {
+		t.Fatal("resolved predecessor handle followed alias to survivor")
+	}
+	if _, ok := manager.LookupForViewer(handoff.Session.ID, "viewer-a", "profile-a", false); !ok {
+		t.Fatal("resolved survivor was revoked by stale predecessor handle")
+	}
+}
+
+func TestStopOwnerSessionDuringHandoffPreparationPreservesPartner(t *testing.T) {
+	for _, stop := range []string{"predecessor", "candidate"} {
+		t.Run(stop, func(t *testing.T) {
+			settings := DefaultSettings(t.TempDir())
+			settings.LeaseTTL = 3 * time.Second
+			settings.HeartbeatInterval = time.Second
+			settings.ProcessGrace = 10 * time.Millisecond
+			settings.GenerationBytes = 1 << 20
+			settings.GlobalBytes = 2 << 20
+			settings.MaxGenerations = 2
+			fs := &pauseSuccessfulManifestStatFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+			manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: &fakeExecutor{}, ManifestWait: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := manager.Shutdown(ctx); err != nil {
+					t.Errorf("shutdown: %v", err)
+				}
+			})
+
+			original, err := manager.CreateForViewer("viewer-a", "profile-a", "film-a", Plan{Kind: Direct, SourceKey: "source-a"}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type handoffResult struct {
+				handoff Handoff
+				err     error
+			}
+			result := make(chan handoffResult, 1)
+			go func() {
+				handoff, err := manager.PrepareHandoffContext(context.Background(), original.ID, "profile-a", Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+				result <- handoffResult{handoff: handoff, err: err}
+			}()
+			<-fs.observed
+			manager.mu.Lock()
+			var selectedHandle string
+			if stop == "predecessor" {
+				selectedHandle = manager.sessions[original.ID].OwnerHandle
+			} else {
+				for id, session := range manager.sessions {
+					if id != original.ID {
+						selectedHandle = session.OwnerHandle
+					}
+				}
+			}
+			manager.mu.Unlock()
+			if selectedHandle == "" || !manager.StopOwnerSession(selectedHandle) {
+				t.Fatalf("did not stop preparing %s", stop)
+			}
+			close(fs.release)
+			prepared := <-result
+			if stop == "predecessor" {
+				if prepared.err != nil {
+					t.Fatalf("predecessor stop revoked candidate: %v", prepared.err)
+				}
+				if _, ok := manager.LookupForViewer(prepared.handoff.Session.ID, "viewer-a", "profile-a", false); !ok {
+					t.Fatal("candidate did not survive predecessor stop")
+				}
+				if err := manager.ResolveHandoff(prepared.handoff.ID, "viewer-a", "profile-a", true); err != nil {
+					t.Fatalf("late attach changed preserved candidate: %v", err)
+				}
+				if err := manager.ResolveHandoff(prepared.handoff.ID, "viewer-a", "profile-a", false); !errors.Is(err, ErrHandoffConflict) {
+					t.Fatalf("late reject = %v, want handoff conflict", err)
+				}
+				renewed, err := manager.HeartbeatForViewer(prepared.handoff.Session.ID, "viewer-a", "profile-a", 0)
+				if err != nil {
+					t.Fatalf("renew preserved candidate: %v", err)
+				}
+				manager.Sweep(prepared.handoff.ExpiresAt.Add(time.Nanosecond))
+				if _, ok := manager.LookupForViewer(renewed.ID, "viewer-a", "profile-a", false); !ok {
+					t.Fatal("resolved handoff expiry revoked renewed candidate")
+				}
+			} else {
+				if !errors.Is(prepared.err, ErrSessionInvalid) {
+					t.Fatalf("candidate stop result = %v, want session invalid", prepared.err)
+				}
+				if _, ok := manager.LookupForViewer(original.ID, "viewer-a", "profile-a", false); !ok {
+					t.Fatal("predecessor did not survive candidate stop")
+				}
+			}
+			manager.mu.Lock()
+			if len(manager.preparingHandoffs) != 0 || len(manager.preparingReplacements) != 0 || len(manager.replacements) != 0 {
+				t.Fatalf("preparation credit leaked: preparing=%d pairs=%d replacements=%d", len(manager.preparingHandoffs), len(manager.preparingReplacements), len(manager.replacements))
+			}
+			for _, generation := range manager.generations {
+				for sessionID := range generation.leases {
+					if _, exists := manager.sessions[sessionID]; !exists {
+						t.Fatalf("generation retained stopped lease %q", sessionID)
+					}
+				}
+			}
+			manager.mu.Unlock()
+		})
+	}
+}
+
+func TestOwnerStopPromotionStillHonorsViewerCancellation(t *testing.T) {
+	for _, test := range []struct {
+		operation   string
+		termination string
+	}{
+		{operation: "handoff", termination: "context"},
+		{operation: "replace", termination: "context"},
+		{operation: "handoff", termination: "viewer-stop"},
+		{operation: "replace", termination: "viewer-stop"},
+	} {
+		t.Run(test.operation+"/"+test.termination, func(t *testing.T) {
+			settings := DefaultSettings(t.TempDir())
+			settings.LeaseTTL = 3 * time.Second
+			settings.HeartbeatInterval = time.Second
+			settings.ProcessGrace = 10 * time.Millisecond
+			settings.GenerationBytes = 1 << 20
+			settings.GlobalBytes = 1 << 20
+			settings.MaxGenerations = 1
+			fs := &switchablePauseManifestFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+			executor := &fakeExecutor{}
+			manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: executor, ManifestWait: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := manager.Shutdown(ctx); err != nil {
+					t.Errorf("shutdown: %v", err)
+				}
+			})
+			original, err := manager.CreateForViewer("viewer-a", "profile-a", "film-a", Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 2_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs.active.Store(true)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				plan := Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+				if test.operation == "handoff" {
+					_, err = manager.PrepareHandoffContext(ctx, original.ID, "profile-a", plan, 0)
+				} else {
+					_, err = manager.ReplaceContext(ctx, original.ID, "profile-a", plan, 0)
+				}
+				result <- err
+			}()
+			<-fs.observed
+			if !manager.StopOwnerSession(original.OwnerHandle) {
+				t.Fatal("owner did not stop predecessor")
+			}
+			if test.termination == "context" {
+				cancel()
+			} else if !manager.StopForViewer(original.ID, "viewer-a", "profile-a") {
+				t.Fatal("viewer stop did not follow owner-stopped predecessor to candidate")
+			}
+			close(fs.release)
+			resultErr := <-result
+			if test.termination == "context" && !errors.Is(resultErr, context.Canceled) {
+				t.Fatalf("canceled %s = %v, want context canceled", test.operation, resultErr)
+			}
+			if test.termination == "viewer-stop" && !errors.Is(resultErr, ErrSessionInvalid) {
+				t.Fatalf("viewer-stopped %s = %v, want session invalid", test.operation, resultErr)
+			}
+			manager.mu.Lock()
+			if len(manager.sessions) != 0 || len(manager.generations) != 0 || len(manager.replacements) != 0 || len(manager.preparingReplacements) != 0 {
+				t.Fatalf("terminated %s retained capacity: sessions=%d generations=%d credits=%d pairs=%d", test.operation, len(manager.sessions), len(manager.generations), len(manager.replacements), len(manager.preparingReplacements))
+			}
+			manager.mu.Unlock()
+			if len(executor.processes) != 2 || !executor.processes[0].signaled.Load() || !executor.processes[1].signaled.Load() {
+				t.Fatalf("terminated %s compatibility replacement processes were not retired", test.operation)
+			}
+		})
+	}
+}
+
+func TestSeekOwnerStopPromotionRunsCommit(t *testing.T) {
+	commitFailure := errors.New("commit failed")
+	for _, test := range []struct {
+		name   string
+		err    error
+		cancel bool
+	}{
+		{name: "success"},
+		{name: "failure", err: commitFailure},
+		{name: "canceled", cancel: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			settings := DefaultSettings(t.TempDir())
+			settings.LeaseTTL = 3 * time.Second
+			settings.HeartbeatInterval = time.Second
+			settings.ProcessGrace = 10 * time.Millisecond
+			settings.GenerationBytes = 1 << 20
+			settings.GlobalBytes = 2 << 20
+			settings.MaxGenerations = 2
+			fs := &switchablePauseManifestFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+			manager, err := NewManager(ManagerConfig{Settings: settings, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: &fakeExecutor{}, ManifestWait: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if err := manager.Shutdown(ctx); err != nil {
+					t.Errorf("shutdown: %v", err)
+				}
+			})
+			original, err := manager.CreateForViewer("viewer-a", "profile-a", "film-a", Plan{Kind: Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs.active.Store(true)
+			commitCalls := atomic.Int32{}
+			seekCtx, cancelSeek := context.WithCancel(context.Background())
+			defer cancelSeek()
+			type seekResult struct {
+				session Session
+				err     error
+			}
+			result := make(chan seekResult, 1)
+			go func() {
+				session, err := manager.SeekForViewerContextWithCommit(seekCtx, original.ID, "viewer-a", "profile-a", 90_000, func() error {
+					commitCalls.Add(1)
+					return test.err
+				})
+				result <- seekResult{session: session, err: err}
+			}()
+			<-fs.observed
+			if !manager.StopOwnerSession(original.OwnerHandle) {
+				t.Fatal("owner did not stop seek predecessor")
+			}
+			if test.cancel {
+				cancelSeek()
+			}
+			close(fs.release)
+			seek := <-result
+			wantCommitCalls := int32(1)
+			if test.cancel {
+				wantCommitCalls = 0
+			}
+			if commitCalls.Load() != wantCommitCalls {
+				t.Fatalf("commit calls = %d, want %d", commitCalls.Load(), wantCommitCalls)
+			}
+			if test.cancel {
+				if !errors.Is(seek.err, context.Canceled) {
+					t.Fatalf("canceled seek = %v, want context canceled", seek.err)
+				}
+				manager.mu.Lock()
+				if len(manager.sessions) != 0 || len(manager.generations) != 0 {
+					t.Fatalf("canceled seek retained candidate: sessions=%d generations=%d", len(manager.sessions), len(manager.generations))
+				}
+				manager.mu.Unlock()
+			} else if test.err == nil {
+				if seek.err != nil {
+					t.Fatalf("seek promotion failed: %v", seek.err)
+				}
+				if _, ok := manager.LookupForViewer(seek.session.ID, "viewer-a", "profile-a", false); !ok {
+					t.Fatal("committed seek candidate was revoked")
+				}
+			} else {
+				if !errors.Is(seek.err, commitFailure) {
+					t.Fatalf("seek commit error = %v, want %v", seek.err, commitFailure)
+				}
+				manager.mu.Lock()
+				if len(manager.sessions) != 0 || len(manager.generations) != 0 {
+					t.Fatalf("failed commit retained candidate: sessions=%d generations=%d", len(manager.sessions), len(manager.generations))
+				}
+				manager.mu.Unlock()
 			}
 		})
 	}

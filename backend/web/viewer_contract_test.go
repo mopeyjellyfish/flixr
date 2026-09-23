@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
+	"github.com/mopeyjellyfish/flixr/backend/access"
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
 	"github.com/mopeyjellyfish/flixr/backend/household"
 	"github.com/mopeyjellyfish/flixr/backend/sqlite"
@@ -15,16 +17,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type viewerResponseItem struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Listed bool   `json:"listed"`
+}
+
 type viewerResponse struct {
 	Preference catalog.ViewPreference `json:"preference"`
-	Items      []struct {
-		ID     string `json:"id"`
-		Kind   string `json:"kind"`
-		Listed bool   `json:"listed"`
-	} `json:"items"`
-	Sections []struct {
-		Name string `json:"name"`
+	Items      []viewerResponseItem   `json:"items"`
+	Sections   []struct {
+		Name       string               `json:"name"`
+		Items      []viewerResponseItem `json:"items"`
+		NextCursor string               `json:"next_cursor"`
 	} `json:"sections"`
+	NextCursor string `json:"next_cursor"`
 }
 
 func TestViewerGridContractUsesStableSortsAndProfileListedState(t *testing.T) {
@@ -149,4 +156,119 @@ func TestViewerGridContractUsesStableSortsAndProfileListedState(t *testing.T) {
 	for _, section := range rowView.Sections {
 		assert.NotEqual(t, "Comedy", section.Name)
 	}
+}
+
+func TestViewerFirstPageIsBoundedAndAuthorizedPagesAreStable(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	for _, item := range []struct{ id, title string }{
+		{"a1", "Alpha"}, {"a2", "Alpha"}, {"b", "Beta"}, {"c", "Charlie"}, {"d", "Delta"},
+	} {
+		_, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,updated_at,genres_json,added_at) VALUES(?, 'film', ?, ?, 1, 'film', 0, '["Drama"]', 1)`, item.id, item.title, item.id+".mp4")
+		require.NoError(t, err)
+	}
+	_, err = db.Exec(`INSERT INTO catalog_metadata_fields(catalog_kind,catalog_id,field,value,source,locked) VALUES('film','a2','tags','denied','local',1)`)
+	require.NoError(t, err)
+	library, err := catalog.Open(db)
+	require.NoError(t, err)
+	house, err := household.Open(db)
+	require.NoError(t, err)
+	profile, err := house.CreateProfile("Child", "")
+	require.NoError(t, err)
+	_, _, err = house.UpdatePolicy(profile.ID, access.Policy{DenyTags: []string{"denied"}})
+	require.NoError(t, err)
+	_, err = library.SavePreference(profile.ID, "film", catalog.ViewPreference{View: "grid", Sort: "title"})
+	require.NoError(t, err)
+	session, err := house.Select(profile.ID, "")
+	require.NoError(t, err)
+	handler := web.NewServer(house, library).Handler()
+	get := func(target string) (*httptest.ResponseRecorder, viewerResponse) {
+		r := httptest.NewRequest(http.MethodGet, "http://flixr.test"+target, nil)
+		r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var response viewerResponse
+		if w.Code == http.StatusOK {
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		}
+		return w, response
+	}
+
+	firstRecorder, first := get("/api/v1/catalog/view?media=film&limit=2")
+	require.Equal(t, http.StatusOK, firstRecorder.Code, firstRecorder.Body.String())
+	require.Equal(t, []string{"a1", "b"}, viewerIDs(first))
+	require.NotEmpty(t, first.NextCursor)
+	secondRecorder, second := get("/api/v1/catalog/view?media=film&limit=2&cursor=" + url.QueryEscape(first.NextCursor))
+	require.Equal(t, http.StatusOK, secondRecorder.Code, secondRecorder.Body.String())
+	assert.Equal(t, []string{"c", "d"}, viewerIDs(second))
+	assert.Empty(t, second.NextCursor)
+
+	_, err = library.SavePreference(profile.ID, "film", catalog.ViewPreference{View: "rows", Sort: "title"})
+	require.NoError(t, err)
+	preferenceChanged, _ := get("/api/v1/catalog/view?media=film&limit=2&cursor=" + url.QueryEscape(first.NextCursor))
+	assert.Equal(t, http.StatusBadRequest, preferenceChanged.Code)
+	sectionRecorder, sectionPage := get("/api/v1/catalog/view?media=film&section=New&limit=2")
+	require.Equal(t, http.StatusOK, sectionRecorder.Code, sectionRecorder.Body.String())
+	require.Len(t, sectionPage.Sections, 1)
+	assert.Equal(t, []string{"a1", "b"}, responseItemIDs(sectionPage.Sections[0].Items))
+	require.NotEmpty(t, sectionPage.NextCursor)
+	require.NoError(t, library.SetListed(profile.ID, "film", "a1", true))
+	stateRecorder, _ := get("/api/v1/catalog/view?media=all&state_kind=film&state_id=a1")
+	require.Equal(t, http.StatusOK, stateRecorder.Code, stateRecorder.Body.String())
+	assert.JSONEq(t, `{"state":{"listed":true,"continue_watching_dismissed":false}}`, stateRecorder.Body.String())
+	_, _, err = house.UpdatePolicy(profile.ID, access.Policy{DenyTags: []string{"other"}})
+	session, err = house.Select(profile.ID, "")
+	require.NoError(t, err)
+	policyChanged, _ := get("/api/v1/catalog/view?media=film&section=New&limit=2&cursor=" + url.QueryEscape(sectionPage.NextCursor))
+	assert.Equal(t, http.StatusBadRequest, policyChanged.Code)
+
+	malformed, _ := get("/api/v1/catalog/view?media=film&limit=2&cursor=not-a-cursor")
+	assert.Equal(t, http.StatusBadRequest, malformed.Code)
+}
+
+func TestViewerStateDoesNotRevealMediaVersionMembers(t *testing.T) {
+	db, err := sqlite.Open(t.TempDir())
+	require.NoError(t, err)
+	defer db.Close()
+	for _, id := range []string{"film", "film-member"} {
+		_, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,updated_at) VALUES(?,'film',?,?,1,'film',0)`, id, id, id+".mp4")
+		require.NoError(t, err)
+	}
+	for _, id := range []string{"series", "series-member"} {
+		_, err := db.Exec(`INSERT INTO catalog_series(id,title,local_only,updated_at) VALUES(?,?,1,0)`, id, id)
+		require.NoError(t, err)
+	}
+	_, err = db.Exec(`INSERT INTO catalog_film_version_memberships(canonical_catalog_id,member_catalog_id,created_at) VALUES('film','film-member',1)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO catalog_series_version_memberships(canonical_series_id,member_series_id,created_at) VALUES('series','series-member',1)`)
+	require.NoError(t, err)
+	library, err := catalog.Open(db)
+	require.NoError(t, err)
+	house, err := household.Open(db)
+	require.NoError(t, err)
+	profile, err := house.CreateProfile("Viewer", "")
+	require.NoError(t, err)
+	session, err := house.Select(profile.ID, "")
+	require.NoError(t, err)
+	handler := web.NewServer(house, library).Handler()
+	for _, tc := range []struct{ kind, member, canonical string }{{"film", "film-member", "film"}, {"series", "series-member", "series"}} {
+		for id, status := range map[string]int{tc.member: http.StatusNotFound, tc.canonical: http.StatusOK} {
+			r := httptest.NewRequest(http.MethodGet, "http://flixr.test/api/v1/catalog/view?media=all&state_kind="+tc.kind+"&state_id="+id, nil)
+			r.AddCookie(&http.Cookie{Name: "flixr_session", Value: session})
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			assert.Equal(t, status, w.Code, "%s/%s: %s", tc.kind, id, w.Body.String())
+		}
+	}
+}
+
+func viewerIDs(view viewerResponse) []string { return responseItemIDs(view.Items) }
+
+func responseItemIDs(items []viewerResponseItem) []string {
+	ids := make([]string, len(items))
+	for index, item := range items {
+		ids[index] = item.ID
+	}
+	return ids
 }

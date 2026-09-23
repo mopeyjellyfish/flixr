@@ -18,6 +18,7 @@ var (
 	ErrInvalidCapabilities = errors.New("playback capabilities are invalid")
 	ErrUnknownCapability   = errors.New("playback capability is unknown")
 	ErrInvalidQuality      = errors.New("playback quality is invalid")
+	ErrInvalidCursor       = errors.New("playback activity cursor is invalid")
 )
 
 type QualityMode string
