@@ -130,6 +130,160 @@ func (e *webFakeExecutor) StartContext(_ context.Context, _ string, args []strin
 	return e.process, nil
 }
 
+type webPauseManifestFS struct {
+	afero.Fs
+	once     sync.Once
+	observed chan struct{}
+	release  chan struct{}
+}
+
+func (f *webPauseManifestFS) Stat(name string) (os.FileInfo, error) {
+	info, err := f.Fs.Stat(name)
+	if err == nil && filepath.Base(name) == "master.m3u8" {
+		f.once.Do(func() {
+			close(f.observed)
+			<-f.release
+		})
+	}
+	return info, err
+}
+
+type playbackStopGate struct {
+	manager    *playback.Manager
+	authorized chan playback.Session
+	release    chan struct{}
+}
+
+func (g *playbackStopGate) LookupStopForViewer(id, viewerID, profileID string) (playback.Session, bool) {
+	session, ok := g.manager.LookupStopForViewer(id, viewerID, profileID)
+	if ok {
+		g.authorized <- session
+		<-g.release
+	}
+	return session, ok
+}
+
+func (g *playbackStopGate) StopForViewer(id, viewerID, profileID string) bool {
+	return g.manager.StopForViewer(id, viewerID, profileID)
+}
+func TestPlaybackStopAuthorizesOwnerStoppedPreparingPredecessor(t *testing.T) {
+	for _, operation := range []string{"handoff", "replace", "replace-after-lookup"} {
+		t.Run(operation, func(t *testing.T) {
+			db, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			root := t.TempDir()
+			if err := afero.WriteFile(afero.NewOsFs(), filepath.Join(root, "film.mkv"), []byte("media"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO catalog_items(id,kind,title,relative_path,local_only,root_kind,container,video_codec,video_width,video_height,audio_json,subtitle_json,duration_ms,updated_at) VALUES('film','film','Film','film.mkv',1,'film','matroska','h264',320,180,'[]','[]',100000,0)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO settings(key,value) VALUES('film_root',?)`, root); err != nil {
+				t.Fatal(err)
+			}
+			house, err := household.Open(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profile, _ := house.CreateProfile("One", "")
+			other, _ := house.CreateProfile("Two", "")
+			token, _ := house.Select(profile.ID, "")
+			otherToken, _ := house.Select(other.ID, "")
+			viewerID, ok := house.SessionIdentity(token)
+			if !ok {
+				t.Fatal("viewer identity unavailable")
+			}
+			library, err := catalog.Open(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings := playback.DefaultSettings(t.TempDir())
+			settings.GenerationBytes = 1 << 20
+			settings.GlobalBytes = 2 << 20
+			settings.MaxGenerations = 2
+			settings.ProcessGrace = 10 * time.Millisecond
+			fs := &webPauseManifestFS{Fs: afero.NewOsFs(), observed: make(chan struct{}), release: make(chan struct{})}
+			defer func() {
+				select {
+				case <-fs.release:
+				default:
+					close(fs.release)
+				}
+			}()
+			manager, err := playback.NewManager(playback.ManagerConfig{Settings: settings, DB: db, FS: fs, InputBase: "http://127.0.0.1:8787", Executor: &webFakeExecutor{}, ManifestWait: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = manager.Shutdown(ctx)
+			})
+			original, err := manager.CreateForViewer(viewerID, profile.ID, "film", playback.Plan{Kind: playback.Direct, SourceKey: "source-a"}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				plan := playback.Plan{Kind: playback.Remux, SourceKey: "source-a", VideoBitrate: 1_000_000, AudioCodec: "aac", AudioBitrate: 128_000}
+				if operation == "handoff" {
+					_, err = manager.PrepareHandoffContext(context.Background(), original.ID, profile.ID, plan, 0)
+				} else {
+					_, err = manager.ReplaceContext(context.Background(), original.ID, profile.ID, plan, 0)
+				}
+				result <- err
+			}()
+			<-fs.observed
+			if !manager.StopOwnerSession(original.OwnerHandle) {
+				t.Fatal("owner did not stop predecessor")
+			}
+			server := NewServerWithPlayback(house, library, manager)
+			stop := func(sessionToken string) *httptest.ResponseRecorder {
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/playback/sessions/"+original.ID+"/stop", nil)
+				request.AddCookie(&http.Cookie{Name: "flixr_session", Value: sessionToken})
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, request)
+				return response
+			}
+			if operation == "replace-after-lookup" {
+				gate := &playbackStopGate{manager: manager, authorized: make(chan playback.Session, 1), release: make(chan struct{})}
+				server.playbackStopControl = gate
+				stopResult := make(chan *httptest.ResponseRecorder, 1)
+				go func() { stopResult <- stop(token) }()
+				authorized := <-gate.authorized
+				close(fs.release)
+				if err := <-result; err != nil {
+					t.Fatalf("replace result = %v, want success", err)
+				}
+				if session, ok := manager.LookupForViewer(authorized.ID, viewerID, profile.ID, false); !ok || session.ID != authorized.ID {
+					t.Fatal("authorized replacement did not survive promotion")
+				}
+				close(gate.release)
+				if response := <-stopResult; response.Code != http.StatusOK {
+					t.Fatalf("authorized stop after promotion = %d: %s", response.Code, response.Body.String())
+				}
+				if _, ok := manager.LookupForViewer(authorized.ID, viewerID, profile.ID, false); ok {
+					t.Fatal("authorized replacement survived stop")
+				}
+				return
+			}
+			if response := stop(otherToken); response.Code != http.StatusForbidden {
+				t.Fatalf("wrong viewer stop = %d: %s", response.Code, response.Body.String())
+			}
+			if response := stop(token); response.Code != http.StatusOK {
+				t.Fatalf("authorized stop = %d: %s", response.Code, response.Body.String())
+			}
+			close(fs.release)
+			if err := <-result; !errors.Is(err, playback.ErrSessionInvalid) {
+				t.Fatalf("%s result = %v, want session invalid", operation, err)
+			}
+		})
+	}
+}
+
 func TestHLSPlaybackLeaseInputAndProgressAreProfileBound(t *testing.T) {
 	db, err := sqlite.Open(t.TempDir())
 	if err != nil {

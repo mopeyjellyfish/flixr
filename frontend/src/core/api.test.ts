@@ -8,6 +8,10 @@ describe('API error messages', () => {
 		expect(messageFor('playback_capability_unknown')).toContain('unsupported playback capability');
   });
 
+	it('gives viewers an actionable playback capacity remedy without owner details', () => {
+		expect(messageFor('playback_capacity')).toBe('Flixr is at its playback limit. Stop another compatibility stream or ask the owner to review playback limits.');
+	});
+
   it('renders a correlated support ID with request failures', () => {
     expect(new ApiError('request_failed', 500, 'error-123').message).toContain('Support ID: error-123.');
   });

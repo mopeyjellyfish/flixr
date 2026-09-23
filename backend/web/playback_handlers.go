@@ -446,6 +446,27 @@ func (s *Server) playbackSession(w http.ResponseWriter, r *http.Request, touch b
 	return session, true
 }
 
+func (s *Server) playbackStopSession(w http.ResponseWriter, r *http.Request) (playback.Session, bool) {
+	if !s.profile(w, r) {
+		return playback.Session{}, false
+	}
+	profile, _ := s.house.Profile(s.session(r))
+	viewerID, valid := s.house.SessionIdentity(s.session(r))
+	if !valid {
+		fail(w, http.StatusForbidden, "profile_required")
+		return playback.Session{}, false
+	}
+	session, ok := s.playbackStopControl.LookupStopForViewer(r.PathValue("id"), viewerID, profile.ID)
+	if !ok {
+		fail(w, http.StatusForbidden, "playback_session_invalid")
+		return playback.Session{}, false
+	}
+	if !s.playableItem(w, r, session.CatalogID) {
+		return playback.Session{}, false
+	}
+	return session, true
+}
+
 func (s *Server) rejectHandoffCandidate(w http.ResponseWriter, session playback.Session) bool {
 	if !s.playback.IsHandoffCandidate(session.ID, session.ViewerID, session.ProfileID) {
 		return false
@@ -1014,11 +1035,11 @@ func (s *Server) playbackStop(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOrigin(w, r) {
 		return
 	}
-	session, ok := s.playbackSession(w, r, false)
+	session, ok := s.playbackStopSession(w, r)
 	if !ok {
 		return
 	}
-	if !s.playback.StopForViewer(session.ID, session.ViewerID, session.ProfileID) {
+	if !s.playbackStopControl.StopForViewer(session.ID, session.ViewerID, session.ProfileID) {
 		fail(w, http.StatusForbidden, "playback_session_invalid")
 		return
 	}
@@ -1104,4 +1125,42 @@ func (s *Server) playbackStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, s.playback.Status())
+}
+
+func (s *Server) playbackActivity(w http.ResponseWriter, r *http.Request) {
+	if !s.owner(w, r) {
+		return
+	}
+	limit := 24
+	if value := r.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 100 {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		limit = parsed
+	}
+	page, err := s.playback.Activity(limit, r.URL.Query().Get("cursor"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	for index := range page.Sessions {
+		page.Sessions[index].Title = "Unknown title"
+		if item, ok := s.catalog.Item(page.Sessions[index].CatalogID); ok && strings.TrimSpace(item.Title) != "" {
+			page.Sessions[index].Title = item.Title
+		}
+	}
+	write(w, http.StatusOK, page)
+}
+
+func (s *Server) stopOwnerPlaybackSession(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(w, r) || !s.owner(w, r) {
+		return
+	}
+	if !s.playback.StopOwnerSession(r.PathValue("owner_handle")) {
+		fail(w, http.StatusNotFound, "playback_session_invalid")
+		return
+	}
+	write(w, http.StatusOK, map[string]bool{"stopped": true})
 }

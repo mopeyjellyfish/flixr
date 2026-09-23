@@ -31,26 +31,32 @@ type progressLock struct {
 	mutex sync.Mutex
 	users int
 }
+type playbackStopController interface {
+	LookupStopForViewer(id, viewerID, profileID string) (playback.Session, bool)
+	StopForViewer(id, viewerID, profileID string) bool
+}
+
 type Server struct {
-	previews          *preview.Service
-	house             *household.Manager
-	catalog           *catalog.Catalog
-	playback          *playback.Manager
-	screens           *screens.Manager
-	mux               *http.ServeMux
-	lookPath          func(string) (string, error)
-	toolProbe         func(context.Context, string) bool
-	pathProbe         func(string, bool) setupPathState
-	readinessTimeout  time.Duration
-	readyMu           sync.RWMutex
-	progressLocksMu   sync.Mutex
-	progressLocks     map[string]*progressLock
-	readiness         Readiness
-	diagnostics       *diagnostics.Log
-	version, revision string
-	settingsLocks     map[string]bool
-	settingsValues    map[string]string
-	backups           *backup.Manager
+	previews            *preview.Service
+	house               *household.Manager
+	catalog             *catalog.Catalog
+	playback            *playback.Manager
+	playbackStopControl playbackStopController
+	screens             *screens.Manager
+	mux                 *http.ServeMux
+	lookPath            func(string) (string, error)
+	toolProbe           func(context.Context, string) bool
+	pathProbe           func(string, bool) setupPathState
+	readinessTimeout    time.Duration
+	readyMu             sync.RWMutex
+	progressLocksMu     sync.Mutex
+	progressLocks       map[string]*progressLock
+	readiness           Readiness
+	diagnostics         *diagnostics.Log
+	version, revision   string
+	settingsLocks       map[string]bool
+	settingsValues      map[string]string
+	backups             *backup.Manager
 }
 
 func (s *Server) lockPlaybackProgress(profileID, catalogID string) func() {
@@ -112,7 +118,7 @@ func newServer(h *household.Manager, c *catalog.Catalog, playbackManager *playba
 	if locks == nil {
 		locks = map[string]bool{}
 	}
-	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, toolProbe: probeSetupTool, pathProbe: probeSetupPath, readinessTimeout: 2 * time.Second, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}, progressLocks: map[string]*progressLock{}}
+	s := &Server{previews: preview.New(), house: h, catalog: c, playback: playbackManager, playbackStopControl: playbackManager, screens: screenManager, mux: http.NewServeMux(), lookPath: exec.LookPath, toolProbe: probeSetupTool, pathProbe: probeSetupPath, readinessTimeout: 2 * time.Second, diagnostics: diagnostics.New(100), version: build.Version, revision: build.Revision, settingsLocks: locks, settingsValues: map[string]string{}, progressLocks: map[string]*progressLock{}}
 	s.checkReadiness()
 	s.routes()
 	return s
@@ -229,6 +235,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("PUT /api/v1/owner/settings/playback", s.playbackSettings)
 	s.mux.HandleFunc("GET /api/v1/owner/playback/status", s.playbackStatus)
+	s.mux.HandleFunc("GET /api/v1/owner/playback/activity", s.playbackActivity)
+	s.mux.HandleFunc("POST /api/v1/owner/playback/sessions/{owner_handle}/stop", s.stopOwnerPlaybackSession)
 	s.mux.HandleFunc("GET /api/v1/owner/diagnostics", s.exportDiagnostics)
 	s.mux.HandleFunc("GET /api/v1/screens", s.listScreens)
 	s.mux.HandleFunc("POST /api/v1/screens/presence", s.advertiseScreen)
