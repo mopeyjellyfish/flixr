@@ -527,6 +527,9 @@ test('mocked playback planning and capacity error states', async ({ page }, test
     await page.screenshot({ path: testInfo.outputPath(`player-${viewport.name}.png`), fullPage: true });
     await page.getByRole('button', { name: /back to library/i }).click();
     await expect(page).toHaveURL(/\/home$/);
+    // Settle Home's catalog request before the next full navigation. WebKit can
+    // report an interrupted fetch as a page error even when the app cancels it.
+    await expect(page.getByRole('heading', { name: 'Your library is waiting' })).toBeVisible();
   }
   expect(errors).toEqual([]);
 
