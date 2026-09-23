@@ -16,6 +16,10 @@ var ErrAccessDenied = errors.New("catalog access denied")
 // AccessContent returns the policy inputs for a logical title. Library IDs are
 // derived from every present physical source, rather than the current primary.
 func (c *Catalog) AccessContent(kind, id string) (access.Content, bool, error) {
+	return c.accessContentContext(context.Background(), kind, id)
+}
+
+func (c *Catalog) accessContentContext(ctx context.Context, kind, id string) (access.Content, bool, error) {
 	if id == "" {
 		return access.Content{}, false, nil
 	}
@@ -59,7 +63,7 @@ func (c *Catalog) AccessContent(kind, id string) (access.Content, bool, error) {
 	if kind == "series" {
 		query = `SELECT DISTINCT x.library_id FROM catalog_items i JOIN catalog_physical_files f ON f.catalog_id=i.id JOIN library_locations x ON x.id=f.location_id WHERE i.series_id=? AND i.merged_into='' AND f.present=1 ORDER BY x.library_id`
 	}
-	rows, err := c.db.Query(query, id)
+	rows, err := c.db.Reader().QueryContext(ctx, query, id)
 	if err != nil {
 		return access.Content{}, false, fmt.Errorf("load catalog access libraries: %w", err)
 	}
@@ -77,7 +81,7 @@ func (c *Catalog) AccessContent(kind, id string) (access.Content, bool, error) {
 	if metadataID == "" {
 		return content, true, nil
 	}
-	fields, err := c.db.Query(`SELECT field,value FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field IN ('tags','content_rating')`, metadataKind, metadataID)
+	fields, err := c.db.Reader().QueryContext(ctx, `SELECT field,value FROM catalog_metadata_fields WHERE catalog_kind=? AND catalog_id=? AND field IN ('tags','content_rating')`, metadataKind, metadataID)
 	if err != nil {
 		return access.Content{}, false, fmt.Errorf("load catalog access metadata: %w", err)
 	}
