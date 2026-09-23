@@ -31,7 +31,7 @@ Critical path: prove current whole-library view → bounded policy-aware catalog
 
 Invalidation map: catalog/query changes invalidate catalog and HTTP access/count/order tests and fixture budget; HTTP contract changes invalidate typed client, browse tests, and docs; UI state changes invalidate focus, cancellation, desktop/mobile browser checks; schema changes invalidate SQLite upgrade tests. Run full affected gates once on the frozen unit, not after each slice.
 
-## [ ] 001 — Return bounded, stable, authorized viewer pages
+## [x] 001 — Return bounded, stable, authorized viewer pages
 
 ### Outcome and requirement trace
 
@@ -65,7 +65,7 @@ Atomic commit: bounded catalog and HTTP page contract. Delivery unit 1, standalo
 
 The server returns at most the validated page limit per section, no denied title/section/count leaks, repeated requests use consistent order, and request cancellation propagates to SQL.
 
-## [ ] 002 — Load section pages into the existing virtualized viewer
+## [x] 002 — Load section pages into the existing virtualized viewer
 
 ### Outcome and requirement trace
 
@@ -99,7 +99,7 @@ Atomic commit: incremental viewer and focused accessibility proofs. Delivery uni
 
 A large catalog is discoverable without full-library downloads and loading does not steal keyboard focus or show stale results.
 
-## [ ] 003 — Verify production contract, scale and recovery
+## [x] 003 — Verify production contract, scale and recovery
 
 ### Outcome and requirement trace
 

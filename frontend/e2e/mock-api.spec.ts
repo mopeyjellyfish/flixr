@@ -40,6 +40,60 @@ async function mock(page: Page, handler: (path: string, method: string, query: s
   });
 }
 
+for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
+  test(`bounded browse paging retains keyboard focus and recovers: ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const alpha = { ...film, listed: false };
+    const beta = { ...series, listed: false };
+    const genre = { ...film, id: 'genre-1', title: 'Drama title', listed: false };
+    let attempts = 0;
+    await mock(page, (path, _method, query) => {
+      if (path.endsWith('/setup/status')) return { json: ready };
+      if (path.endsWith('/profiles')) return { json: { profiles: [{ id: 'viewer', name: 'Viewer', protected: false }] } };
+      if (path.endsWith('/select')) return { json: {} };
+      if (path.endsWith('/catalog/view')) {
+        if (query.includes('section=Drama')) return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'Drama', items: [genre] }] } };
+        if (query.includes('cursor=next')) {
+          attempts += 1;
+          return attempts === 1 ? { status: 500, json: { error: { code: 'request_failed' } } } : { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [beta] }] } };
+        }
+        return { json: { preference: { view: 'rows', sort: 'title' }, sections: [{ name: 'New', items: [alpha], next_cursor: 'next' }, { name: 'Drama', items: [], next_cursor: 'drama-next' }] } };
+      }
+      return undefined;
+    });
+    await open(page, '/home');
+    const firstCard = page.getByTestId('card-film-1');
+    await firstCard.focus();
+    await firstCard.press('ArrowRight');
+    const load = page.getByRole('button', { name: 'Load more New' });
+    await expect(load).toBeFocused();
+    await load.press('Enter');
+    await expect(page.getByRole('alert')).toContainText('More titles could not be loaded');
+    await expect(page.getByTestId('card-film-1')).toBeVisible();
+    const retry = page.getByRole('button', { name: 'Retry New' });
+    await retry.focus();
+    await retry.press('Enter');
+    await expect(page.getByTestId('card-series-1')).toBeVisible();
+    const completed = page.getByRole('button', { name: 'All New loaded' });
+    await expect(completed).toBeFocused();
+    await completed.press('ArrowLeft');
+    const secondCard = page.getByTestId('card-series-1');
+    await expect(secondCard).toBeFocused();
+    await secondCard.press('ArrowDown');
+    const genreLoad = page.getByRole('button', { name: 'Load more Drama' });
+    await expect(genreLoad).toBeFocused();
+    await genreLoad.press('Enter');
+    await expect(page.getByTestId('card-genre-1')).toBeVisible();
+    await page.getByRole('button', { name: 'All Drama loaded' }).press('ArrowLeft');
+    await expect(page.getByTestId('card-genre-1')).toBeFocused();
+    await expect(page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).resolves.toBeTruthy();
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`bounded-home-${viewport.name}.png`), fullPage: true });
+  });
+}
+
 test('mocked owner configures and runs a verified backup', async ({ page }, testInfo) => {
   await mock(page, (path, method, _query, body) => {
     if (path.endsWith('/setup/status')) return { json: ready };
