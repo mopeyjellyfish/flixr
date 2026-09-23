@@ -67,8 +67,9 @@ export type MediaVersionGroup = { id: string; logical_title_id: string; title: s
 export type MediaVersionGroups = { groups: MediaVersionGroup[]; candidates: MediaVersionCandidate[]; total: number; next_offset?: number };
 export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dismissed?: boolean };
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
-export type ViewerSection = { name: string; items: ViewerItem[] };
-export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
+export type ViewerSection = { name: string; items: ViewerItem[]; next_cursor?: string };
+export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[]; next_cursor?: string };
+export type ViewerProfileState = { listed: boolean; continue_watching_dismissed: boolean };
 export type Episode = Omit<CatalogItem, 'kind' | 'episode_order'> & { kind: 'episode'; season: number; episode: number; episode_order?: EpisodeOrderPosition };
 export type EpisodeSequence =
   | { state: 'next'; episode: Episode; selected_version_id?: string }

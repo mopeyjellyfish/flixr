@@ -2,9 +2,9 @@ package web
 
 import (
 	"errors"
-	"net/http"
-
 	"github.com/mopeyjellyfish/flixr/backend/catalog"
+	"net/http"
+	"strconv"
 )
 
 func (s *Server) viewer(w http.ResponseWriter, r *http.Request) {
@@ -12,16 +12,47 @@ func (s *Server) viewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile, _ := s.house.Profile(s.session(r))
-	model, err := s.catalog.Viewer(profile.ID, r.URL.Query().Get("media"))
-	if errors.Is(err, catalog.ErrInvalidViewerMode) {
+	policy, ok := s.requestPolicy(r)
+	if !ok {
+		fail(w, http.StatusForbidden, "profile_required")
+		return
+	}
+	stateKind, stateID := r.URL.Query().Get("state_kind"), r.URL.Query().Get("state_id")
+	if stateKind != "" || stateID != "" {
+		if stateKind == "" || stateID == "" {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		if s.catalog.IsMediaVersionMember(stateKind, stateID) {
+			fail(w, http.StatusNotFound, "catalog_not_found")
+			return
+		}
+		state, err := s.catalog.ViewerItemState(r.Context(), profile.ID, stateKind, stateID, policy)
+		if errors.Is(err, catalog.ErrCatalogNotFound) || errors.Is(err, catalog.ErrAccessDenied) {
+			fail(w, http.StatusNotFound, "catalog_not_found")
+			return
+		}
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "catalog_query_failed")
+			return
+		}
+		write(w, http.StatusOK, map[string]any{"state": state})
+		return
+	}
+	limit := 48
+	if value := r.URL.Query().Get("limit"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		limit = parsed
+	}
+	model, err := s.catalog.ViewerPage(r.Context(), profile.ID, r.URL.Query().Get("media"), r.URL.Query().Get("section"), r.URL.Query().Get("cursor"), limit, policy)
+	if errors.Is(err, catalog.ErrInvalidViewerMode) || errors.Is(err, catalog.ErrInvalidViewerPage) {
 		fail(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "catalog_query_failed")
-		return
-	}
-	model, err = s.filterViewer(r, model)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "catalog_query_failed")
 		return
