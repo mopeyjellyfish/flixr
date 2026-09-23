@@ -12,7 +12,7 @@ import { BackupPanel } from './BackupPanel';
 import { LibrariesSection, type LibraryActions, type ScanActions } from './Libraries';
 import { IdentityRepair, MetadataRepair, ProviderStatus, TMDBForm } from './Metadata';
 import { MediaVersions } from './MediaVersions';
-import { ConnectedScreens, PlaybackPanel } from './Playback';
+import { ConnectedScreens, PlaybackActivity, PlaybackPanel } from './Playback';
 import { EpisodeOrder } from './EpisodeOrder';
 
 type OwnerProps = {
@@ -42,6 +42,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
   const [playbackSettings, setPlaybackSettings] = useState<PlaybackSettings>();
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus>();
   const [screens, setScreens] = useState<ScreenPresence[]>([]);
+  const [playbackActivityRefresh, setPlaybackActivityRefresh] = useState(0);
   const [notice, setNotice] = useState('');
   const [ownerRequired, setOwnerRequired] = useState(false);
   const [locked, setLocked] = useState<Set<string>>(new Set());
@@ -79,6 +80,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
       const [playback, connected] = await Promise.all([api.playbackStatus(), api.ownerScreens()]);
       setPlaybackStatus(playback);
       setScreens(connected.screens ?? []);
+      setPlaybackActivityRefresh((current) => current + 1);
       setNotice('Activity updated.');
     } catch { setNotice('Activity is unavailable. Try refreshing again.'); }
   };
@@ -248,6 +250,7 @@ export function Owner({ onLogout, onBrowse }: OwnerProps) {
           <section id="playback" className="owner-section" aria-labelledby="playback-title">
             <div className="section-head"><div><h2 id="playback-title">Playback & screens</h2><p>Compatible files play directly. FFmpeg handles files that need conversion.</p></div><LoadingButton className="quiet-button" onAction={refreshActivity} pendingLabel="Refreshing…" successLabel="Refresh activity">Refresh activity</LoadingButton></div>
             <ConnectedScreens screens={screens} />
+            <PlaybackActivity confirm={confirm} refreshKey={playbackActivityRefresh} onOwnerRequired={requireOwner} />
             {playbackSettings && <PlaybackPanel settings={playbackSettings} status={playbackStatus} onChange={setPlaybackSettings} onSubmit={savePlayback} locked={locked} />}
           </section>
           <section id="metadata" className="owner-section" aria-labelledby="metadata-title">

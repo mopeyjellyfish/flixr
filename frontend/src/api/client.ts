@@ -1,4 +1,4 @@
-import { ApiError, type ActiveSession, type BackupJob, type BackupPolicy, type CatalogItem, type CatalogPage, type EpisodeOrderDetail, type EpisodeOrderEntry, type EpisodeOrderGroup, type EpisodeOrderKind, type EpisodeOrderSeries, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MediaVersion, type MediaVersionGroup, type MediaVersionGroups, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type ProfileAccessPolicy, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type VersionCapabilities, type ViewerModel, type ViewerPreference } from '../core/api';
+import { ApiError, type ActiveSession, type BackupJob, type BackupPolicy, type CatalogItem, type CatalogPage, type EpisodeOrderDetail, type EpisodeOrderEntry, type EpisodeOrderGroup, type EpisodeOrderKind, type EpisodeOrderSeries, type EpisodeSequence, type HistoryPage, type IdentityMerge, type IdentityRepairs, type Library, type LibraryLocation, type LocationChangePreview, type MediaVersion, type MediaVersionGroup, type MediaVersionGroups, type MetadataCandidate, type MetadataField, type MetadataTarget, type OwnerRoots, type OwnerSetup, type PlaybackActivityPage, type PlaybackCapabilities, type PlaybackPlan, type PlaybackSettings, type PlaybackStatus, type Profile, type ProfileAccessPolicy, type Rating, type Scan, type ScanJob, type ScanJobFile, type ScanPolicy, type SeriesDetail, type SettingsInventory, type SetupStatus, type SetupStep, type TMDBSettings, type VersionCapabilities, type ViewerModel, type ViewerPreference, type ViewerProfileState } from '../core/api';
 import type { ScreenPresence } from '../core/screens';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -98,6 +98,8 @@ export const api = {
   playbackSettings: () => request<PlaybackSettings>('/owner/settings/playback'),
   savePlaybackSettings: (settings: PlaybackSettings) => request<{ settings: PlaybackSettings; restart_required: boolean }>('/owner/settings/playback', { method: 'PUT', body: JSON.stringify(settings) }),
   playbackStatus: () => request<PlaybackStatus>('/owner/playback/status'),
+  playbackActivity: (cursor = '', signal?: AbortSignal) => request<PlaybackActivityPage>(`/owner/playback/activity?limit=24${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal }),
+  stopOwnerPlaybackSession: (ownerHandle: string) => request<{ stopped: boolean }>(`/owner/playback/sessions/${encodeURIComponent(ownerHandle)}/stop`, { method: 'POST' }),
   home: (offset = 0) => request<CatalogPage>(`/catalog/home?offset=${offset}&limit=48`),
   history: (before = '') => request<HistoryPage>(`/history?limit=25${before ? `&before=${encodeURIComponent(before)}` : ''}`),
   clearHistory: () => request<{ id: string; undo_until: number }>('/history/clear', { method: 'POST' }),
@@ -105,10 +107,17 @@ export const api = {
   rating: (id: string) => request<{ rating: Rating | null }>(`/ratings/${encodeURIComponent(id)}`),
   setRating: (id: string, value: number) => request<{ saved: boolean }>(`/ratings/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   deleteRating: (id: string) => request<{ deleted: boolean }>(`/ratings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  search: (query: string, offset = 0) => request<CatalogPage>(`/catalog/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=48`),
+  search: (query: string, offset = 0, signal?: AbortSignal) => request<CatalogPage>(`/catalog/search?q=${encodeURIComponent(query)}&offset=${offset}&limit=48`, { signal }),
   item: (id: string) => request<CatalogItem>(`/catalog/items/${id}`),
   series: (id: string) => request<SeriesDetail>(`/catalog/series/${id}`),
-  viewer: (media: 'all' | 'film' | 'series') => request<ViewerModel>(`/catalog/view?media=${media}`),
+  viewer: (media: 'all' | 'film' | 'series', options: { section?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}) => {
+    const query = new URLSearchParams({ media });
+    if (options.limit) query.set('limit', String(options.limit));
+    if (options.section) query.set('section', options.section);
+    if (options.cursor) query.set('cursor', options.cursor);
+    return request<ViewerModel>(`/catalog/view?${query}`, { signal: options.signal });
+  },
+  viewerState: (kind: 'film' | 'series', id: string, signal?: AbortSignal) => request<{ state: ViewerProfileState }>(`/catalog/view?${new URLSearchParams({ media: 'all', state_kind: kind, state_id: id })}`, { signal }),
   saveViewerPreference: (media: 'all' | 'film' | 'series', preference: ViewerPreference) => request<ViewerPreference>(`/catalog/preferences/${media}`, { method: 'PUT', body: JSON.stringify(preference) }),
   setListed: (kind: 'film' | 'series', id: string, listed: boolean) => request<{ listed: boolean }>(`/catalog/list/${kind}/${encodeURIComponent(id)}`, { method: listed ? 'PUT' : 'DELETE' }),
   setContinueWatchingDismissed: (kind: 'film' | 'series', id: string, dismissed: boolean) => request<{ dismissed: boolean }>(`/catalog/continue-watching/${kind}/${encodeURIComponent(id)}`, { method: dismissed ? 'DELETE' : 'PUT' }),

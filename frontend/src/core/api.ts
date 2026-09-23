@@ -67,8 +67,9 @@ export type MediaVersionGroup = { id: string; logical_title_id: string; title: s
 export type MediaVersionGroups = { groups: MediaVersionGroup[]; candidates: MediaVersionCandidate[]; total: number; next_offset?: number };
 export type ViewerItem = CatalogItem & { listed: boolean; continue_watching_dismissed?: boolean };
 export type ViewerPreference = { view: 'rows' | 'grid'; sort: 'title' | 'year' | 'added' | 'watched' };
-export type ViewerSection = { name: string; items: ViewerItem[] };
-export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[] };
+export type ViewerSection = { name: string; items: ViewerItem[]; next_cursor?: string };
+export type ViewerModel = { preference: ViewerPreference; sections?: ViewerSection[]; items?: ViewerItem[]; next_cursor?: string };
+export type ViewerProfileState = { listed: boolean; continue_watching_dismissed: boolean };
 export type Episode = Omit<CatalogItem, 'kind' | 'episode_order'> & { kind: 'episode'; season: number; episode: number; episode_order?: EpisodeOrderPosition };
 export type EpisodeSequence =
   | { state: 'next'; episode: Episode; selected_version_id?: string }
@@ -90,6 +91,9 @@ export type CatalogPage = { items: CatalogItem[]; total?: number; next?: number 
 export type PlaybackSettings = { segment_dir: string; generation_bytes: number; global_bytes: number; max_generations: number };
 export type PlaybackGeneration = { id: string; catalog_id: string; kind: 'remux' | 'transcode'; start_ms: number; leases: number; bytes: number; running: boolean; started_at: number };
 export type PlaybackStatus = { settings: PlaybackSettings; generations: PlaybackGeneration[] };
+export type PlaybackActivitySession = { owner_handle: string; catalog_id: string; title: string; kind: 'direct' | 'remux' | 'transcode'; reason: string; audio_stream_index?: number; audio_external?: boolean; subtitle_stream_index?: number; subtitle_external?: boolean; quality_mode?: 'auto' | 'data_saver' | 'original'; width?: number; height?: number; video_bitrate?: number; started_at: number; device: string };
+export type PlaybackActivityCapacity = { max_generations: number; starting: number; active_sessions: number; generation_bytes: number; global_bytes: number; cache_bytes: number; generations: PlaybackGeneration[] };
+export type PlaybackActivityPage = { capacity: PlaybackActivityCapacity; sessions: PlaybackActivitySession[]; next_cursor?: string };
 export type EffectiveSetting = { key: string; category: string; scope: string; default: string; environment: string; file_secret: string; persistence: string; restart: string; valid: string; secret: boolean; advanced: boolean; value: string; source: 'default' | 'saved' | 'environment'; pending_value?: string; pending_source?: 'environment'; mutable: boolean };
 export type SettingsInventory = { settings: EffectiveSetting[] };
 export type Scan = { id?: string; status: 'running' | 'success' | 'partial' | 'failed' | string; scanned: number; total?: number; skipped?: number; failed: number; unmatched: number; message?: string; finished_at?: number };
@@ -180,7 +184,7 @@ export function messageFor(code: string): string {
     playback_version_incompatible: 'The selected version is not compatible with this browser.',
     playback_capability_unknown: 'This browser reported an unsupported playback capability. Update the browser or use a supported device.',
     ffmpeg_unavailable: 'FFmpeg is unavailable. Install it, then recheck readiness.',
-    playback_capacity: 'Flixr is at its playback limit. Try again after another stream stops.',
+    playback_capacity: 'Flixr is at its playback limit. Stop another compatibility stream or ask the owner to review playback limits.',
     playback_preparing: 'This local stream is already preparing. Try again in a moment.',
     playback_failed: 'Flixr could not prepare this title for playback.',
     invalid_playback_settings: 'Playback limits are invalid. Check the directory and byte limits.',

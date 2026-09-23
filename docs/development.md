@@ -42,6 +42,20 @@ browser request shows its support ID; include that ID only when you choose to
 share the archive with support. The records are in memory, so restarting Flixr
 clears them. See [SUPPORT.md](../SUPPORT.md) before opening a public issue.
 
+## Owner playback activity
+
+The owner-only **Playback & screens** section shows a bounded live page of direct,
+remux, and transcode sessions plus configured generation and cache capacity. The
+page uses a separate in-memory owner handle to stop one exact session. It does not
+show playback bearer IDs, media paths, input URLs, credentials, or FFmpeg logs.
+Unbound sessions are labelled **Unknown device**. Activity is a live view rather
+than a snapshot; refresh from the first page after sessions change.
+
+Mocked Chromium checks cover the owner activity section at 1440×900 and 390×844,
+including exact Stop confirmation and the resulting empty state. The screenshots
+were inspected against `DESIGN.md`; the mismatch ledger is empty. These mocks do
+not prove production media playback or a real bound device.
+
 ## Development demo
 
 For UI development with live reload and the same 50-film / 50-show catalogue:
@@ -157,6 +171,51 @@ relay. The main browser context rejects requests to external origins. It also ch
 owner state after restart. The command removes only its own temporary containers,
 network, image, and data volume. Screenshots and traces go to
 `output/playwright/offline/`.
+
+### Bounded catalog viewer
+
+`GET /api/v1/catalog/view` returns a bounded, profile-authorized live view. The
+request accepts `media=all|film|series`, an optional section name, an opaque
+`cursor`, and `limit` from 1 through 100 (default 48). Grid responses contain
+`items` and an optional `next_cursor`. Row responses contain bounded `sections`;
+each section has `items` and its own optional `next_cursor`. Request a later row
+page with the same media, section, profile policy, and saved preference. A
+malformed cursor or a cursor whose profile, policy, media, section, view, or sort
+binding changed returns `400 invalid_request`.
+
+The bounded profile-state form uses `state_kind=film|series` and `state_id` on
+the same route. It returns only My List and Continue Watching dismissal state
+for that authorized title, so search and direct details do not preload a viewer
+model.
+
+Authorization is applied before page boundaries. Responses do not include a
+full-library total. Ordering is stable for unchanged data and uses title kind
+and catalog ID tie-breakers. This is a live view rather than a snapshot: an
+independent metadata or progress edit can reorder later pages, so refresh from
+the first page after a viewer-owned mutation.
+
+The focused fixture `TestBoundedViewerPayloadAtCatalogScale` returned 48 items
+and 10,950 JSON bytes at both 10,000 and 100,000 titles. One measured run
+reported 11.9 ms and 102.7 ms for unrestricted first pages; alternating
+denied tags returned 48 authorized items and 10,955 bytes in 29.7 ms and
+306.5 ms. An all-denied library returned zero items in 28.3 ms and 291.2 ms.
+Results vary by machine and cache. `TestViewerPolicyQueryPlan` explains the
+representative film/series policy predicate: physical-file lookups use
+`catalog_physical_files_catalog`, metadata lookups use the unique target key,
+and the combined title order uses a temporary B-tree. Run both from `backend`:
+
+```bash
+go test ./catalog -run 'TestBoundedViewerPayloadAtCatalogScale|TestViewerPolicyQueryPlan' -count=1 -v
+```
+
+Mocked browser proof covers a 1440×900 desktop and 390×844 phone on `/home`:
+keyboard-only arrows reach the next-page control and an empty genre rail;
+Enter loads pages, a failed fetch retries, focus stays on a stable control and
+returns to the appended card, and no horizontal document overflow occurs.
+Screenshots were inspected against `DESIGN.md`; the mismatch ledger is empty.
+These mocked checks do not prove production media or devices. Chromium and
+WebKit passed the full mocked suite; Firefox remained unverified because its
+local runner stalled. The browser suite is not production acceptance evidence.
 
 ### Artwork cache maintenance
 
