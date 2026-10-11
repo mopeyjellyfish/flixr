@@ -102,7 +102,7 @@ jobs:
         working-directory: frontend
       - name: Upload mocked matrix evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flixr-mocked-matrix-evidence
           path: frontend/test-results
@@ -113,7 +113,7 @@ jobs:
           bash scripts/metadata-acceptance.sh
       - name: Upload metadata acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flixr-metadata-acceptance-evidence
           path: output/playwright/metadata
@@ -139,7 +139,7 @@ jobs:
           FLIXR_ACCEPTANCE_URL=http://127.0.0.1:8787 FLIXR_SETUP_TOKEN="$FLIXR_SETUP_TOKEN" FLIXR_FILMS_ROOT="$media_root/films" FLIXR_TV_ROOT="$media_root/tv" npm --prefix ../frontend run test:e2e -- --project=chromium-production
       - name: Upload production acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flixr-production-acceptance-evidence
           path: frontend/test-results
@@ -148,7 +148,7 @@ jobs:
         run: python3 scripts/episode-order-acceptance.py --binary bin/flixr --output output/episode-order-acceptance.json
       - name: Upload episode order acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flixr-episode-order-acceptance-evidence
           path: output/episode-order-acceptance.json
@@ -157,7 +157,7 @@ jobs:
         run: make test-offline
       - name: Upload offline acceptance evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: flixr-offline-acceptance-evidence
           path: output/playwright/offline
