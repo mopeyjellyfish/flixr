@@ -6,7 +6,7 @@ RUN npm --prefix frontend ci
 COPY frontend frontend
 RUN npm --prefix frontend run build:embed
 
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS backend-build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS backend-build
 WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
